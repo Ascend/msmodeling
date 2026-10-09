@@ -70,6 +70,7 @@ import yaml
 from ... import config
 from ...device import DeviceProfile
 from ...ops.mla import local_mla_phase_token_counts
+from ..op_invoke_info import get_named_args
 from .backend_projector import CANNBackendProjector
 from .data_source import (
     DataSourcePerformanceModel,
@@ -1457,18 +1458,18 @@ def _decompose_mla_projection_postprocess(
 ) -> Optional[List[SubKernelSpec]]:
     if len(op_invoke_info.args) < 2:
         return None
-    attention_output, W_UV = op_invoke_info.args
+    attention_output, w_uv = op_invoke_info.args
     if attention_output.shape[0] == 0:
         return None
-    input_dtypes = _mla_projection_input_dtypes(attention_output, W_UV)
+    input_dtypes = _mla_projection_input_dtypes(attention_output, w_uv)
     if input_dtypes is None:
         return None
     return [
         SubKernelSpec(
             kernel_type="TransposeBatchMatMul",
             input_shapes=[
-                (W_UV.shape[0], attention_output.shape[0], W_UV.shape[1]),
-                tuple(W_UV.shape),
+                (w_uv.shape[0], attention_output.shape[0], w_uv.shape[1]),
+                tuple(w_uv.shape),
             ],
             dtype=input_dtypes[0],
             input_dtypes=input_dtypes,
@@ -1541,6 +1542,7 @@ def _decompose_mlapo_common(
     args = op_invoke_info.args
     if len(args) < min_args:
         return None
+    named = get_named_args(op_invoke_info)
 
     # The opaque MLAPO preprocess kernel is a Decode-only profiling signature.
     # A batch which explicitly mixes Prefill and Decode requests, or carries
@@ -1549,10 +1551,10 @@ def _decompose_mlapo_common(
     if mapping.get("_runtime_phase") in {"mixed", "invalid"}:
         return None
 
-    hidden_states = args[0]
-    q_a_proj = args[3]
-    q_b_proj = args[5]
-    kv_a_proj = args[6]
+    hidden_states = named["hidden_states"]
+    q_a_proj = named["q_a_proj_weight"]
+    q_b_proj = named["q_b_proj_weight"]
+    kv_a_proj = named["kv_a_proj_weight"]
 
     if hidden_states is None or q_a_proj is None or q_b_proj is None or kv_a_proj is None:
         return None
@@ -1568,10 +1570,10 @@ def _decompose_mlapo_common(
     fused_proj_dim = q_lora_rank + kv_proj_dim
 
     # Some versioned stacks expose the sequence-parallel physical kernels for
-    # MLAPO only when SP is enabled; their profiling shapes use TP-local tokens
-    # while the TensorCast fused op retains the logical/global token axis.  This
-    # projection is mapping opt-in and runtime guarded so it cannot silently
-    # rewrite ordinary MLAPO or Decode shapes.
+    # MLAPO only when SP is enabled; their profiling shapes use TP-local tokens.
+    # The activation axis is already rank-local too (SP rewrites it to T/TP), but
+    # the projection below stays mapping opt-in and runtime guarded so it cannot
+    # silently rewrite ordinary MLAPO or Decode shapes.
     decomposer_options = mapping.get("decomposer_options", {})
     visible_regime = decomposer_options.get("visible_kernel_regime", {})
     runtime_sequence_parallel = bool(mapping.get("_runtime_sequence_parallel"))
@@ -1579,11 +1581,11 @@ def _decompose_mlapo_common(
         opaque_kernel = decomposer_options.get("opaque_kernel")
         if matmul_kernel_type != "QuantBatchMatmulV3" or not isinstance(opaque_kernel, dict):
             return None
-        num_heads = args[8]
-        qk_nope_head_dim = args[10]
-        qk_rope_head_dim = args[11]
-        kv_lora_rank = args[12]
-        q_lora_rank_arg = args[13]
+        num_heads = named["num_heads"]
+        qk_nope_head_dim = named["qk_nope_head_dim"]
+        qk_rope_head_dim = named["qk_rope_head_dim"]
+        kv_lora_rank = named["kv_lora_rank"]
+        q_lora_rank_arg = named["q_lora_rank"]
         quantized_weights = all(
             isinstance(weight, torch.Tensor) and weight.dtype == torch.int8
             for weight in (q_a_proj, q_b_proj, kv_a_proj)
@@ -1631,11 +1633,34 @@ def _decompose_mlapo_common(
     if runtime_sequence_parallel and decomposer_options.get("projection_token_partition") == "tp":
         if not isinstance(tp_size, int) or tp_size < 1:
             return None
-        # Sequence parallel partitions an uneven token count across ranks with
-        # at most one token of skew.  Model the busiest rank so arbitrary
-        # request lengths (for example 27K / TP32) do not lose the physical
-        # MLAPO decomposition merely because the division is not exact.
-        physical_tokens = math.ceil(num_tokens / tp_size)
+        # ``num_tokens`` comes off the activation, and SequenceParallelPass
+        # rewrites activations to T/TP while deliberately leaving the global
+        # ``num_prefill_tokens`` / ``num_decode_tokens`` counters untouched (see
+        # ``local_mla_phase_token_counts`` in ops/mla.py). Dividing it here would
+        # therefore apply the token partition a second time and leave the specs
+        # from this function disagreeing with the absorbed-projection specs, which
+        # already treat the same tensor as local. Resolve idempotently instead: a
+        # genuine global axis is divided once, an already-local axis is kept.
+        # Model the busiest rank so arbitrary request lengths (for example
+        # 27K / TP32) do not lose the physical MLAPO decomposition merely because
+        # the division is not exact.
+        extra = get_named_args(op_invoke_info, min_args=min_args)
+        prefill = extra.get("num_prefill_tokens")
+        decode = extra.get("num_decode_tokens")
+        global_tokens = (prefill if isinstance(prefill, int) else 0) + (decode if isinstance(decode, int) else 0)
+        resolved = _sequence_parallel_local_token_count(
+            runtime_tokens=int(num_tokens),
+            global_query_tokens=global_tokens,
+            tp_size=tp_size,
+        )
+        if resolved is not None:
+            physical_tokens = resolved
+        else:
+            # The phase counters are unavailable (a legacy op built from the
+            # 20-argument prefix alone), so the runtime axis cannot be
+            # disambiguated. Keep the historical partition instead of silently
+            # changing the physical shape of ops that predate the extended args.
+            physical_tokens = math.ceil(num_tokens / tp_size)
 
     # Fix MISS #1: QuantBatchMatmulV3 activation dtype is INT8 (DynamicQuant runs
     # before QBMV3 on NPU). BF16 path (MatMulV2) keeps the original dtype_str.
@@ -1646,8 +1671,8 @@ def _decompose_mlapo_common(
     # Compute the full weight shape from int params args[8]=num_heads, args[9]=qk_head_dim.
     # For the BF16 path (min_args=14), args[8] and args[9] may be None — fall back to
     # the actual tensor shape.
-    num_heads_int = args[8]
-    qk_head_dim_int = args[9]
+    num_heads_int = named["num_heads"]
+    qk_head_dim_int = named["qk_head_dim"]
     if (
         matmul_kernel_type == "QuantBatchMatmulV3"
         and isinstance(num_heads_int, int)
@@ -1662,8 +1687,8 @@ def _decompose_mlapo_common(
     else:
         q_b_proj_weight_shape = tuple(q_b_proj.shape)
 
-    q_a_norm_weight = args[4]
-    kv_a_norm_weight = args[7]
+    q_a_norm_weight = named["q_a_layernorm_weight"]
+    kv_a_norm_weight = named["kv_a_layernorm_weight"]
     if not isinstance(q_a_norm_weight, torch.Tensor) or not isinstance(kv_a_norm_weight, torch.Tensor):
         return None
 
@@ -1762,228 +1787,141 @@ def _decompose_mlapo_common(
     return specs
 
 
+def _decompose_mlapo_with_projections(op_invoke_info, mapping, kernel_type, min_args):
+    specs = _decompose_mlapo_common(op_invoke_info, mapping, kernel_type, min_args=min_args)
+    if specs is None:
+        return None
+    # The original argument prefix and legacy profiling lookup stay valid.
+    # Extended fused ops must additionally account for their absorbed linears.
+    extra = get_named_args(op_invoke_info, min_args=min_args)
+    kv_b = extra.get("kv_b_proj")
+    if kv_b is None:
+        return specs
+    # The opaque fused kernel is measured against its own runtime semantics, and
+    # that contract spans the W_UK absorb: it takes W_UK as an input and returns
+    # the absorbed Q (enable_inner_out). So do not reject it just because the
+    # frontend exposes absorbed projections, and never re-charge the absorb on
+    # top of it. The prefill kv_b projection is the only piece outside its
+    # boundary, so that one is still added below.
+    opaque_fused = any(spec.query_mode == "mlapo_preprocess" for spec in specs)
+    from ..op_invoke_info import OpInvokeInfo
+
+    named = get_named_args(op_invoke_info)
+    hidden = named["hidden_states"]
+    heads = named["num_heads"]
+    q_dim = named["qk_head_dim"]
+    rope = named["qk_rope_head_dim"]
+    latent = named["kv_lora_rank"]
+    prefill = extra.get("num_prefill_tokens", 0)
+    decode = extra.get("num_decode_tokens", 0)
+    quant = extra.get("projection_weight_scale") is not None
+    suffix = "_quant" if quant else ""
+    owned_projections = [
+        ("mla_kv_projection", hidden.new_empty((hidden.shape[0], latent)), kv_b, prefill, heads, decode),
+    ]
+    if not opaque_fused:
+        owned_projections.append(
+            (
+                "mla_q_absorb_projection",
+                hidden.new_empty((hidden.shape[0], heads, q_dim)),
+                extra["w_uk_t"],
+                decode,
+                rope,
+                prefill,
+            )
+        )
+    for name, activation, weight, tokens, layout, sibling in owned_projections:
+        if not tokens:
+            continue
+        info = OpInvokeInfo(
+            getattr(torch.ops.tensor_cast, name + suffix).default,
+            (activation, weight, tokens, layout, sibling),
+            {},
+            None,
+        )
+        projection = (_decompose_mla_projection_preprocess_quant if quant else _decompose_mla_projection_preprocess)(
+            info, mapping
+        )
+        if projection is None:
+            return None
+        specs.extend(projection)
+    return specs
+
+
 def _decompose_mlapo(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
-    """Decompose mlapo (BF16)."""
-    return _decompose_mlapo_common(op_invoke_info, mapping, "MatMulV2", min_args=14)
+    """Decompose MLAPO and any phase projections it owns."""
+    return _decompose_mlapo_with_projections(op_invoke_info, mapping, "MatMulV2", 14)
 
 
 def _decompose_mlapo_quant(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
-    """Decompose mlapo_quant."""
-    return _decompose_mlapo_common(op_invoke_info, mapping, "QuantBatchMatmulV3", min_args=20)
+    """Decompose quantized MLAPO and its phase projections."""
+    return _decompose_mlapo_with_projections(op_invoke_info, mapping, "QuantBatchMatmulV3", 20)
 
 
-def _decompose_dsa_indexer(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
-    """Decompose the GLM5 BF16 DSA indexer without using physical pool capacity.
-
-    Ordinary sub-kernel shapes come only from the semantic op tensors and
-    weights. LightningIndexer is queried with the local query work and the
-    effective sequence length; its preallocated cache dim0 is deliberately not
-    part of the semantic key.
-    """
-
-    args = op_invoke_info.args
-    if len(args) < 16:
-        return None
-
-    hidden_states, qa_normed = args[0], args[1]
-    indexer_cache, block_tables, seq_lens = args[4], args[6], args[7]
-    query_lens = args[16] if len(args) > 16 else None
-    wq_b_weight, wk_weight = args[8], args[9]
-    weights_proj_weight, k_norm_weight = args[10], args[11]
-    num_heads, head_dim, topk_limit = args[12], args[13], args[15]
-    tensors = (
-        hidden_states,
-        qa_normed,
-        indexer_cache,
-        block_tables,
-        seq_lens,
-        wq_b_weight,
-        wk_weight,
-        weights_proj_weight,
-        k_norm_weight,
-    )
-    if not all(isinstance(value, torch.Tensor) for value in tensors):
-        return None
-    if not all(isinstance(value, int) for value in (num_heads, head_dim, topk_limit)):
-        return None
-    if hidden_states.ndim not in (2, 3) or qa_normed.ndim not in (2, 3):
-        return None
-
-    dtype_str = DTYPE_MAP.get(hidden_states.dtype)
-    if dtype_str is None:
-        return None
-    num_tokens = int(hidden_states.numel() // hidden_states.shape[-1])
-    hidden_size = hidden_states.shape[-1]
-    qa_dim = qa_normed.shape[-1]
-
-    try:
-        effective_seq_len = int(seq_lens.float().mean().item())
-    except (RuntimeError, ValueError):
-        effective_seq_len = None
-
-    phase = _resolve_batch_phase(op_invoke_info, int(seq_lens.shape[0]))
-    if phase == "mixed":
-        logger.debug(
-            "DSA indexer op %s has mixed prefill/decode requests; falling back to analytic model (is_decode_values=%s)",
-            op_invoke_info.func,
-            op_invoke_info.kwargs.get("is_decode_values"),
+def _decompose_index_cache_write(op_invoke_info, mapping):
+    values, cache, indices = op_invoke_info.args[:3]
+    return [
+        SubKernelSpec(
+            kernel_type="ScatterNdUpdateAiCore",
+            alternate_kernel_types=["ScatterNdUpdate"],
+            input_shapes=[tuple(cache.shape), (values.shape[0], 1), tuple(values.shape)],
+            dtype=DTYPE_MAP.get(values.dtype),
+            query_mode="scatter_cache_write",
+            cache_params={"tokens": values.shape[0], "feature_dim": values.shape[1]},
         )
-        return None
-    if phase == "invalid":
-        return None
-    if phase is None:
-        query_lens = args[16] if len(args) > 16 and isinstance(args[16], torch.Tensor) else None
-        phase = _infer_attention_phase(
-            query_lens,
-            num_tokens=num_tokens,
-            batch_size=int(seq_lens.numel()),
-        )
-        if phase in {"mixed", "invalid"}:
-            return None
-
-    indexer_tokens = num_tokens
-    runtime_vectors = None
-    tp_size = mapping.get("_runtime_tp_size")
-    if phase == "prefill" and mapping.get("_runtime_sequence_parallel") and isinstance(tp_size, int) and tp_size > 1:
-        global_query_tokens = sum(_tensor_int_values(query_lens) or [num_tokens])
-        local_tokens = _sequence_parallel_local_token_count(
-            runtime_tokens=num_tokens,
-            global_query_tokens=global_query_tokens,
-            tp_size=tp_size,
-        )
-        if local_tokens is None:
-            return None
-        indexer_tokens = local_tokens
-        runtime_vectors = _rank_zero_sparse_runtime_vectors(
-            seq_lens=seq_lens,
-            global_query_tokens=global_query_tokens,
-            local_query_tokens=indexer_tokens,
-            query_lens=query_lens if isinstance(query_lens, torch.Tensor) else None,
-            require_query_lens_for_multiple_requests=True,
-        )
-        if runtime_vectors is None:
-            logger.warning(
-                "DSA indexer op %s cannot recover per-request query boundaries for sequence-parallel profiling; "
-                "falling back to analytic model",
-                op_invoke_info.func,
-            )
-            return None
-
-    block_size = indexer_cache.shape[-2] if indexer_cache.ndim >= 3 else None
-    runtime_kv_lengths = runtime_vectors[1] if runtime_vectors is not None else None
-    active_seq_len = max(runtime_kv_lengths) if runtime_kv_lengths else effective_seq_len
-    active_cache_blocks = (
-        (active_seq_len + block_size - 1) // block_size
-        if active_seq_len is not None and isinstance(block_size, int) and block_size > 0
-        else None
-    )
-
-    kernel_tokens = indexer_tokens
-    wk_out = wk_weight.shape[0]
-    specs = [
-        SubKernelSpec(
-            kernel_type="MatMulV2",
-            input_shapes=[(kernel_tokens, hidden_size), tuple(wk_weight.shape)],
-            dtype=dtype_str,
-            tc_input_count=2,
-        ),
-        SubKernelSpec(
-            kernel_type="LayerNormV3",
-            input_shapes=[(kernel_tokens, wk_out), tuple(k_norm_weight.shape), tuple(k_norm_weight.shape)],
-            dtype="FLOAT",
-            input_dtypes=["FLOAT", "FLOAT", "FLOAT"],
-            tc_input_count=3,
-        ),
-        SubKernelSpec(
-            kernel_type="Cast",
-            input_shapes=[(kernel_tokens, head_dim)],
-            dtype=dtype_str,
-            tc_input_count=1,
-        ),
-        SubKernelSpec(
-            kernel_type="Cast",
-            input_shapes=[(kernel_tokens, head_dim)],
-            dtype=dtype_str,
-            tc_input_count=1,
-        ),
-        SubKernelSpec(
-            kernel_type="MatMulV2",
-            input_shapes=[(kernel_tokens, hidden_size), tuple(weights_proj_weight.shape)],
-            dtype=dtype_str,
-            tc_input_count=2,
-        ),
     ]
 
-    if wq_b_weight.dtype == torch.int8:
-        specs.extend(
-            [
-                SubKernelSpec(
-                    kernel_type="AscendQuantV2",
-                    alternate_kernel_types=["AscendQuantV2Aicore"],
-                    input_shapes=[(kernel_tokens, qa_dim)],
-                    dtype=dtype_str,
-                    tc_input_count=1,
-                ),
-                SubKernelSpec(
-                    kernel_type="QuantBatchMatmulV3",
-                    input_shapes=[(kernel_tokens, qa_dim), tuple(wq_b_weight.shape)],
-                    dtype="INT8",
-                    input_dtypes=["INT8", "INT8"],
-                    tc_input_count=2,
-                ),
-            ]
-        )
-    else:
-        specs.append(
-            SubKernelSpec(
-                kernel_type="MatMulV2",
-                input_shapes=[(kernel_tokens, qa_dim), tuple(wq_b_weight.shape)],
-                dtype=dtype_str,
-                tc_input_count=2,
-            )
-        )
 
-    specs.append(
-        SubKernelSpec(
-            kernel_type="ScatterNdUpdate",
-            alternate_kernel_types=["ScatterNdUpdateAiCore"],
-            input_shapes=[
-                (indexer_cache.numel() // head_dim, head_dim),
-                (num_tokens, 1),
-                (num_tokens, head_dim),
-            ],
-            dtype=dtype_str,
-            input_dtypes=[dtype_str, "INT32", dtype_str],
-            query_mode="scatter_cache_write",
-            cache_params={"tokens": num_tokens, "feature_dim": head_dim},
+def _decompose_dsa_indexer(op_invoke_info, mapping):
+    """Query only LightningIndexer; all preparation ops are separate events."""
+    q, weights, cache, tables, lengths, topk = op_invoke_info.args[:6]
+    if lengths is None:
+        return None
+    query_lens = op_invoke_info.args[6] if len(op_invoke_info.args) > 6 else op_invoke_info.kwargs.get("query_lens")
+    phase = _resolve_batch_phase(op_invoke_info, int(lengths.numel()))
+    if phase in {"mixed", "invalid"}:
+        return None
+    tokens, heads, dim = q.shape
+    try:
+        effective_seq_len = float(lengths.float().mean().item())
+    except (RuntimeError, ValueError):
+        return None
+    local_vectors = None
+    query_values = _tensor_int_values(query_lens)
+    if lengths.numel() > 1 and not query_values:
+        logger.warning("DSA indexer cannot recover per-request query boundaries without query_lens")
+        return None
+    if query_values and sum(query_values) != tokens:
+        local_vectors = _rank_zero_sparse_runtime_vectors(
+            seq_lens=lengths,
+            global_query_tokens=sum(query_values),
+            local_query_tokens=tokens,
+            query_lens=query_lens,
+            require_query_lens_for_multiple_requests=True,
         )
-    )
-    specs.append(
+        if local_vectors is None:
+            return None
+    return [
         SubKernelSpec(
-            kernel_type=mapping.get("primary_kernel_type", "LightningIndexer"),
-            alternate_kernel_types=mapping.get("alternate_kernel_types"),
+            kernel_type="LightningIndexer",
             input_shapes=[],
-            dtype=dtype_str,
+            dtype=DTYPE_MAP.get(q.dtype),
             query_mode="attention",
-            attention_params={
-                **_sparse_runtime_attention_params(
-                    work_tokens=indexer_tokens,
-                    work_heads=num_heads,
-                    head_dim=head_dim,
-                    seq_lens=seq_lens,
-                    avg_seq_len=effective_seq_len,
-                    topk=topk_limit,
-                    block_size=block_size,
-                    include_sparse_block_size=False,
-                    query_lengths_values=runtime_vectors[0] if runtime_vectors is not None else None,
-                    kv_lengths_values=runtime_kv_lengths,
-                ),
-                "active_cache_blocks": active_cache_blocks,
-            },
             is_attention=True,
+            attention_params=_sparse_runtime_attention_params(
+                work_tokens=tokens,
+                work_heads=heads,
+                head_dim=dim,
+                seq_lens=lengths,
+                avg_seq_len=effective_seq_len,
+                topk=topk,
+                block_size=cache.shape[-2],
+                include_sparse_block_size=False,
+                query_lengths_values=local_vectors[0] if local_vectors else query_values,
+                kv_lengths_values=local_vectors[1] if local_vectors else None,
+            ),
         )
-    )
-    return specs
+    ]
 
 
 COMPOSITE_DECOMPOSERS: Dict[
@@ -2009,6 +1947,7 @@ COMPOSITE_DECOMPOSERS: Dict[
     "tensor_cast.mlapo.default": _decompose_mlapo,
     "tensor_cast.mlapo_quant.default": _decompose_mlapo_quant,
     "tensor_cast.dsa_indexer.default": _decompose_dsa_indexer,
+    "tensor_cast.siso_reshape_and_cache.default": _decompose_index_cache_write,
 }
 
 
@@ -3034,8 +2973,11 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             }:
                 self.last_miss_reason = f"unsupported_runtime_phase:{func_str}:{runtime_phase}"
             elif visible_regime.get("requires_sequence_parallel") and not runtime_mapping["_runtime_sequence_parallel"]:
+                # Report the operator that actually missed. Hardcoding a single
+                # variant name here blamed ``mlapo_quant`` for a ``mlapo`` miss
+                # once the BF16 entry gained the same regime gate.
                 self.last_miss_reason = (
-                    "structural_mismatch:mlapo_quant:opaque_mla_preprocess:"
+                    f"structural_mismatch:{func_str}:opaque_mla_preprocess:"
                     "visible_kernel_regime_requires_sequence_parallel"
                 )
             else:

@@ -162,33 +162,20 @@ class TestKimiK3(unittest.TestCase):
             f"{test_name}: MoE expert computation (grouped_matmul) should be present in the operation trace",
         )
 
-    def _assert_split_mla_operators_present(self, result_dict: dict, phase: str, test_name: str = ""):
-        """Verify K3 executes the split MLA projection interface for this phase."""
+    def _assert_k3_mla_boundary(self, result_dict: dict, test_name: str = ""):
+        """Verify K3 retains its prolog instead of the generic projection ops."""
         table = result_dict["table_result"]
         self.assertIn(
             "tensor_cast.mla_merge_phase_outputs",
             table,
-            f"{test_name}: split MLA phase outputs should be merged",
+            f"{test_name}: MLA phase outputs should be merged",
         )
-        if phase == "prefill":
-            self.assertIn(
-                "tensor_cast.mla_kv_projection",
-                table,
-                f"{test_name}: prefill should project latent KV before attention",
-            )
-        elif phase == "decode":
-            self.assertIn(
-                "tensor_cast.mla_q_absorb_projection",
-                table,
-                f"{test_name}: decode should absorb Q before attention",
-            )
-            self.assertIn(
-                "tensor_cast.mla_v_up_projection",
-                table,
-                f"{test_name}: decode should up-project latent attention output",
-            )
-        else:
-            self.fail(f"Unsupported MLA phase: {phase}")
+        self.assertIn("tensor_cast.mla_prolog", table, f"{test_name}: K3 prolog should remain fused")
+        for operator_name in (
+            "tensor_cast.mla_kv_projection.default",
+            "tensor_cast.mla_q_absorb_projection.default",
+        ):
+            self.assertNotIn(operator_name, table, f"{test_name}: K3 should not use the generic MLA projection op")
 
     def test_kimi_k3_text_prefill(self):
         """
@@ -227,7 +214,7 @@ class TestKimiK3(unittest.TestCase):
         # Additional K3-specific operator checks
         result_dict = asdict(result) if isinstance(result, ModelRunnerMetrics) else result
         self._assert_k3_operators_present(result_dict, "test_kimi_k3_text_prefill")
-        self._assert_split_mla_operators_present(result_dict, "prefill", "test_kimi_k3_text_prefill")
+        self._assert_k3_mla_boundary(result_dict, "test_kimi_k3_text_prefill")
 
     def test_kimi_k3_text_decode(self):
         """
@@ -267,7 +254,7 @@ class TestKimiK3(unittest.TestCase):
         # Additional K3-specific operator checks
         result_dict = asdict(result) if isinstance(result, ModelRunnerMetrics) else result
         self._assert_k3_operators_present(result_dict, "test_kimi_k3_text_decode")
-        self._assert_split_mla_operators_present(result_dict, "decode", "test_kimi_k3_text_decode")
+        self._assert_k3_mla_boundary(result_dict, "test_kimi_k3_text_decode")
 
         # Verify KV cache is allocated for decode with context
         self.assertGreater(
@@ -658,6 +645,48 @@ class TestKimiK3Patches(unittest.TestCase):
 
         self.assertIs(result, expected_result)
         self.assertIs(captured_kwargs["is_decode_values"], phase_values)
+
+    def _make_k3_quantized_attention(self):
+        """Build a quantized K3 MLA stand-in: all three projection scales set."""
+        return SimpleNamespace(
+            _inner=SimpleNamespace(use_output_gate=True),
+            q_a_proj=SimpleNamespace(weight=torch.ones(2, 3)),
+            q_b_proj=SimpleNamespace(weight=torch.ones(2, 2)),
+            kv_a_proj_with_mqa=SimpleNamespace(weight=torch.ones(2, 3)),
+            q_a_layernorm=SimpleNamespace(weight=torch.ones(2)),
+            kv_a_layernorm=SimpleNamespace(weight=torch.ones(2)),
+            extract_qparams=lambda module: (module.weight, torch.ones(1), torch.zeros(1)),
+            _num_heads_per_rank=1,
+            qk_head_dim=2,
+            qk_nope_head_dim=1,
+            qk_rope_head_dim=1,
+            kv_lora_rank=2,
+            q_lora_rank=2,
+        )
+
+    def _call_k3_prolog_hook(self, hook, attention, *, enable_mlapo):
+        from tensor_cast import config
+
+        previous = config.compilation.fusion_patterns.enable_mlapo
+        config.compilation.fusion_patterns.enable_mlapo = enable_mlapo
+        try:
+            return hook(attention, torch.ones(2, 3), torch.ones(2, 1), torch.zeros(2, 1))
+        finally:
+            config.compilation.fusion_patterns.enable_mlapo = previous
+
+    def test_quantized_mla_prolog_preserves_k3_contract_for_both_switch_values(self):
+        attention = self._make_k3_quantized_attention()
+        prolog_outputs = tuple(object() for _ in range(6))
+        attention._compute_fused_mla_prolog = lambda *args, **kwargs: prolog_outputs
+
+        def original_compute_mla_prolog(*_args, **_kwargs):
+            self.fail("K3 retains its original quantized prolog independently of the generic switch")
+
+        hook = self._km._make_k3_mla_prolog_hook(original_compute_mla_prolog)
+        for enabled in (False, True):
+            with self.subTest(enable_mlapo=enabled):
+                result = self._call_k3_prolog_hook(hook, attention, enable_mlapo=enabled)
+                self.assertEqual(result, prolog_outputs[:4])
 
     def test_registered_mla_prolog_accepts_phase_metadata(self):
         """The real custom-op schema must accept the forwarded phase metadata."""

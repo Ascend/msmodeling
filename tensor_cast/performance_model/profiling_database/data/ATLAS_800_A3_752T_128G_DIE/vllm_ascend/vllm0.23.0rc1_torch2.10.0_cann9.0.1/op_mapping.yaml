@@ -625,7 +625,19 @@ operator_mappings:
   "tensor_cast.mlapo.default":
     composite: true
     decomposer: true
+    # The decomposer returns the MLAPO core plus the absorbed mla_kv_projection /
+    # mla_q_absorb_projection sub-kernels, so a miss on any one of them must miss
+    # the whole composite rather than silently charge the matched subset.
+    require_all_sub_kernels: true
     decomposer_options:
+      # Same SP token semantics as the quantized entry below. The partition
+      # resolves idempotently, so an already TP-local activation axis is kept.
+      projection_token_partition: tp
+      # Deliberately no visible_kernel_regime / opaque_kernel here. The profiling
+      # database only carries the int8-weight opaque MLAPO rows (Runtime
+      # weight_quantized = true, quant_mode = per_tensor_quant_asymm), so an
+      # opaque query would answer a BF16-weight operator with a quantized
+      # kernel's latency. BF16 must always decompose into its visible sub-kernels.
       kv_cache_query:
         mode: pool_dim0_agnostic
         block_size: 128

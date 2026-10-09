@@ -26,6 +26,8 @@ from tensor_cast.performance_model.profiling_database.interpolating_data_source 
 )
 from tensor_cast.performance_model.profiling_database.profiling_data_source import (
     ProfilingDataSource,
+    _decompose_index_cache_write,
+    _decompose_mla_projection_postprocess,
     _decompose_mla,
     _decompose_mla_quant,
     _decompose_mla_sparse,
@@ -1216,6 +1218,49 @@ class TestDecomposeMlapo:
         assert specs is not None
         assert _specs_for_kernel(specs, "MatMulV2")[0].input_shapes[0][0] == expected_local_tokens
 
+    @pytest.mark.parametrize(
+        ("activation_tokens", "global_prefill_tokens", "tp_size", "expected_local_tokens"),
+        [
+            # The runtime axis is still global, so it must be partitioned once.
+            (4096, 4096, 8, 512),
+            # SP already rewrote the activation to T/TP. Partitioning it again
+            # would query a bogus 64-token shape instead of the physical 512.
+            (512, 4096, 8, 512),
+        ],
+    )
+    def test_sequence_parallel_token_partition_is_idempotent(
+        self,
+        activation_tokens,
+        global_prefill_tokens,
+        tp_size,
+        expected_local_tokens,
+    ):
+        """Resolve whether the runtime token axis is already SP-local.
+
+        SequenceParallelPass rewrites activations to T/TP but leaves the global
+        ``num_prefill_tokens`` / ``num_decode_tokens`` counters untouched (see
+        ``local_mla_phase_token_counts``). Dividing unconditionally therefore
+        applies the partition twice and the MLAPO sub-kernels disagree with the
+        absorbed-projection specs, which treat the same tensor as local.
+        """
+        op = _make_op_info(
+            torch.ops.tensor_cast.mlapo_quant.default,
+            _make_mlapo_args(num_tokens=activation_tokens),
+        )
+        op.kwargs = {"num_prefill_tokens": global_prefill_tokens, "num_decode_tokens": 0}
+        specs = _decompose_mlapo_quant(
+            op,
+            {
+                "_runtime_tp_size": tp_size,
+                "_runtime_sequence_parallel": True,
+                "_runtime_phase": "prefill",
+                "decomposer_options": {"projection_token_partition": "tp"},
+            },
+        )
+
+        assert specs is not None
+        assert _specs_for_kernel(specs, "QuantBatchMatmulV3")[0].input_shapes[0][0] == expected_local_tokens
+
     def test_insufficient_args_returns_none(self):
         op = _make_op_info(
             torch.ops.tensor_cast.mlapo.default,
@@ -1981,7 +2026,7 @@ class TestMlaSparseAnalyticProperties:
             [True],
         )
 
-        assert prefill_op.get_memory_access_properties.call_args.kwargs["exclude_input_ids"] == {1, 2, 3, 4}
+        assert prefill_op.get_memory_access_properties.call_args.kwargs["exclude_input_ids"] == {0, 3, 4}
         assert prefill_properties.memory_read_bytes < decode_properties.memory_read_bytes
 
     def test_tiny_explicit_decode_and_missing_metadata_keep_decode_accounting(self):
@@ -1995,8 +2040,8 @@ class TestMlaSparseAnalyticProperties:
             1,
         )
 
-        assert explicit_op.get_memory_access_properties.call_args.kwargs["exclude_input_ids"] == {1, 2, 3, 4}
-        assert legacy_op.get_memory_access_properties.call_args.kwargs["exclude_input_ids"] == {1, 2, 3, 4}
+        assert explicit_op.get_memory_access_properties.call_args.kwargs["exclude_input_ids"] == {0, 3, 4}
+        assert legacy_op.get_memory_access_properties.call_args.kwargs["exclude_input_ids"] == {0, 3, 4}
         assert explicit_properties.memory_read_bytes == legacy_properties.memory_read_bytes
 
     def test_tiny_explicit_phase_controls_quant_analytic_ops(self):
@@ -2282,3 +2327,50 @@ class TestMlaSparseProfilingFallback:
         assert result is not None
         assert abs(result.latency_us - 30.0) < 0.1
         assert result.source == QuerySource.MEASURED
+
+
+@pytest.mark.parametrize("dtype, expected_dtype", [(torch.bfloat16, "DT_BF16"), (torch.int8, "INT8")])
+def test_index_cache_write_decomposition_preserves_storage_shape(dtype, expected_dtype):
+    values = torch.empty((3, 8), device="meta", dtype=dtype)
+    cache = torch.empty((4, 16, 8), device="meta", dtype=dtype)
+    indices = torch.empty((3,), device="meta", dtype=torch.int64)
+    info = _make_op_info(torch.ops.tensor_cast.siso_reshape_and_cache.default, (values, cache, indices))
+
+    specs = _decompose_index_cache_write(info, {})
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.kernel_type == "ScatterNdUpdateAiCore"
+    assert spec.alternate_kernel_types == ["ScatterNdUpdate"]
+    assert spec.input_shapes == [(4, 16, 8), (3, 1), (3, 8)]
+    assert spec.dtype == expected_dtype
+    assert spec.query_mode == "scatter_cache_write"
+    assert spec.cache_params == {"tokens": 3, "feature_dim": 8}
+
+
+@pytest.mark.parametrize("op", ["mla_v_up_projection", "mla_v_up_projection_quant"])
+def test_mla_projection_postprocess_decomposes_per_head_matmul(op):
+    activation = torch.empty((5, 2, 8), device="meta", dtype=torch.bfloat16)
+    weight = torch.empty((2, 8, 4), device="meta", dtype=torch.bfloat16)
+    info = _make_op_info(getattr(torch.ops.tensor_cast, op).default, (activation, weight))
+
+    specs = _decompose_mla_projection_postprocess(info, {})
+
+    assert len(specs) == 1
+    assert specs[0].kernel_type == "TransposeBatchMatMul"
+    assert specs[0].input_shapes == [(2, 5, 8), (2, 8, 4)]
+    assert specs[0].dtype == "DT_BF16"
+    assert specs[0].input_dtypes == ["DT_BF16", "DT_BF16"]
+
+
+@pytest.mark.parametrize("case", ["missing_weight", "empty_phase", "mixed_dtype", "unsupported_dtype"])
+def test_mla_projection_postprocess_rejects_unqueryable_inputs(case):
+    tokens = 0 if case == "empty_phase" else 5
+    activation_dtype = torch.complex64 if case == "unsupported_dtype" else torch.bfloat16
+    weight_dtype = torch.float32 if case == "mixed_dtype" else activation_dtype
+    activation = torch.empty((tokens, 2, 8), device="meta", dtype=activation_dtype)
+    weight = torch.empty((2, 8, 4), device="meta", dtype=weight_dtype)
+    args = (activation,) if case == "missing_weight" else (activation, weight)
+    info = _make_op_info(torch.ops.tensor_cast.mla_v_up_projection.default, args)
+
+    assert _decompose_mla_projection_postprocess(info, {}) is None

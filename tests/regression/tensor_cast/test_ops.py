@@ -202,39 +202,29 @@ def test_grouped_mxfp4_swiglu_quant_returns_payload_scale_and_bills_post_quant()
 
 
 def test_dsa_indexer_fp8_bills_score_shaping_gp_at_activation_dtype():
-    hidden_states = torch.empty((1, 2, 16), device="meta", dtype=torch.bfloat16)
-    qa_normed = torch.empty((1, 2, 4), device="meta", dtype=torch.bfloat16)
-    cos = torch.empty((2, 4), device="meta", dtype=torch.bfloat16)
+    query = torch.empty((2, 2, 8), device="meta", dtype=torch.bfloat16)
+    weights = torch.empty((2, 2), device="meta", dtype=torch.bfloat16)
     indexer_cache = torch.empty((1, 8, 8), device="meta", dtype=torch.float8_e4m3fn)
-    weights = [
-        torch.empty((4, 16), device="meta", dtype=torch.bfloat16),
-        torch.empty((8, 16), device="meta", dtype=torch.bfloat16),
-        torch.empty((2, 16), device="meta", dtype=torch.bfloat16),
-        torch.empty((8,), device="meta", dtype=torch.bfloat16),
-    ]
     args = (
-        hidden_states,
-        qa_normed,
-        cos,
-        cos,
+        query,
+        weights,
         indexer_cache,
-        torch.empty((2,), device="meta", dtype=torch.long),
         torch.empty((1, 1), device="meta", dtype=torch.long),
         torch.tensor([8]),
-        *weights,
-        2,
-        8,
         4,
-        4,
+        torch.tensor([2]),
     )
     op = torch.ops.tensor_cast.dsa_indexer.default
     out = op(*args)
     info = OpInvokeInfo(op, args, {}, out)
     properties = info.get_perf_properties()
 
-    # ReLU + q-scale + k-scale = 32 + 32 + 16 for this shape.
-    assert properties.compute_ops[torch.bfloat16].gp_ops == 328
+    # Two queries score eight cache rows on two heads. Scaling, ReLU,
+    # head weighting and reduction each cost 32 GP ops; weight scaling
+    # costs 4 and top-k selection costs 16. Preparation ops are external.
+    assert properties.compute_ops[torch.bfloat16].gp_ops == 148
     assert properties.compute_ops[torch.float8_e4m3fn].gp_ops == 0
+    assert properties.compute_ops[torch.float8_e4m3fn].mma_ops == 512
     assert AnalyticPerformanceModel(TEST_DEVICE).process_op(info).statistics[StatsKey.GP_OPS] > 0
 
 

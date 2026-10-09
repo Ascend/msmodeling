@@ -115,10 +115,11 @@ def test_kimi_k2_base_capture_organize_and_compare(
     stage_ids = {finding.stage_id for finding in result.findings}
     assert "dsa_indexer" not in stage_ids
     assert {"sparse_attention", "moe_experts", "moe_combine", "shared_ffn"}.issubset(stage_ids)
-    assert ("mla_kv_projection" in stage_ids) is (profile.phase is ExecutionPhase.PREFILL)
+    assert "mla_projection" in stage_ids
     if profile.quantize_linear_action == "W8A8_DYNAMIC":
         operator_names = {call.operator_name for call in artifact.operator_calls}
-        assert "tensor_cast.mlapo_quant.default" in operator_names
+        assert "tensor_cast.mlapo_quant.default" not in operator_names
+        assert "tensor_cast.rms_norm_dynamic_quant_symmetric.default" in operator_names
         assert "tensor_cast.grouped_matmul_quant_swiglu.default" in operator_names
         assert "tensor_cast.grouped_matmul_quant.default" in operator_names
 
@@ -181,7 +182,8 @@ def test_kimi_k25_compatible_text_capture_organize_and_compare(
     assert result.summary.overall_status is FindingStatus.PASS
     if profile.quantize_linear_action == "W8A8_DYNAMIC":
         operator_names = {call.operator_name for call in artifact.operator_calls}
-        assert "tensor_cast.mlapo_quant.default" in operator_names
+        assert "tensor_cast.mlapo_quant.default" not in operator_names
+        assert "tensor_cast.rms_norm_dynamic_quant_symmetric.default" in operator_names
         assert "tensor_cast.grouped_matmul_quant_swiglu.default" in operator_names
         assert "tensor_cast.grouped_matmul_quant.default" in operator_names
 

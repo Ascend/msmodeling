@@ -43,6 +43,13 @@ def _(
     value tensor. Used for single-stream caches such as the MiniMax-M3 index K
     cache.
     """
+    if (
+        (key.ndim != 2 and (key.ndim != 3 or key.shape[1] != 1))
+        or kv_cache.ndim < 2
+        or slot_mapping.numel() != key.shape[0]
+        or kv_cache.shape[-1] != key.shape[-1]
+    ):
+        raise ValueError("siso_reshape_and_cache requires matching value rows, cache width and slots")
 
 
 @register_tensor_cast_op("attention")

@@ -147,9 +147,7 @@ def _derive_ep_expert_counts(
         external = 0
 
     if external >= ep:
-        raise SpecificationLoadError(
-            "num_external_shared_experts must be smaller than expert_parallel_size"
-        )
+        raise SpecificationLoadError("num_external_shared_experts must be smaller than expert_parallel_size")
 
     if enable_external_shared_experts:
         routing_devices = ep - external
@@ -188,9 +186,7 @@ def _validate_ep_token_args(
     if num_external_shared_experts < 0:
         raise SpecificationLoadError("external shared expert count must be non-negative")
     if num_external_shared_experts >= ep:
-        raise SpecificationLoadError(
-            "external shared expert count must be smaller than expert_parallel_size"
-        )
+        raise SpecificationLoadError("external shared expert count must be smaller than expert_parallel_size")
     if ep_rank < 0 or ep_rank >= ep:
         raise SpecificationLoadError("analytic EP rank must be in [0, EP)")
 
@@ -267,10 +263,7 @@ def _simulated_ep_local_token_count(
             input_split_sizes_by_device.append(tokens_per_external + (1 if rank < external_rest else 0))
 
     routing_devices = ep - num_external_shared_experts
-    expert_assignments = [
-        _assign_experts(num_global_experts, routing_devices, rank)
-        for rank in range(routing_devices)
-    ]
+    expert_assignments = [_assign_experts(num_global_experts, routing_devices, rank) for rank in range(routing_devices)]
     routing_ranks_with_experts = [
         rank for rank, (_, num_local_experts) in enumerate(expert_assignments) if num_local_experts > 0
     ]
@@ -361,6 +354,7 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         "linear_input_dtype",
         default=activation_dtype,
     )
+    dsa_preparation_input_dtype = "bfloat16" if model_type == "glm_moe_dsa" else linear_input_dtype
     weight_dtype = _dtype_binding(
         quantization,
         "weight_dtype",
@@ -414,13 +408,8 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         vision_channels = _config_int(config, "vision_in_channels")
         vision_out_hidden = _config_int(config, "vision_out_hidden_size")
         image_values = tuple(config.get(key, 0) for key in ("image_batch_size", "image_height", "image_width"))
-        if any(
-            isinstance(value, bool) or not isinstance(value, int) or value < 0
-            for value in image_values
-        ):
-            raise SpecificationLoadError(
-                "image_batch_size/image_height/image_width must be non-negative integers"
-            )
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in image_values):
+            raise SpecificationLoadError("image_batch_size/image_height/image_width must be non-negative integers")
         image_batch, image_height, image_width = image_values
         grid_t = 1
         grid_h = grid_w = 0
@@ -553,9 +542,7 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         hc_mult = _config_int(config, "hc_mult")
         index_head_dim = _config_int(config, "index_head_dim")
         index_topk = _config_int(config, "index_topk")
-        indexer_blocks = (
-            max_context_length * local_batch + block_size * 4 - 1
-        ) // (block_size * 4)
+        indexer_blocks = (max_context_length * local_batch + block_size * 4 - 1) // (block_size * 4)
 
         def _compressed_query_tokens(ratio: int) -> int:
             if context.phase is ExecutionPhase.DECODE and context.query_length == 1:
@@ -700,7 +687,17 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
 
     dsa_env: dict[str, object] = {}
     if "index_topk" in config:
-        dsa_env = {"Dsa_k": min(_config_int(config, "index_topk"), seq)}
+        dsa_env = {
+            "Dsa_k": min(_config_int(config, "index_topk"), seq),
+            "Dsa_topk": min(_config_int(config, "index_topk"), seq),
+        }
+        # Only expanded GLM DSA projections consume these dimensions. Other
+        # indexer families (including V4) have their own shape contracts.
+        if config.get("model_type") in {"glm_moe_dsa", "deepseek_v32"}:
+            dsa_env.update(
+                Dsa_heads=_config_int(config, "index_n_heads"),
+                Dsa_dim=_config_int(config, "index_head_dim"),
+            )
 
     # Classification-4 hybrid linear-attention (Qwen3.5/Qwen3-Next): the
     # linear layer owns its own K/V head counts and head dims, sharded by TP.
@@ -778,6 +775,7 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         "D": dtype,
         "ACT": activation_dtype,
         "LINEAR_IN": linear_input_dtype,
+        "DSA_PREP_IN": dsa_preparation_input_dtype,
         "WEIGHT": weight_dtype,
         "SCALE": scale_dtype,
         "ACC": accumulation_dtype,

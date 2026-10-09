@@ -77,6 +77,7 @@ _MODEL_KEY_FIELDS = (
     "enable_sequence_parallel",
     "enable_matmul_allreduce",
     "enable_dispatch_ffn_combine",
+    "enable_mlapo",
     "enable_shared_expert_tp",
     "enable_external_shared_experts",
     "host_external_shared_experts",

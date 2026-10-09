@@ -548,6 +548,17 @@ def test_v018_dsa_indexer_mapping_has_registered_decomposer():
     assert "tensor_cast.dsa_indexer.default" in COMPOSITE_DECOMPOSERS
 
 
+def test_v023_dsa_indexer_mapping_has_registered_decomposer():
+    data_dir = _REAL_V018_DATA_DIR.parent / "vllm0.23.0rc1_torch2.10.0_cann9.0.1"
+    base = ProfilingDataSource(data_dir)
+    mapping = base._op_mapping["operator_mappings"]["tensor_cast.dsa_indexer.default"]
+
+    assert mapping["composite"] is True
+    assert mapping["decomposer"] is True
+    assert mapping["primary_kernel_type"] == "LightningIndexer"
+    assert "tensor_cast.dsa_indexer.default" in COMPOSITE_DECOMPOSERS
+
+
 def test_quantized_matmul_target_uses_activation_and_output_shapes(tmp_path):
     data_dir = tmp_path / "quantized_matmul_target"
     data_dir.mkdir()

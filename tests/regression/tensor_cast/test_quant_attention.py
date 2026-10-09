@@ -299,6 +299,7 @@ class TestQuantAttention(unittest.TestCase):
         mtp_block_module_name = get_mtp_block_module_name(model.model_config.hf_config.model_type)
         self.assertIsNotNone(mtp_block_module_name)
         attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
+        attn_meta.slot_mapping = torch.arange(num_tokens, dtype=torch.long, device="meta")
         # make sure all original attention modules have been replaced
         self.assertTrue(has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast"))
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
@@ -316,6 +317,8 @@ class TestQuantAttention(unittest.TestCase):
             self.assertEqual(outputs.shape, (1, num_mtp_layers + 1))
         result = runtime.table_averages()
         self.assertIn("quantize.default", result)
-        self.assertIn("concat_and_cache_mla.default", result)
+        self.assertIn("siso_reshape_and_cache.default", result)
+        self.assertIn("rms_norm.default", result)
+        self.assertIn("apply_rope_single.default", result)
         self.assertIn("multihead_latent_attention_quant.default", result)
         self.assert_mma_ops_time_positive(runtime, "multihead_latent_attention_quant.default")

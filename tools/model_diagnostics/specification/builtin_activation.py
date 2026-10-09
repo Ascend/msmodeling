@@ -108,17 +108,101 @@ class DsaEnabledActivation:
         return "index_topk" in request.context.model_config
 
 
-class MlaPrefillKvProjectionActivation:
-    """Enable the Prefill-only compressed-KV decompress projection.
+class DsaExpandedActivation:
+    policy_id = "dsa_expanded"
 
-    Decode leaves ``num_prefill_tokens == 0`` and does not emit
-    ``mla_kv_projection``; the unused-phase placeholder stays on the attention core.
-    """
+    def is_active(self, request):
+        return (
+            "index_topk" in request.context.model_config
+            and request.context.model_config.get("model_type") in {"glm_moe_dsa", "deepseek_v32"}
+        )
+
+
+class DsaExpandedCompiledActivation(DsaExpandedActivation):
+    """The compiled indexer merges K and head-weight projections."""
+
+    policy_id = "dsa_expanded_compiled"
+
+    def is_active(self, request):
+        return super().is_active(request) and "compiled" in request.context.model_config.get("features", ())
+
+
+class DsaExpandedEagerActivation(DsaExpandedActivation):
+    """The eager indexer exposes separate K and head-weight projections."""
+
+    policy_id = "dsa_expanded_eager"
+
+    def is_active(self, request):
+        return super().is_active(request) and "compiled" not in request.context.model_config.get("features", ())
+
+
+class DsaOpaqueActivation:
+    policy_id = "dsa_opaque"
+
+    def is_active(self, request):
+        return "index_topk" in request.context.model_config and not DsaExpandedActivation().is_active(request)
+
+
+class MlapoEnabledActivation:
+    """Select the explicitly enabled fused MLA prolog contract."""
+
+    policy_id = "mlapo_enabled"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return bool(request.context.model_config.get("enable_mlapo", False))
+
+
+class MlapoDisabledActivation:
+    """Select the expanded MLA prolog, permitting compiler-local linear merges."""
+
+    policy_id = "mlapo_disabled"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return not bool(request.context.model_config.get("enable_mlapo", False))
+
+
+class MlapoDisabledCompiledActivation(MlapoDisabledActivation):
+    """Select the compiler's locally merged q_a/kv_a projection."""
+
+    policy_id = "mlapo_disabled_compiled"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return super().is_active(request) and "compiled" in request.context.model_config.get("features", ())
+
+
+class MlapoDisabledEagerActivation(MlapoDisabledActivation):
+    """Select separate q_a and kv_a projections in eager mode."""
+
+    policy_id = "mlapo_disabled_eager"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return super().is_active(request) and "compiled" not in request.context.model_config.get("features", ())
+
+class MlaPrefillKvProjectionActivation:
+    """Prefill KV projection is standalone only when MLAPO is disabled."""
 
     policy_id = "mla_prefill_kv_projection"
 
     def is_active(self, request: OperatorActivationRequest) -> bool:
-        return request.context.phase is ExecutionPhase.PREFILL
+        return request.context.phase is ExecutionPhase.PREFILL and not request.context.model_config.get(
+            "enable_mlapo", False
+        )
+
+
+class KimiDynamicQaNormActivation:
+    policy_id = "kimi_dynamic_qa_norm"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return MlapoDisabledActivation().is_active(request) and request.context.quantization_config.get("action") in {
+            "W8A8_DYNAMIC", "W4A8_DYNAMIC"
+        }
+
+
+class KimiRegularQaNormActivation(KimiDynamicQaNormActivation):
+    policy_id = "kimi_regular_qa_norm"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return MlapoDisabledActivation().is_active(request) and not super().is_active(request)
 
 
 class ExplicitMoeGateActivation:
@@ -186,7 +270,17 @@ def create_builtin_operator_activation_registry() -> OperatorActivationRegistry:
     registry.register(KimiTextPrefillActivation())
     registry.register(KimiNonTextPrefillActivation())
     registry.register(DsaEnabledActivation())
+    registry.register(DsaExpandedActivation())
+    registry.register(DsaExpandedCompiledActivation())
+    registry.register(DsaExpandedEagerActivation())
+    registry.register(DsaOpaqueActivation())
     registry.register(MlaPrefillKvProjectionActivation())
+    registry.register(KimiDynamicQaNormActivation())
+    registry.register(KimiRegularQaNormActivation())
+    registry.register(MlapoEnabledActivation())
+    registry.register(MlapoDisabledActivation())
+    registry.register(MlapoDisabledCompiledActivation())
+    registry.register(MlapoDisabledEagerActivation())
     registry.register(ExplicitMoeGateActivation())
     registry.register(MoEFusedTopkActivation())
     registry.register(Qwen35DenseFfnActivation())

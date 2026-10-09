@@ -146,12 +146,13 @@ class TestKimiK25(unittest.TestCase):
         if isinstance(result, ModelRunnerMetrics):
             result_dict = asdict(result)
 
-        # Verify that quantization-related ops are present in the trace
+        # Verify the default unfused MLA path is present in the trace
         self.assertIn(
-            "tensor_cast.mlapo_quant",
+            "tensor_cast.multihead_latent_attention",
             result_dict["table_result"],
-            "MLA quantization should be present in the operation trace",
+            "MLA attention should remain explicit when MLAPO is disabled by default",
         )
+        self.assertNotIn("tensor_cast.mlapo", result_dict["table_result"])
 
         # Verify EP communication ops are present due to ep_size=16
         self.assertIn(
@@ -280,12 +281,13 @@ class TestKimiK25(unittest.TestCase):
             result_dict["kv_cache_size_gb"], 0, "KV cache size should be non-zero for long context generation"
         )
 
-        # Verify MLA quantization ops are present
+        # Verify the default unfused MLA path is present
         self.assertIn(
-            "tensor_cast.mlapo_quant",
+            "tensor_cast.multihead_latent_attention",
             result_dict["table_result"],
-            "MLA quantization should be present in the operation trace",
+            "MLA attention should remain explicit when MLAPO is disabled by default",
         )
+        self.assertNotIn("tensor_cast.mlapo", result_dict["table_result"])
 
         # Verify EP communication ops are present
         self.assertIn(
@@ -406,12 +408,13 @@ class TestKimiK25(unittest.TestCase):
         if isinstance(result, ModelRunnerMetrics):
             result_dict = asdict(result)
 
-        # Verify that quantization-related ops are present in the trace
+        # Verify the default unfused MLA path is present in the trace
         self.assertIn(
-            "tensor_cast.mlapo_quant",
+            "tensor_cast.multihead_latent_attention",
             result_dict["table_result"],
-            "MLA quantization should be present in the operation trace",
+            "MLA attention should remain explicit when MLAPO is disabled by default",
         )
+        self.assertNotIn("tensor_cast.mlapo", result_dict["table_result"])
 
         # Verify EP communication ops are present due to ep_size=16
         self.assertIn(

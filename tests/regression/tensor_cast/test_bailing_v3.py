@@ -107,7 +107,7 @@ def test_mlapo_supports_direct_q_projection():
     kv_a_proj_weight = torch.empty((12, 16), device="meta")
     kv_a_layernorm_weight = torch.empty((8,), device="meta")
 
-    q_states, kv_c_normed, k_rot, qa_normed = torch.ops.tensor_cast.mlapo(
+    q_states, kv_c_normed, k_rot, qa_normed, projected_kv, absorbed_q = torch.ops.tensor_cast.mlapo(
         hidden_states,
         cos,
         sin,
@@ -122,12 +122,15 @@ def test_mlapo_supports_direct_q_projection():
         4,
         8,
         None,
+        torch.empty(0, device="meta"),
     )
 
     assert q_states.shape == (4, 3, 8)
     assert kv_c_normed.shape == (4, 8)
     assert k_rot.shape == (4, 4)
     assert qa_normed.shape == (4, 0)
+    assert projected_kv.shape == (0, 3, 0)
+    assert absorbed_q.shape == (0, 3, 12)
 
 
 def test_bailing_v3_router_uses_indices_weights_logits_order():
@@ -529,6 +532,7 @@ def _direct_q_mlapo_args(quantized=False):
     if quantized:
         scale = torch.ones(1, device="meta")
         args += (scale, None, None, None, scale, None)
+    args += (torch.empty(0, device="meta", dtype=torch.float16),)
     return args
 
 

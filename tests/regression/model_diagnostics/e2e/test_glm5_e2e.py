@@ -38,6 +38,7 @@ def _run_glm5_case(
     context_length: int | None,
     quantization: str = "DISABLED",
     num_mtp_tokens: int = 0,
+    enable_mlapo: bool = False,
     parallel: ParallelContext = ParallelContext(),
 ):
     profile = DiagnosticsRunProfile(
@@ -55,6 +56,7 @@ def _run_glm5_case(
         # GLM-5.1 starts with three Dense layers; include layer[3] to cover MoE.
         num_hidden_layers_override=4,
         do_compile=True,
+        enable_mlapo=enable_mlapo,
         device="TEST_DEVICE",
         quantize_linear_action=quantization,
         word_embedding_tp=None,
@@ -67,6 +69,7 @@ def _run_glm5_case(
     return profile, artifact, application.run_against_artifact(request, artifact)
 
 
+@pytest.mark.parametrize("enable_mlapo", [False, True], ids=["mlapo-off", "mlapo-on"])
 @pytest.mark.parametrize(
     "model_name",
     ("tests/assets/model_config/glm5", "tests/assets/model_config/glm5_1"),
@@ -93,6 +96,7 @@ def test_glm5_capture_organize_and_compare(
     query_length: int,
     context_length: int | None,
     quantization: str,
+    enable_mlapo: bool,
 ) -> None:
     profile, artifact, result = _run_glm5_case(
         model_name=model_name,
@@ -100,6 +104,7 @@ def test_glm5_capture_organize_and_compare(
         query_length=query_length,
         context_length=context_length,
         quantization=quantization,
+        enable_mlapo=enable_mlapo,
     )
 
     assert artifact.run_context.model_config["model_type"] == "glm_moe_dsa"
@@ -107,11 +112,15 @@ def test_glm5_capture_organize_and_compare(
     assert_diagnostics_passed(result)
     assert result.summary.overall_status is FindingStatus.PASS
     stage_ids = {finding.stage_id for finding in result.findings}
-    assert {"dsa_indexer", "sparse_attention", "moe_experts", "moe_combine"}.issubset(stage_ids)
-    assert ("mla_kv_projection" in stage_ids) is (phase is ExecutionPhase.PREFILL)
+    assert {"mla_projection", "sparse_attention", "moe_experts", "moe_combine"}.issubset(stage_ids)
+    assert "tensor_cast.dsa_indexer.default" in {call.operator_name for call in artifact.operator_calls}
+    assert "dsa_k_projection" not in {call.operator_name for call in artifact.operator_calls}
     if profile.quantize_linear_action == "W8A8_DYNAMIC":
         operator_names = {call.operator_name for call in artifact.operator_calls}
-        assert "tensor_cast.mlapo_quant.default" in operator_names
+        # The fused quantized MLAPO is opt-in via ``enable_mlapo`` (see the Spec's
+        # ``mlapo_enabled`` / ``mlapo_disabled`` activations), so the fused kernel
+        # may only be asserted for the run that actually asked for it.
+        assert ("tensor_cast.mlapo_quant.default" in operator_names) is profile.enable_mlapo
         assert "tensor_cast.grouped_matmul_quant_swiglu.default" in operator_names
         assert "tensor_cast.grouped_matmul_quant.default" in operator_names
 
@@ -135,7 +144,9 @@ def test_glm5_mtp_capture_organize_and_compare(model_name: str) -> None:
     assert_diagnostics_passed(result)
     assert result.summary.overall_status is FindingStatus.PASS
     mtp_stages = {finding.stage_id for finding in result.findings if finding.region_id == "mtp"}
-    assert {"dsa_indexer", "sparse_attention", "moe_experts", "moe_combine", "proposal_selection"}.issubset(mtp_stages)
+    assert {"mla_projection", "sparse_attention", "moe_experts", "moe_combine", "proposal_selection"}.issubset(
+        mtp_stages
+    )
 
 
 @pytest.mark.parametrize(

@@ -38,7 +38,7 @@ from .cost_utils import (
     rmsnorm_ops as _rmsnorm_ops,
 )
 from .op_estimator_registry import register_op_estimator
-from .op_invoke_info import OpInvokeInfo
+from .op_invoke_info import OpInvokeInfo, get_named_args
 from .utils import bytes_of_elements, bytes_of_tensor, is_noop_self_copy_op, is_view_op
 
 logger = logging.getLogger(__name__)
@@ -1017,12 +1017,10 @@ def _mla_metadata_properties(
         )
         decode_gp_ops = decode_context_sum * num_heads * 4
 
-    # Keep fused-kernel memory: charge ``q`` once here, not the projection
-    # intermediates that used to live inside the fused MLA op.
-    properties = op_invoke_info.get_memory_access_properties(
-        exclude_input_ids={1, 2, 3, 4},
-        exclude_output_ids={1},
-    )
+    # Projection outputs cross kernel boundaries; cache traffic is added below.
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0, 3, 4})
+    if total_tokens > 0:
+        properties.memory_read_bytes += bytes_of_tensor(q) // total_tokens * int(projected_kv.size(0))
     cache_entry_size = bytes_of_elements(kv_cache.size(-1), kv_cache.dtype)
     if block_table is not None:
         batch_size = int(block_table.size(0))
@@ -1086,18 +1084,59 @@ def _mlapo_properties_helper(
     total_mma_ops += op1_ops + op3_ops + op5_ops
     total_gp_ops += op2_ops + op4_ops + op6_ops + op7_ops
 
-    properties = op_invoke_info.get_memory_access_properties()
-    activation_bytes = hidden_states.element_size()
-    if q_lora_rank is None:
-        q_a_bytes = num_tokens * num_heads * qk_head_dim * activation_bytes
-        qa_normed_read_bytes = 0
+    fusion_args = get_named_args(op_invoke_info)
+    fused_projection = fusion_args.get("kv_b_proj")
+    if fused_projection is not None:
+        # One kernel: intermediate activations stay internal and cache writes
+        # count only the appended rows, never the complete cache allocation.
+        cache = fusion_args.get("kv_cache")
+        if cache is not None and cache.numel() == 0:
+            cache = None
+        properties = op_invoke_info.get_memory_access_properties(
+            exclude_input_ids={"kv_cache", "kv_b_proj", "w_uk_t"},
+            exclude_output_ids={1, 2} if cache is not None else set(),
+        )
+        prefill, decode = local_mla_phase_token_counts(
+            int(num_tokens),
+            fusion_args.get("num_prefill_tokens", 0),
+            fusion_args.get("num_decode_tokens", 0),
+        )
+        # Optional: a caller may fuse the projections while leaving the decode
+        # absorb weight absent (prefill-only batches), so do not index directly.
+        w_uk = fusion_args.get("w_uk_t")
+        _accumulate_compute_ops(
+            properties,
+            _quantized_weight_compute_dtype(fused_projection.dtype),
+            mma_ops=2 * prefill * fused_projection.numel() + (2 * decode * w_uk.numel() if w_uk is not None else 0),
+        )
+        # A mixed batch reads both weight matrices, so these must be independent
+        # checks. An ``elif`` would drop the W_UK read whenever Prefill and
+        # Decode coexist, while the mma_ops term above already charges both.
+        if prefill:
+            properties.memory_read_bytes += bytes_of_tensor(fused_projection)
+        if decode and w_uk is not None:
+            properties.memory_read_bytes += bytes_of_tensor(w_uk)
+        if fusion_args.get("projection_weight_scale") is not None:
+            total_gp_ops += 2 * (prefill * fused_projection.shape[-1] + decode * num_heads * kv_lora_rank)
+        if cache is not None:
+            properties.memory_write_bytes += bytes_of_elements(
+                num_tokens * (kv_lora_rank + qk_rope_head_dim), cache.dtype
+            )
+            if fusion_args.get("kv_scale") is not None:
+                total_gp_ops += 2 * num_tokens * (kv_lora_rank + qk_rope_head_dim)
     else:
-        q_a_bytes = num_tokens * q_lora_rank * activation_bytes
-        qa_normed_read_bytes = q_a_bytes
-    compressed_kv_bytes = num_tokens * (kv_lora_rank + qk_rope_head_dim) * activation_bytes
-    properties.memory_readwrite_bytes += 2 * (q_a_bytes + compressed_kv_bytes)
-    properties.memory_read_bytes += qa_normed_read_bytes
-    properties.extra_static_cost_count += 15
+        properties = op_invoke_info.get_memory_access_properties()
+        activation_bytes = hidden_states.element_size()
+        if q_lora_rank is None:
+            q_a_bytes = num_tokens * num_heads * qk_head_dim * activation_bytes
+            qa_normed_read_bytes = 0
+        else:
+            q_a_bytes = num_tokens * q_lora_rank * activation_bytes
+            qa_normed_read_bytes = q_a_bytes
+        compressed_kv_bytes = num_tokens * (kv_lora_rank + qk_rope_head_dim) * activation_bytes
+        properties.memory_readwrite_bytes += 2 * (q_a_bytes + compressed_kv_bytes)
+        properties.memory_read_bytes += qa_normed_read_bytes
+        properties.extra_static_cost_count += 15
 
     mma_dtype = _quantized_weight_compute_dtype(kv_a_proj_weight.dtype)
     compute_ops = properties.compute_ops.setdefault(mma_dtype, OpInvokeInfo.ComputeOps())
@@ -1446,9 +1485,9 @@ def _multihead_latent_attention_properties_helper(
 
     total_fma_ops = 0
     total_gp_ops = 0
-    # cache/table are accounted below; projected_kv / absorbed_q are fused-internal
-    # edges billed on the projection ops as compute, not as extra DRAM traffic.
-    exclude_input_ids = {1, 2, 3, 4}
+    # Cache/table traffic is added below. Decode consumes absorbed_q; only
+    # prefill reads the original query rows.
+    exclude_input_ids = {0, 3, 4}
 
     # 3. Calculate FLOPs for the Prefill Phase
     num_prefill_tokens = torch.sum(num_tokens_per_seq[is_prefill]).item()
@@ -1502,10 +1541,9 @@ def _multihead_latent_attention_properties_helper(
         total_fma_ops += decode_op2_ops + decode_op4_ops
         total_gp_ops += decode_op3_ops
 
-    properties = op_invoke_info.get_memory_access_properties(
-        exclude_input_ids=exclude_input_ids,
-        exclude_output_ids={1},  # decode latent is consumed by mla_v_up_projection
-    )  # exclude kv_cache
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids=exclude_input_ids)
+    if q.size(0) > 0:
+        properties.memory_read_bytes += bytes_of_tensor(q) // int(q.size(0)) * int(projected_kv.size(0))
 
     # Estimate paged sparse-KV reads with a local page efficiency. Decode shapes reuse
     # the staged sparse KV set across an S1 tile, while prefill reads scale with query tokens.
@@ -1545,19 +1583,19 @@ def _mla_input_projection_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeIn
     sibling_tokens = 0
     if len(op_invoke_info.args) > 4 and not isinstance(op_invoke_info.args[4], torch.Tensor):
         sibling_tokens = int(op_invoke_info.args[4])
-    # Only the weight was external DRAM traffic in the fused MLA accounting.
-    properties = op_invoke_info.get_memory_access_properties(
-        exclude_input_ids={0, 2, 3, 4, 5, 6, 7, 8},
-        exclude_output_ids={0},
-    )
+    # Read phase-local activation rows, weights and quant metadata, and write
+    # the materialized projection output consumed by the attention kernel.
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
     compute_ops = properties.compute_ops.setdefault(activation.dtype, OpInvokeInfo.ComputeOps())
     is_kv = "mla_kv_projection" in str(op_invoke_info.func)
     prefill_tokens = int(num_tokens) if is_kv else sibling_tokens
     decode_tokens = sibling_tokens if is_kv else int(num_tokens)
     prefill_local, decode_local = local_mla_phase_token_counts(int(activation.size(0)), prefill_tokens, decode_tokens)
     token_count = prefill_local if is_kv else decode_local
+    if token_count == 0:
+        return OpInvokeInfo.PerformanceProperties()
+    properties.memory_read_bytes += bytes_of_tensor(activation) // int(activation.size(0)) * token_count
     compute_ops.mma_ops = token_count * int(weight.numel()) * 2
-    properties.extra_static_cost_count = -1
     if "_quant" in str(op_invoke_info.func):
         if weight.ndim == 2:
             compute_ops.gp_ops = token_count * int(weight.shape[1]) * 2
@@ -1567,14 +1605,14 @@ def _mla_input_projection_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeIn
 
 
 def _mla_v_up_projection_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
-    attention_output, W_UV = op_invoke_info.args
-    # The latent input was internal to the fused MLA program.
-    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
+    attention_output, w_uv = op_invoke_info.args
+    if attention_output.size(0) == 0:
+        return OpInvokeInfo.PerformanceProperties()
+    properties = op_invoke_info.get_memory_access_properties()
     compute_ops = properties.compute_ops.setdefault(attention_output.dtype, OpInvokeInfo.ComputeOps())
-    compute_ops.mma_ops = int(attention_output.size(0)) * int(W_UV.numel()) * 2
-    properties.extra_static_cost_count = -1
+    compute_ops.mma_ops = int(attention_output.size(0)) * int(w_uv.numel()) * 2
     if "_quant" in str(op_invoke_info.func):
-        compute_ops.gp_ops = int(attention_output.size(0)) * int(W_UV.size(0)) * int(W_UV.size(1)) * 2
+        compute_ops.gp_ops = int(attention_output.size(0)) * int(w_uv.size(0)) * int(w_uv.size(1)) * 2
     return properties
 
 
@@ -3455,79 +3493,6 @@ def _estimate_dsa_indexer_breakdown(
     }
 
 
-@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dsa_indexer.default)
-def _(
-    op_invoke_info: OpInvokeInfo,
-) -> OpInvokeInfo.PerformanceProperties:
-    hidden_states = op_invoke_info.args[0]
-    qa_normed = op_invoke_info.args[1]
-    indexer_cache = op_invoke_info.args[4]
-    block_tables = op_invoke_info.args[6]
-    seq_lens = op_invoke_info.args[7]
-    num_heads = op_invoke_info.args[12]
-    head_dim = op_invoke_info.args[13]
-    qk_rope_head_dim = op_invoke_info.args[14]
-    topk_limit = op_invoke_info.args[15]
-    query_lens = op_invoke_info.args[16] if len(op_invoke_info.args) > 16 else op_invoke_info.kwargs.get("query_lens")
-    is_decode_values = op_invoke_info.kwargs.get("is_decode_values")
-
-    # The cache dtype is already chosen by the upstream attention quant config,
-    # so the roofline model only needs to read it, not re-decide fp8 policy here.
-    fp8_mode = is_fp8_dtype(indexer_cache.dtype)
-
-    breakdown = _estimate_dsa_indexer_breakdown(
-        hidden_states,
-        qa_normed,
-        indexer_cache,
-        num_heads,
-        head_dim,
-        qk_rope_head_dim,
-        topk_limit,
-        request_total_seq_lens=seq_lens,
-        request_query_lens=query_lens,
-        is_decode_values=is_decode_values,
-        block_tables=block_tables,
-        fp8_mode=fp8_mode,
-    )
-    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={4})
-
-    # Projection math is the dominant MMA part of the Indexer path.
-    _accumulate_compute_ops(
-        properties,
-        hidden_states.dtype,
-        mma_ops=(breakdown["q_proj_mma"] + breakdown["k_proj_mma"] + breakdown["weights_proj_mma"]),
-        gp_ops=(
-            breakdown["rope_gp"]
-            + breakdown["rotate_activation_gp"]
-            + breakdown["act_quant_gp"]
-            + breakdown["head_weight_mul_gp"]
-            + breakdown["head_reduce_gp"]
-            + breakdown["topk_gp"]
-        ),
-    )
-
-    # The core q/k scoring kernel is bucketed separately: in bf16 mode it stays in the
-    # activation dtype bucket, while in fp8 mode only its MMA moves to the cache/score dtype.
-    score_dtype = indexer_cache.dtype if fp8_mode else hidden_states.dtype
-    _accumulate_compute_ops(
-        properties,
-        score_dtype,
-        mma_ops=breakdown["qk_index_mma"],
-    )
-    # FP8 is the score MMA payload, not the vector execution dtype of score
-    # shaping.  Attribute its ReLU and scale operations to the activation dtype
-    # so profiles that only expose FP32/BF16/FP16 GP peaks retain this work.
-    _accumulate_compute_ops(
-        properties,
-        hidden_states.dtype,
-        gp_ops=(breakdown["head_relu_gp"] + breakdown["head_q_scale_mul_gp"] + breakdown["head_k_scale_mul_gp"]),
-    )
-
-    properties.memory_read_bytes += breakdown["historical_effective_read_bytes"]
-    properties.memory_write_bytes += breakdown["append_cache_write_bytes"] + breakdown["append_scale_write_bytes"]
-    return properties
-
-
 from . import builtin_model  # noqa: E402,F401  # Triggers built-in op registrations at import time.
 
 
@@ -3856,3 +3821,57 @@ from . import hyper_connection  # noqa: E402,F401
 from .builtin_model import glm5_next  # noqa: E402,F401
 
 _load_custom_op()
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dsa_indexer.default)
+def _dsa_indexer_properties(op_invoke_info):
+    query, weights, cache, tables, lengths, topk = op_invoke_info.args[:6]
+    query_lens = op_invoke_info.args[6] if len(op_invoke_info.args) > 6 else op_invoke_info.kwargs.get("query_lens")
+    tokens, heads, dim = query.shape
+    # Only scoring terms are consumed; projection/append terms belong to the
+    # explicit preparation ops. The proxy tensors contain no model weights.
+    hidden = query.new_empty((1, tokens, 1))
+    if isinstance(query_lens, torch.Tensor) and not _tensor_value_unavailable(query_lens):
+        values = [int(v) for v in query_lens.tolist()]
+        total = sum(values)
+        if total > tokens:
+            # Local query rows form a contiguous rank slice. For analytic
+            # rank-zero execution, retain the prefix request intersections.
+            remaining = tokens
+            local = []
+            for value in values:
+                count = min(value, remaining)
+                local.append(count)
+                remaining -= count
+            query_lens = torch.tensor(local, dtype=torch.int64)
+    requests = _dsa_indexer_request_accounting(
+        hidden,
+        cache,
+        lengths,
+        query_lens,
+        op_invoke_info.kwargs.get("is_decode_values"),
+        tables,
+    )
+    score_elements = sum(q_len * seq_len for q_len, seq_len, _ in requests)
+    cache_traffic = _estimate_dsa_indexer_paged_cache_read_breakdown(
+        hidden,
+        cache,
+        dim,
+        lengths,
+        query_lens,
+        op_invoke_info.kwargs.get("is_decode_values"),
+        tables,
+        fp8_mode=is_fp8_dtype(cache.dtype),
+    )
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={2})
+    # Per-head score scaling, ReLU, head-weight multiply and head reduction;
+    # plus head-weight scaling and token selection. These remain in the core.
+    score_mma = 2 * score_elements * heads * dim
+    _accumulate_compute_ops(properties, cache.dtype if is_fp8_dtype(cache.dtype) else query.dtype, mma_ops=score_mma)
+    _accumulate_compute_ops(
+        properties,
+        query.dtype,
+        gp_ops=4 * score_elements * heads + tokens * heads + score_elements,
+    )
+    properties.memory_read_bytes += cache_traffic["historical_effective_read_bytes"]
+    return properties

@@ -574,7 +574,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
         ]
     )
     def test_mlapo_quant_disabled(self, model_id):
-        """Ensure MLAPO fusion stays enabled when linear quantization is disabled."""
+        """Ensure opt-in MLAPO fusion runs when linear quantization is disabled."""
         user_input = UserInputConfig(
             device=self.device,
             model_id=model_id,
@@ -582,6 +582,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
             query_len=32,
             context_length=64,
             do_compile=False,
+            enable_mlapo=True,
             allow_graph_break=False,
             quantize_linear_action=QuantizeLinearAction.DISABLED,
             quantize_attention_action=QuantizeAttentionAction.DISABLED,
@@ -599,7 +600,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
         ]
     )
     def test_mlapo_linear_quant(self, model_id):
-        """Ensure MLAPO fusion stays enabled when linear quantization is applied."""
+        """Ensure opt-in MLAPO fusion runs when linear quantization is applied."""
         user_input = UserInputConfig(
             device=self.device,
             model_id=model_id,
@@ -607,6 +608,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
             query_len=32,
             context_length=64,
             do_compile=False,
+            enable_mlapo=True,
             allow_graph_break=False,
             quantize_linear_action=QuantizeLinearAction.W8A8_STATIC,
             quantize_attention_action=QuantizeAttentionAction.DISABLED,

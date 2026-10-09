@@ -160,11 +160,12 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
     def _execute_mlapo_and_get_base_data(self, mlapo_args):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
+        cache = torch.empty(0, device="meta")
         with (
             Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
-            torch.ops.tensor_cast.mlapo(*mlapo_args)
+            torch.ops.tensor_cast.mlapo(*mlapo_args, cache)
         self.assertEqual(len(runtime.event_list), 1)
         analytic_result = runtime.event_list[0].perf_results.get("analytic")
         actual_execution_time = analytic_result.execution_time_s
@@ -173,11 +174,12 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
     def _execute_mlapo_quant_and_get_base_data(self, mlapo_args):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
+        cache = torch.empty(0, device="meta")
         with (
             Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
-            torch.ops.tensor_cast.mlapo_quant(*mlapo_args)
+            torch.ops.tensor_cast.mlapo_quant(*mlapo_args, cache)
         self.assertEqual(len(runtime.event_list), 1)
         analytic_result = runtime.event_list[0].perf_results.get("analytic")
         actual_execution_time = analytic_result.execution_time_s
@@ -215,7 +217,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             scale,
             None,
         )
-        out = torch.ops.tensor_cast.mlapo_quant(*args)
+        out = torch.ops.tensor_cast.mlapo_quant(*args, torch.empty(0, device="meta"))
         op_invoke_info = OpInvokeInfo(torch.ops.tensor_cast.mlapo_quant.default, args, None, out)
 
         properties = op_invoke_info.get_perf_properties()
@@ -251,7 +253,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             8,
             8,
         )
-        out = torch.ops.tensor_cast.mlapo(*args)
+        out = torch.ops.tensor_cast.mlapo(*args, torch.empty(0, device="meta"))
         properties = OpInvokeInfo(torch.ops.tensor_cast.mlapo.default, args, None, out).get_perf_properties()
 
         self.assertEqual(properties.extra_static_cost_count, 15)
@@ -762,28 +764,16 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
     def _dsa_indexer_op_info(query_len, seq_len, is_decode):
         cache_blocks = (seq_len + 127) // 128
         args = (
-            torch.empty(1, query_len, 16, device="meta", dtype=torch.float16),
-            torch.empty(1, query_len, 4, device="meta", dtype=torch.float16),
-            torch.empty(1, query_len, 4, device="meta", dtype=torch.float16),
-            torch.empty(1, query_len, 4, device="meta", dtype=torch.float16),
-            torch.empty(cache_blocks, 128, 7, device="meta", dtype=torch.float16),
-            torch.empty(query_len, device="meta", dtype=torch.int64),
+            torch.empty(query_len, 2, 8, device="meta", dtype=torch.float16),
+            torch.empty(query_len, 2, device="meta", dtype=torch.float16),
+            torch.empty(cache_blocks, 128, 8, device="meta", dtype=torch.float16),
             torch.empty(1, cache_blocks, device="meta", dtype=torch.int64),
             torch.tensor([seq_len], dtype=torch.long),
-            torch.empty(16, 4, device="meta", dtype=torch.float16),
-            torch.empty(8, 16, device="meta", dtype=torch.float16),
-            torch.empty(2, 16, device="meta", dtype=torch.float16),
-            torch.empty(8, device="meta", dtype=torch.float16),
-            2,
-            8,
-            4,
             5,
+            torch.tensor([query_len], dtype=torch.long),
         )
-        kwargs = {
-            "query_lens": torch.tensor([query_len], dtype=torch.long),
-            "is_decode_values": [is_decode],
-        }
-        out = torch.empty(1, query_len, 5, device="meta", dtype=torch.long)
+        kwargs = {"is_decode_values": [is_decode]}
+        out = torch.empty(query_len, 5, device="meta", dtype=torch.long)
         return OpInvokeInfo(torch.ops.tensor_cast.dsa_indexer.default, args, kwargs, out)
 
     def test_dsa_indexer_breakdown_helper_bf16(self):
@@ -1137,7 +1127,10 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         )
 
         # Core-only MLA: projection compute is billed on mla_kv_projection.
-        assert_close(self, actual_execution_time, 4.728510737228394e-05)
+        # Add the projected KV read at the independent attention-kernel boundary.
+        projected_kv_bytes = total_tokens * num_heads * (qk_nope_head_dim + v_head_dim) * 2
+        bandwidth = TEST_DEVICE.memory_bandwidth_bytes_ps * TEST_DEVICE.memory_efficiency
+        assert_close(self, actual_execution_time, 4.728510737228394e-05 + projected_kv_bytes / bandwidth)
 
     def test_mla_eager_prefill_with_context(self):
         B, S, num_heads, q_head_dim = 2, 7008, 8, 192
@@ -1179,7 +1172,10 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         )
 
         # Core-only MLA: projection compute is billed on mla_kv_projection.
-        assert_close(self, actual_execution_time, 4.728510737228394e-05)
+        # Add the projected KV read at the independent attention-kernel boundary.
+        projected_kv_bytes = total_tokens * num_heads * (qk_nope_head_dim + v_head_dim) * 2
+        bandwidth = TEST_DEVICE.memory_bandwidth_bytes_ps * TEST_DEVICE.memory_efficiency
+        assert_close(self, actual_execution_time, 4.728510737228394e-05 + projected_kv_bytes / bandwidth)
 
     def test_mla_eager_decode(self):
         B, S, num_heads, q_head_dim = 16, 7008, 8, 192
@@ -1221,7 +1217,10 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         )
 
         # Core-only MLA: Q absorb and V up-projection are billed on dedicated ops.
-        assert_close(self, actual_execution_time, 6.2113847732543945e-06)
+        # Replace original Q reads with absorbed Q reads and latent output writes.
+        extra_bytes = total_tokens * num_heads * (kv_lora_rank + qk_rope_head_dim + kv_lora_rank - q_head_dim) * 2
+        bandwidth = TEST_DEVICE.memory_bandwidth_bytes_ps * TEST_DEVICE.memory_efficiency
+        assert_close(self, actual_execution_time, 6.2113847732543945e-06 + extra_bytes / bandwidth)
 
     def _run_test_model(self, model_id, do_compile):
         num_tokens = 100
@@ -1272,7 +1271,8 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
         result = runtime.table_averages()
         self.assertIn("tensor_cast.init_routing_v2", result)
-        self.assertIn("tensor_cast.concat_and_cache_mla", result)
+        self.assertNotIn("tensor_cast.concat_and_cache_mla", result)
+        self.assertIn("tensor_cast.apply_rope_single", result)
         self.assertIn("tensor_cast.multihead_latent_attention", result)
 
     @parameterized.expand(

@@ -26,11 +26,16 @@ from tools.model_diagnostics.domain import (
 )
 from tools.model_diagnostics.specification.builtin_activation import (
     DsaEnabledActivation,
+    DsaExpandedActivation,
+    DsaExpandedCompiledActivation,
+    DsaExpandedEagerActivation,
     ExplicitMoeGateActivation,
     KimiNonTextPrefillActivation,
     KimiTextPrefillActivation,
     LmHeadTokenSelectionActivation,
     MlaPrefillKvProjectionActivation,
+    MlapoDisabledCompiledActivation,
+    MlapoDisabledEagerActivation,
     MtpEnabledActivation,
     NonMtpLmHeadActivation,
     Qwen35DenseFfnActivation,
@@ -226,6 +231,26 @@ def test_dsa_enabled_activation(index_topk: int | None, expected: bool) -> None:
 
 
 @pytest.mark.parametrize(
+    ("model_config", "expected"),
+    (
+        ({"model_type": "glm_moe_dsa", "torch_dtype": "bfloat16"}, False),
+        ({"model_type": "glm_moe_dsa", "torch_dtype": "bfloat16", "index_topk": 2048}, True),
+        ({"model_type": "glm_moe_dsa", "dsa_indexer_cache_dtype": "float8_e4m3fn", "index_topk": 2048}, True),
+        ({"model_type": "deepseek_v3", "torch_dtype": "bfloat16", "index_topk": 2048}, False),
+    ),
+)
+def test_dsa_expanded_requires_dsa_topk(model_config: dict[str, object], expected: bool) -> None:
+    request = _request(
+        phase=ExecutionPhase.PREFILL,
+        query_length=2,
+        num_mtp_tokens=0,
+        model_config=model_config,
+    )
+
+    assert DsaExpandedActivation().is_active(request) is expected
+
+
+@pytest.mark.parametrize(
     ("phase", "expected"),
     ((ExecutionPhase.PREFILL, True), (ExecutionPhase.DECODE, False)),
 )
@@ -315,3 +340,34 @@ def test_activation_registry_rejects_duplicate_and_unknown_ids() -> None:
         registry.register(policy)
     with pytest.raises(KeyError, match="unregistered"):
         registry.resolve("missing")
+
+
+@pytest.mark.parametrize(
+    ("compiled", "enabled"),
+    ((False, False), (True, False), (False, True), (True, True)),
+)
+def test_mlapo_local_merge_activation_is_compile_specific(compiled: bool, enabled: bool) -> None:
+    request = _request(
+        phase=ExecutionPhase.PREFILL,
+        query_length=2,
+        num_mtp_tokens=0,
+        model_config={"enable_mlapo": enabled, "features": ("compiled",) if compiled else ()},
+    )
+    assert MlapoDisabledCompiledActivation().is_active(request) is (compiled and not enabled)
+    assert MlapoDisabledEagerActivation().is_active(request) is (not compiled and not enabled)
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_dsa_expanded_projection_layout_follows_compile_mode(compiled: bool) -> None:
+    request = _request(
+        phase=ExecutionPhase.PREFILL,
+        query_length=2,
+        num_mtp_tokens=0,
+        model_config={
+            "model_type": "glm_moe_dsa",
+            "index_topk": 2048,
+            "features": ("compiled",) if compiled else (),
+        },
+    )
+    assert DsaExpandedCompiledActivation().is_active(request) is compiled
+    assert DsaExpandedEagerActivation().is_active(request) is not compiled

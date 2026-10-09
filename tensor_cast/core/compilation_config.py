@@ -19,10 +19,9 @@
 This module is the single source of truth for the names accepted by the
 ``--compilation-config`` CLI flag and the runtime config attributes they map to.
 
-Both ``cli/inference/text_generate.py`` and ``serving_cast/parallel_runner.py``
-go through :func:`apply_compilation_config` so the two CLI entry points stay in
-sync — adding a new compilation feature only requires extending
-``COMPILATION_CONFIG_MAP`` and ``COMPILATION_CONFIG_OPTIONS`` here.
+Both CLI entry points use :func:`apply_compilation_config`. Worker processes
+also restore these flags from UserInputConfig in serving_cast/parallel_runner.py;
+new flags must be propagated through that configuration boundary too.
 """
 
 from __future__ import annotations
@@ -44,6 +43,7 @@ COMPILATION_CONFIG_OPTIONS: list[str] = [
     "enable_sequence_parallel",
     "enable_matmul_allreduce",
     "enable_dispatch_ffn_combine",
+    "enable_mlapo",
 ]
 
 
@@ -54,6 +54,7 @@ _COMPILATION_CONFIG_MAP: dict[str, str] = {
     "enable_sequence_parallel": "compilation.passes.enable_sequence_parallel",
     "enable_matmul_allreduce": "compilation.fusion_patterns.enable_matmul_allreduce",
     "enable_dispatch_ffn_combine": "compilation.fusion_patterns.enable_dispatch_ffn_combine",
+    "enable_mlapo": "compilation.fusion_patterns.enable_mlapo",
 }
 
 

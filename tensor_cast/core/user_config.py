@@ -97,6 +97,7 @@ class UserInputConfig:
     enable_sequence_parallel: bool = False
     enable_matmul_allreduce: bool = False
     enable_dispatch_ffn_combine: bool = False
+    enable_mlapo: bool = False
     decode: bool = False
     num_mtp_tokens: int = 0
     mtp_acceptance_rate: List[float] = field(default_factory=lambda: [0.9, 0.6, 0.4, 0.2])

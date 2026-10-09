@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from tools.model_diagnostics.domain import INPUT, OUTPUT, ExecutionPhase, ModelRunContext, ParallelContext, SourceKind
@@ -80,6 +82,7 @@ def test_deepseek_v3_theory_env_binds_attention_symbols() -> None:
     assert (env["QKnope"], env["QKrope"], env["Vh"], env["Hmla"]) == (128, 64, 128, 192)
     assert (env["Tprefill"], env["Tdecode"]) == (env["T"], 0)
     assert env["Dsa_k"] == 2
+    assert env["Dsa_topk"] == 2
     assert env["MOE_COMBINE_DTYPE"] == "float32"
 
 
@@ -208,15 +211,11 @@ def test_deepseek_v3_spec_expands_dense_prefix_and_moe_layers() -> None:
     assert language.layer_layout == ("dense", "dense", "dense", "moe", "moe")
     assert [stage.stage_id for stage in language.layer_specs["dense"].stages] == [
         "mla_projection",
-        "dsa_indexer",
-        "mla_kv_projection",
         "sparse_attention",
         "dense_ffn",
     ]
     assert [stage.stage_id for stage in language.layer_specs["moe"].stages] == [
         "mla_projection",
-        "dsa_indexer",
-        "mla_kv_projection",
         "sparse_attention",
         "moe_gate",
         "moe_dispatch",
@@ -378,39 +377,80 @@ def _deepseek_spec(context: ModelRunContext):
 
 
 def test_deepseek_v3_prefill_declares_kv_projection_contract() -> None:
-    spec = _deepseek_spec(_context())
+    spec = _deepseek_spec(_context(config={**_DEEPSEEK_CONFIG, "model_type": "deepseek_v3"}))
     language = next(region for region in spec.regions if region.region_id == "language")
 
-    assert spec.operator_aliases["tensor_cast.mla_kv_projection_quant.default"] == "mla_kv_projection"
     for layer_spec in language.layer_specs.values():
-        projection = next(stage for stage in layer_spec.stages if stage.stage_id == "mla_kv_projection")
+        projection = next(stage for stage in layer_spec.stages if stage.stage_id == "mla_projection")
         theory = projection.source_options[SourceKind.THEORY]
-        assert [operator.operator_name for operator in theory.operators] == ["mla_kv_projection"]
-        kv_proj = theory.operators[0]
+        kv_proj = next(operator for operator in theory.operators if operator.operator_name == "mm")
         assert kv_proj.tensors[INPUT[0]].shape.expression == "[T, KVlora]"
-        assert kv_proj.tensors[INPUT[1]].shape.expression == "[KVlora, Lh * (QKnope + Vh)]"
-        assert kv_proj.tensors[OUTPUT[0]].shape.expression == "[Tprefill, Lh, QKnope + Vh]"
-        runtime = projection.source_options[SourceKind.RUNTIME]
-        assert "mla_kv_projection" not in runtime.ignored_operators
-        assert "mla_kv_projection_quant" not in runtime.ignored_operators
-
+        assert kv_proj.tensors[OUTPUT[0]].shape.expression == "[Tprefill, Lh * (QKnope + Vh)]"
     env = build_theory_env(_context())
     regions = build_theory_regions(_context(), spec, {"language": (0,)}, ())
-    kv_stage = next(stage for stage in regions[0].layers[0].stages if stage.stage_id == "mla_kv_projection")
-    assert [call.operator_name for call in kv_stage.operator_calls] == ["mla_kv_projection"]
-    kv_call = kv_stage.operator_calls[0]
+    stage = next(stage for stage in regions[0].layers[0].stages if stage.stage_id == "mla_projection")
+    kv_call = next(call for call in stage.operator_calls if call.operator_name == "mm")
     output = next(tensor for tensor in kv_call.tensors if tensor.slot == OUTPUT[0])
-    assert output.shape == (env["Tprefill"], env["Lh"], env["QKnope"] + env["Vh"])
+    assert output.shape == (env["Tprefill"], env["Lh"] * (env["QKnope"] + env["Vh"]))
 
 
 def test_deepseek_v3_decode_omits_kv_projection_contract() -> None:
-    spec = _deepseek_spec(_context(phase=ExecutionPhase.DECODE, query_length=1, context_length=128))
+    config = {**_DEEPSEEK_CONFIG, "model_type": "deepseek_v3"}
+    config.pop("index_topk")
+    spec = _deepseek_spec(
+        _context(
+            config=config,
+            phase=ExecutionPhase.DECODE,
+            query_length=1,
+            context_length=128,
+        )
+    )
     language = next(region for region in spec.regions if region.region_id == "language")
     for layer_spec in language.layer_specs.values():
         assert all(stage.stage_id != "mla_kv_projection" for stage in layer_spec.stages)
         projection = next(stage for stage in layer_spec.stages if stage.stage_id == "mla_projection")
         theory = projection.source_options[SourceKind.THEORY]
-        assert [operator.operator_name for operator in theory.operators] == ["mlapo"]
+        assert [operator.operator_name for operator in theory.operators] == [
+            "qkv_a_projection",
+            "q_b_projection",
+        ]
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected_preparation_dtype"),
+    (("glm_moe_dsa", "bfloat16"), ("deepseek_v32", "int8")),
+)
+def test_compiled_dsa_preparation_and_kv_projection_have_independent_input_dtypes(
+    model_type: str, expected_preparation_dtype: str
+) -> None:
+    context = _context(config={**_DEEPSEEK_CONFIG, "model_type": model_type})
+    context = replace(
+        context,
+        model_config={**context.model_config, "torch_dtype": "bfloat16"},
+        quantization_config={"linear_input_dtype": "int8"},
+    )
+    spec = _deepseek_spec(context)
+    env = build_theory_env(context)
+    assert env["DSA_PREP_IN"] == expected_preparation_dtype
+    assert env["ACT"] == "bfloat16"
+    language = next(region for region in spec.regions if region.region_id == "language")
+    for layer_spec in language.layer_specs.values():
+        projection = next(stage for stage in layer_spec.stages if stage.stage_id == "mla_projection")
+        theory = projection.source_options[SourceKind.THEORY]
+        preparation = next(
+            operator
+            for operator in theory.operators
+            if operator.operator_name == "mm"
+            and operator.tensors[OUTPUT[0]].shape.expression == "[T, Dsa_dim + Dsa_heads]"
+        )
+        assert preparation.tensors[INPUT[0]].dtype.expression == "DSA_PREP_IN"
+        kv_projection = next(
+            operator
+            for operator in theory.operators
+            if operator.operator_name == "mm"
+            and operator.tensors[OUTPUT[0]].shape.expression == "[Tprefill, Lh * (QKnope + Vh)]"
+        )
+        assert kv_projection.tensors[INPUT[0]].dtype.expression == "ACT"
 
 
 @pytest.mark.parametrize(
@@ -457,7 +497,7 @@ def test_deepseek_v3_theory_uses_rank_local_parallel_shapes(
     from tools.model_diagnostics.specification.theory_fragments import load_builtin_theory_fragment_registry
 
     context = _context(
-        config={**_DEEPSEEK_CONFIG, "effective_num_hidden_layers": 4},
+        config={**_DEEPSEEK_CONFIG, "effective_num_hidden_layers": 4, "enable_mlapo": True},
         batch_size=batch_size,
         query_length=query_length,
         parallel=parallel,

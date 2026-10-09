@@ -30,8 +30,9 @@ from tools.model_diagnostics.specification import DiagnosticsRunProfile
 _MODEL = "tests/assets/model_config/deepseek_v4_flash"
 
 
+@pytest.mark.parametrize("enable_mlapo", [False, True], ids=["mlapo_off", "mlapo_on"])
 @pytest.mark.parametrize("phase", (ExecutionPhase.PREFILL, ExecutionPhase.DECODE))
-def test_deepseek_v4_offline_capture_and_compare(phase: ExecutionPhase) -> None:
+def test_deepseek_v4_offline_capture_and_compare(phase: ExecutionPhase, enable_mlapo: bool) -> None:
     profile = DiagnosticsRunProfile(
         schema_version="1",
         model_name=_MODEL,
@@ -50,6 +51,7 @@ def test_deepseek_v4_offline_capture_and_compare(phase: ExecutionPhase) -> None:
         selected_stage_regions=("input", "output"),
         num_hidden_layers_override=1,
         do_compile=True,
+        enable_mlapo=enable_mlapo,
         device="TEST_DEVICE",
         quantize_linear_action="W8A8_DYNAMIC",
         word_embedding_tp=None,
@@ -62,6 +64,7 @@ def test_deepseek_v4_offline_capture_and_compare(phase: ExecutionPhase) -> None:
     request = profile.to_request(context=artifact.run_context, spec=spec)
     result = application.run_against_artifact(request, artifact)
 
+    assert not any("mlapo" in call.operator_name for call in artifact.operator_calls)
     assert artifact.run_context.model_config["model_type"] == "deepseek_v4"
     assert result.spec_id == "deepseek_v4_v1"
     assert_diagnostics_passed(result)

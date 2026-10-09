@@ -180,6 +180,7 @@ def build_model(
     :param user_input: user_input
     :return: The loaded (and possibly compiled) Transformer or Pipeline model.
     """
+    config.compilation.fusion_patterns.enable_mlapo = bool(user_input and user_input.enable_mlapo)
     config_resolver = ConfigResolver(user_input=user_input)
     model_config = config_resolver.resolve()
     if model_config.parallel_config.pipeline_parallel_size > 1:

@@ -17,7 +17,6 @@
 from typing import Optional, Tuple
 
 import torch
-from torch._subclasses.fake_tensor import is_fake
 
 from ..utils import register_tensor_cast_op
 
@@ -132,7 +131,7 @@ def _(
     """
 
 
-@register_tensor_cast_op("mlapo")
+@register_tensor_cast_op("mlapo", mutates_args=("kv_cache",))
 def _(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
@@ -148,9 +147,23 @@ def _(
     qk_rope_head_dim: int,
     kv_lora_rank: int,
     q_lora_rank: Optional[int],
+    kv_cache: torch.Tensor,
+    kv_b_proj: Optional[torch.Tensor] = None,
+    w_uk_t: Optional[torch.Tensor] = None,
+    num_prefill_tokens: int = 0,
+    num_decode_tokens: int = 0,
+    slot_mapping: Optional[torch.Tensor] = None,
+    kv_projected_scale: Optional[torch.Tensor] = None,
+    kv_projected_offset: Optional[torch.Tensor] = None,
+    qk_scale: Optional[torch.Tensor] = None,
+    qk_offset: Optional[torch.Tensor] = None,
+    projection_weight_scale: Optional[torch.Tensor] = None,
+    projection_weight_offset: Optional[torch.Tensor] = None,
+    kv_scale: Optional[torch.Tensor] = None,
+    kv_offset: Optional[torch.Tensor] = None,
     *,
     is_decode_values: Optional[list[bool]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Fused MLA preprocessing op that models RMS norm, matmuls, and RoPE rotation.
 
@@ -174,21 +187,30 @@ def _(
         k_rot: (num_tokens, qk_rope_head_dim)
         qa_normed: (num_tokens, q_lora_rank) when q_lora_rank is set;
             otherwise an empty last-dimension tensor that the caller converts back to None.
+        projected_kv: (local_prefill_tokens, num_heads, qk_nope_head_dim + v_head_dim).
+        absorbed_q: (local_decode_tokens, num_heads, kv_lora_rank + qk_rope_head_dim).
+
+    ``kv_cache`` is explicitly mutable; pass an empty tensor when no cache is
+    available. Extended calls include phase projection weights and token counts.
     """
 
     num_tokens = hidden_states.size(0)
     device = hidden_states.device
     dtype = hidden_states.dtype
     qa_normed_dim = q_lora_rank or 0
+    prefill, decode = local_mla_phase_token_counts(num_tokens, num_prefill_tokens, num_decode_tokens)
+    projected_dim = int(kv_b_proj.shape[1]) // num_heads if kv_b_proj is not None else 0
     return (
         torch.empty((num_tokens, num_heads, qk_head_dim), dtype=dtype, device=device),
         torch.empty((num_tokens, kv_lora_rank), dtype=dtype, device=device),
         torch.empty((num_tokens, qk_rope_head_dim), dtype=dtype, device=device),
         torch.empty((num_tokens, qa_normed_dim), dtype=dtype, device=device),
+        torch.empty((prefill, num_heads, projected_dim), dtype=dtype, device=device),
+        torch.empty((decode, num_heads, kv_lora_rank + qk_rope_head_dim), dtype=dtype, device=device),
     )
 
 
-@register_tensor_cast_op("mlapo_quant")
+@register_tensor_cast_op("mlapo_quant", mutates_args=("kv_cache",))
 def _(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
@@ -210,9 +232,23 @@ def _(
     q_b_proj_offset: Optional[torch.Tensor],
     kv_a_proj_scale: torch.Tensor,
     kv_a_proj_offset: Optional[torch.Tensor],
+    kv_cache: torch.Tensor,
+    kv_b_proj: Optional[torch.Tensor] = None,
+    w_uk_t: Optional[torch.Tensor] = None,
+    num_prefill_tokens: int = 0,
+    num_decode_tokens: int = 0,
+    slot_mapping: Optional[torch.Tensor] = None,
+    kv_projected_scale: Optional[torch.Tensor] = None,
+    kv_projected_offset: Optional[torch.Tensor] = None,
+    qk_scale: Optional[torch.Tensor] = None,
+    qk_offset: Optional[torch.Tensor] = None,
+    projection_weight_scale: Optional[torch.Tensor] = None,
+    projection_weight_offset: Optional[torch.Tensor] = None,
+    kv_scale: Optional[torch.Tensor] = None,
+    kv_offset: Optional[torch.Tensor] = None,
     *,
     is_decode_values: Optional[list[bool]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Quantized variant of the fused MLA preprocessing op.
 
@@ -226,17 +262,26 @@ def _(
         k_rot: (num_tokens, qk_rope_head_dim)
         qa_normed: (num_tokens, q_lora_rank) when q_lora_rank is set;
             otherwise an empty last-dimension tensor that the caller converts back to None.
+        projected_kv: (local_prefill_tokens, num_heads, qk_nope_head_dim + v_head_dim).
+        absorbed_q: (local_decode_tokens, num_heads, kv_lora_rank + qk_rope_head_dim).
+
+    ``kv_cache`` is explicitly mutable; pass an empty tensor when no cache is
+    available. Extended calls include phase projection weights and token counts.
     """
 
     num_tokens = hidden_states.size(0)
     device = hidden_states.device
     dtype = hidden_states.dtype
     qa_normed_dim = q_lora_rank or 0
+    prefill, decode = local_mla_phase_token_counts(num_tokens, num_prefill_tokens, num_decode_tokens)
+    projected_dim = int(kv_b_proj.shape[1]) // num_heads if kv_b_proj is not None else 0
     return (
         torch.empty((num_tokens, num_heads, qk_head_dim), dtype=dtype, device=device),
         torch.empty((num_tokens, kv_lora_rank), dtype=dtype, device=device),
         torch.empty((num_tokens, qk_rope_head_dim), dtype=dtype, device=device),
         torch.empty((num_tokens, qa_normed_dim), dtype=dtype, device=device),
+        torch.empty((prefill, num_heads, projected_dim), dtype=dtype, device=device),
+        torch.empty((decode, num_heads, kv_lora_rank + qk_rope_head_dim), dtype=dtype, device=device),
     )
 
 
@@ -336,7 +381,7 @@ def _(
 @register_tensor_cast_op("mla_q_absorb_projection")
 def _(
     q: torch.Tensor,
-    W_UK_T: torch.Tensor,
+    w_uk_t: torch.Tensor,
     num_decode_tokens: int,
     qk_rope_head_dim: int,
     num_prefill_tokens: int,
@@ -344,8 +389,8 @@ def _(
     """Decode Q absorption with the physical latent-plus-RoPE width."""
     return torch.empty(
         _mla_phase_token_count(q, num_decode_tokens, num_prefill_tokens, is_prefill=False),
-        W_UK_T.shape[0],
-        W_UK_T.shape[-1] + qk_rope_head_dim,
+        w_uk_t.shape[0],
+        w_uk_t.shape[-1] + qk_rope_head_dim,
         dtype=q.dtype,
         device="meta",
     )
@@ -354,7 +399,7 @@ def _(
 @register_tensor_cast_op("mla_q_absorb_projection_quant")
 def _(
     q: torch.Tensor,
-    W_UK_T: torch.Tensor,
+    w_uk_t: torch.Tensor,
     num_decode_tokens: int,
     qk_rope_head_dim: int,
     num_prefill_tokens: int,
@@ -366,26 +411,26 @@ def _(
     """Quantized variant of :func:`mla_q_absorb_projection`."""
     return torch.empty(
         _mla_phase_token_count(q, num_decode_tokens, num_prefill_tokens, is_prefill=False),
-        W_UK_T.shape[0],
-        W_UK_T.shape[-1] + qk_rope_head_dim,
+        w_uk_t.shape[0],
+        w_uk_t.shape[-1] + qk_rope_head_dim,
         dtype=q.dtype,
         device="meta",
     )
 
 
 @register_tensor_cast_op("mla_v_up_projection")
-def _(attention_output: torch.Tensor, W_UV: torch.Tensor) -> torch.Tensor:
+def _(attention_output: torch.Tensor, w_uv: torch.Tensor) -> torch.Tensor:
     """Decode latent-value up-projection to the physical value-head width."""
     return torch.empty(
-        attention_output.shape[0], W_UV.shape[0], W_UV.shape[-1], dtype=attention_output.dtype, device="meta"
+        attention_output.shape[0], w_uv.shape[0], w_uv.shape[-1], dtype=attention_output.dtype, device="meta"
     )
 
 
 @register_tensor_cast_op("mla_v_up_projection_quant")
-def _(attention_output: torch.Tensor, W_UV: torch.Tensor) -> torch.Tensor:
+def _(attention_output: torch.Tensor, w_uv: torch.Tensor) -> torch.Tensor:
     """Quantized variant of :func:`mla_v_up_projection`."""
     return torch.empty(
-        attention_output.shape[0], W_UV.shape[0], W_UV.shape[-1], dtype=attention_output.dtype, device="meta"
+        attention_output.shape[0], w_uv.shape[0], w_uv.shape[-1], dtype=attention_output.dtype, device="meta"
     )
 
 
@@ -549,76 +594,21 @@ def _(
     )
 
 
-@register_tensor_cast_op("dsa_indexer", mutates_args=("indexer_cache",))
+@register_tensor_cast_op("dsa_indexer")
 def _(
-    hidden_states: torch.Tensor,
-    qa_normed: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+    query: torch.Tensor,
+    weights: torch.Tensor,
     indexer_cache: torch.Tensor,
-    slot_mapping: Optional[torch.Tensor],
     block_tables: Optional[torch.Tensor],
     seq_lens: Optional[torch.Tensor],
-    wq_b_weight: torch.Tensor,
-    wk_weight: torch.Tensor,
-    weights_proj_weight: torch.Tensor,
-    k_norm_weight: torch.Tensor,
-    num_heads: int,
-    head_dim: int,
-    qk_rope_head_dim: int,
     topk_limit: int,
     query_lens: Optional[torch.Tensor] = None,
     *,
     is_decode_values: Optional[list[bool]] = None,
 ) -> torch.Tensor:
+    """LightningIndexer: scaled QK scores, learned head mixing and top-k.
+
+    Query/key projections, norms, RoPE and cache append are external operators.
+    Head and dimension scaling are part of scoring, not separate projections.
     """
-    Fused DSA indexer semantic block.
-
-    ``query_lens`` carries the per-request query boundaries used by the
-    sequence-parallel rank projection and analytic fallback. ``is_decode_values``
-    carries the explicit per-request phase for both performance-model paths.
-
-    For the DeepSeek-V3.2-style fp8 path (non-strict math/code):
-        q = rope(wq_b(qa_normed))
-        k = rope(k_norm(wk(hidden_states)))
-
-        q = rotate_activation(q)
-        k = rotate_activation(k)
-
-        q_fp8, q_scale = act_quant(q)
-        k_fp8, k_scale = act_quant(k)
-        k_cache, k_scale_cache = append(indexer_cache, k_fp8, k_scale)
-
-        weights = weights_proj(hidden_states) * num_heads**-0.5
-        weights = weights.unsqueeze(-1) * q_scale * head_dim**-0.5
-
-        index_score = fp8_index(q_fp8, weights, k_cache, k_scale_cache)
-        topk_indices = topk(index_score, k=min(topk_limit, active_seq_len), dim=-1).indices
-
-    Compared with the fp8 path, the bf16 / GLM5-style path removes:
-        - rotate_activation on q and k
-        - act_quant on q and k
-        - scale-cache writes alongside the key cache
-        - fp8-specific relu / q-scale / k-scale score shaping
-
-    and instead uses direct cache scoring plus head reduction:
-        weights = weights_proj(hidden_states) * num_heads**-0.5
-        head_scores = (q @ k_cache.transpose(-1, -2)) * head_dim**-0.5
-        index_score = reduce_sum(head_scores * weights.unsqueeze(-1), dim=-2)
-        topk_indices = topk(index_score, k=min(topk_limit, active_seq_len), dim=-1).indices
-
-    Returns:
-        topk_indices: (batch, seq_len, min(topk_limit, active_seq_len))
-
-    ``query_lens`` carries request-level phase semantics for chunked prefill.
-    It is optional for compatibility with older captured workloads.
-    """
-    batch, seq_len, _ = hidden_states.shape
-    # torch.compile traces this op with FakeTensors; avoid extracting a
-    # data-dependent Python int from seq_lens in that path.
-    if is_fake(hidden_states):
-        topk = topk_limit
-    else:
-        active_seq_len = int(seq_lens.max().item()) if seq_lens is not None else seq_len
-        topk = min(topk_limit, active_seq_len)
-    return torch.empty(batch, seq_len, topk, dtype=torch.long, device=hidden_states.device)
+    return torch.empty(query.shape[0], topk_limit, dtype=torch.long, device=query.device)

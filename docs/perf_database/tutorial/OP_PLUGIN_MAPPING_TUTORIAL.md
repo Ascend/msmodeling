@@ -490,7 +490,7 @@ MoE 模型匹配率较低是预期的，因为 TC 的 compile pass 产生的中�
 | tc.matmul_all_reduce | MatMulV2 + hcom_allReduce_ | MC2 融合 |
 | tc.static_quant_linear_all_reduce | QuantBatchMatmulV3 + hcom_allReduce_ | 量化 MC2 |
 | tc.multihead_latent_attention | BatchMatMulV2 + FIA + batch_matmul_transpose | MLA decode |
-| tc.mlapo | MatMulV2 + KvRmsNormRopeCache | MLA 预处理 |
+| tc.mlapo | 按版本及运行条件分解为可见子内核，或查询不透明融合核 | MLA 预处理及其吸收的投影 |
 
 ### 零开销算子
 

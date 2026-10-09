@@ -53,6 +53,7 @@ _ALLOWED_KEYS = frozenset(
         "selected_stage_regions",
         "num_hidden_layers_override",
         "do_compile",
+        "enable_mlapo",
         "device",
         "quantize_linear_action",
         "word_embedding_tp",
@@ -118,6 +119,7 @@ class DiagnosticsRunProfile:
     device: str
     quantize_linear_action: str
     word_embedding_tp: str | None
+    enable_mlapo: bool = False
     enable_redundant_experts: bool = False
     enable_external_shared_experts: bool = False
     image_batch_size: int | None = None
@@ -156,9 +158,7 @@ class DiagnosticsRunProfile:
         if self.selected_region_layers is not None:
             for region_id, indices in self.selected_region_layers.items():
                 if not isinstance(region_id, str) or not region_id.strip():
-                    raise SpecificationLoadError(
-                        "selected_region_layers keys must be non-empty region ids"
-                    )
+                    raise SpecificationLoadError("selected_region_layers keys must be non-empty region ids")
                 normalized_region_layers[region_id.strip()] = _normalize_layer_indices(
                     indices,
                     field_name=f"selected_region_layers.{region_id.strip()}",
@@ -235,9 +235,7 @@ def _derive_selected_layers(
 
     mtp_region = layered_regions.get("mtp")
     if mtp_region is not None:
-        selected_mtp = _select_representative_mtp_layers(
-            len(mtp_region.layer_layout)
-        )
+        selected_mtp = _select_representative_mtp_layers(len(mtp_region.layer_layout))
         if selected_mtp:
             layers["mtp"] = selected_mtp
 
@@ -245,9 +243,7 @@ def _derive_selected_layers(
     reserved = set(requested_region_layers).intersection({"language", "mtp"})
     if reserved:
         reserved_id = sorted(reserved)[0]
-        raise InvalidDiagnosticsRequest(
-            f"selected_region_layers cannot select reserved region {reserved_id!r}"
-        )
+        raise InvalidDiagnosticsRequest(f"selected_region_layers cannot select reserved region {reserved_id!r}")
     selectable_regions = set(layered_regions).difference({"language", "mtp"})
     unknown = set(requested_region_layers).difference(selectable_regions)
     if unknown:
@@ -340,9 +336,7 @@ def _parse_profile(raw: Mapping[str, Any]) -> DiagnosticsRunProfile:
         parallel_raw = {}
     if not isinstance(parallel_raw, Mapping):
         raise SpecificationLoadError("parallel must be a mapping")
-    unsupported_parallel = sorted(
-        set(parallel_raw) & {"moe_tensor_parallel_size", "moe_tp_size"}
-    )
+    unsupported_parallel = sorted(set(parallel_raw) & {"moe_tensor_parallel_size", "moe_tp_size"})
     if unsupported_parallel:
         raise SpecificationLoadError(
             "parallel field(s) not supported: "
@@ -388,9 +382,7 @@ def _parse_profile(raw: Mapping[str, Any]) -> DiagnosticsRunProfile:
         batch_size=_require_positive_int(raw, "batch_size"),
         query_length=_require_positive_int(raw, "query_length"),
         context_length=_optional_non_negative_int(raw.get("context_length"), field_name="context_length"),
-        num_mtp_tokens=(
-            _optional_non_negative_int(raw.get("num_mtp_tokens"), field_name="num_mtp_tokens") or 0
-        ),
+        num_mtp_tokens=(_optional_non_negative_int(raw.get("num_mtp_tokens"), field_name="num_mtp_tokens") or 0),
         parallel=ParallelContext(
             tensor_parallel_size=_positive_int_value(
                 parallel_raw.get("tensor_parallel_size", 1), "parallel.tensor_parallel_size"
@@ -419,6 +411,7 @@ def _parse_profile(raw: Mapping[str, Any]) -> DiagnosticsRunProfile:
         selected_stage_regions=selected_stage_regions,
         num_hidden_layers_override=override,
         do_compile=_optional_bool(raw.get("do_compile"), default=True, field_name="do_compile"),
+        enable_mlapo=_optional_bool(raw.get("enable_mlapo"), default=False, field_name="enable_mlapo"),
         device=_optional_non_empty_str(raw.get("device"), default="TEST_DEVICE", field_name="device"),
         quantize_linear_action=_choice_value(
             raw.get("quantize_linear_action", "DISABLED"),
@@ -520,9 +513,7 @@ def _optional_region_layer_indices(
     normalized: dict[str, tuple[int, ...]] = {}
     for region_id, indices in value.items():
         if not isinstance(region_id, str) or not region_id.strip():
-            raise SpecificationLoadError(
-                "selected_region_layers keys must be non-empty region ids"
-            )
+            raise SpecificationLoadError("selected_region_layers keys must be non-empty region ids")
         name = region_id.strip()
         normalized[name] = _normalize_layer_indices(
             indices,

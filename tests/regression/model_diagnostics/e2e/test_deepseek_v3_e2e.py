@@ -30,6 +30,11 @@ from tools.model_diagnostics.specification import DiagnosticsRunProfile
 from tools.model_diagnostics.specification.context_env import build_theory_env
 
 
+@pytest.fixture(scope="module", params=[False, True], ids=["mlapo_off", "mlapo_on"])
+def enable_mlapo(request):
+    return request.param
+
+
 @pytest.fixture(
     scope="module",
     params=(
@@ -74,7 +79,7 @@ from tools.model_diagnostics.specification.context_env import build_theory_env
         ),
     ),
 )
-def deepseek_v3_case(request):
+def deepseek_v3_case(request, enable_mlapo):
     """Capture Dense-prefix and first MoE/shared-expert layer."""
 
     model_name, phase, query_length, context_length, quantization = request.param
@@ -92,6 +97,7 @@ def deepseek_v3_case(request):
         selected_stage_regions=(),
         num_hidden_layers_override=4,
         do_compile=True,
+        enable_mlapo=enable_mlapo,
         device="TEST_DEVICE",
         quantize_linear_action=quantization,
         word_embedding_tp=None,
@@ -123,16 +129,18 @@ def test_deepseek_v3_capture_organize_and_compare(deepseek_v3_case) -> None:
         "shared_ffn",
         "lm_head",
     }
-    assert ("dsa_indexer" in stage_ids) is (artifact.run_context.model_config["model_type"] == "deepseek_v32")
-    assert ("mla_kv_projection" in stage_ids) is (profile.phase is ExecutionPhase.PREFILL)
     operator_names = {call.operator_name for call in artifact.operator_calls}
+    assert ("tensor_cast.dsa_indexer.default" in operator_names) is (
+        artifact.run_context.model_config["model_type"] == "deepseek_v32"
+    )
+    assert "tensor_cast.mla_kv_projection.default" not in operator_names
     if profile.quantize_linear_action == "W8A8_DYNAMIC":
-        assert "tensor_cast.mlapo_quant.default" in operator_names
+        assert ("tensor_cast.mlapo_quant.default" in operator_names) is profile.enable_mlapo
         assert "tensor_cast.static_quant_linear.default" in operator_names
         assert "tensor_cast.grouped_matmul_quant_swiglu.default" in operator_names
         assert "tensor_cast.grouped_matmul_quant.default" in operator_names
     elif profile.quantize_linear_action == "W4A8_DYNAMIC":
-        assert "tensor_cast.mlapo_quant.default" in operator_names
+        assert ("tensor_cast.mlapo_quant.default" in operator_names) is profile.enable_mlapo
         assert "tensor_cast.static_quant_linear_int4.default" in operator_names
         assert "tensor_cast.grouped_matmul_quant_int4_swiglu.default" in operator_names
         assert "tensor_cast.grouped_matmul_quant_int4.default" in operator_names
@@ -146,7 +154,7 @@ def test_deepseek_v3_capture_organize_and_compare(deepseek_v3_case) -> None:
         pytest.param("tests/assets/model_config/deepseek_v31", id="v31", marks=pytest.mark.nightly),
     ),
 )
-def test_deepseek_v3_mtp_capture_organize_and_compare(model_name: str) -> None:
+def test_deepseek_v3_mtp_capture_organize_and_compare(model_name: str, enable_mlapo: bool) -> None:
     profile = DiagnosticsRunProfile(
         schema_version="1",
         model_name=model_name,
@@ -161,6 +169,7 @@ def test_deepseek_v3_mtp_capture_organize_and_compare(model_name: str) -> None:
         selected_stage_regions=(),
         num_hidden_layers_override=4,
         do_compile=True,
+        enable_mlapo=enable_mlapo,
         device="TEST_DEVICE",
         quantize_linear_action="DISABLED",
         word_embedding_tp=None,
@@ -186,7 +195,9 @@ def test_deepseek_v3_mtp_capture_organize_and_compare(model_name: str) -> None:
         "proposal_selection",
     }
     assert expected_mtp_stages.issubset(mtp_stages)
-    assert ("dsa_indexer" in mtp_stages) is (artifact.run_context.model_config["model_type"] == "deepseek_v32")
+    assert any(call.operator_name == "tensor_cast.dsa_indexer.default" for call in artifact.operator_calls) is (
+        artifact.run_context.model_config["model_type"] == "deepseek_v32"
+    )
 
 
 @pytest.mark.parametrize(
@@ -222,6 +233,7 @@ def test_deepseek_v3_parallel_shapes_compare(
     query_length: int,
     expected_tmoe: int,
     expected_local_heads: int,
+    enable_mlapo: bool,
 ) -> None:
     """Validate rank-local MLA heads and MoE token domains under parallel layouts."""
 
@@ -239,6 +251,7 @@ def test_deepseek_v3_parallel_shapes_compare(
         selected_stage_regions=(),
         num_hidden_layers_override=4,
         do_compile=True,
+        enable_mlapo=enable_mlapo,
         device="TEST_DEVICE",
         quantize_linear_action="DISABLED",
         word_embedding_tp=None,
@@ -291,6 +304,7 @@ def test_deepseek_v3_legacy_parallel_shapes_compare(
     model_name: str,
     parallel: ParallelContext,
     query_length: int,
+    enable_mlapo: bool,
 ) -> None:
     """Validate rank-local MLA heads and MoE token domains for V3/V3.1 under parallel layouts."""
 
@@ -308,6 +322,7 @@ def test_deepseek_v3_legacy_parallel_shapes_compare(
         selected_stage_regions=(),
         num_hidden_layers_override=4,
         do_compile=True,
+        enable_mlapo=enable_mlapo,
         device="TEST_DEVICE",
         quantize_linear_action="DISABLED",
         word_embedding_tp=None,

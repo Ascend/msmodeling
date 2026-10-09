@@ -1449,7 +1449,9 @@ def quantize_linear(
         if not model.model_config.quant_linear_cls:
             return model
         mla_config = model.model_config.mla_config
-        if mla_config is not None and mla_config.enable_dsa_cp:
+        if mla_config is not None and (
+            mla_config.enable_dsa_cp or getattr(model._inner.config, "model_type", None) == "glm_moe_dsa"
+        ):
             _exclude_unquantized_dsa_linears(model.model_config)
         _ensure_draft_excluded_from_linear_quant(model)
         before = {

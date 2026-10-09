@@ -61,8 +61,27 @@ _COPY_REGION_V2 = torch.ops.tensor_cast._internal_copy_region_v2.default
 _ADD_RMS_NORM2 = torch.ops.tensor_cast.add_rms_norm2.default
 _ADD_RMS_NORM = torch.ops.tensor_cast.add_rms_norm.default
 _ADD_OPS = {torch.ops.aten.add.Tensor}
+_INDEX_COPY_TARGETS = {
+    torch.ops.aten.index_copy.default,
+    torch.ops.aten.index_copy_.default,
+}
+_INDEX_PUT_TARGETS = {
+    torch.ops.aten.index_put.default,
+    torch.ops.aten.index_put_.default,
+}
 _VIEW_OPS = {torch.ops.aten.view.default, torch.ops.aten.reshape.default}
 _SLICE = torch.ops.aten.slice.Tensor
+# Fused MLAPO prolog variants. Unlike the unfused region these consume the
+# rotary caches and slot mapping directly, so they carry no apply_rope_single /
+# siso_reshape_and_cache call for _shard_mla_metadata to find.
+_FUSED_MLAPO_TARGETS = {
+    torch.ops.tensor_cast.mlapo.default,
+    torch.ops.tensor_cast.mlapo_quant.default,
+}
+_UNFUSED_MLA_METADATA_TARGETS = {
+    torch.ops.tensor_cast.apply_rope_single.default,
+    torch.ops.tensor_cast.siso_reshape_and_cache.default,
+}
 _MOE_TOPK = torch.ops.tensor_cast.moe_gating_top_k_softmax.default
 _INIT_ROUTING = torch.ops.tensor_cast.init_routing_v2.default
 _UNPERMUTE_TOKENS = torch.ops.tensor_cast.unpermute_tokens.default
@@ -71,6 +90,10 @@ _DSA_INDEXER = torch.ops.tensor_cast.dsa_indexer.default
 _DSA_ATTENTION_OPS = {
     torch.ops.tensor_cast.mla_sparse_attention.default,
     torch.ops.tensor_cast.mla_sparse_attention_quant.default,
+}
+_DENSE_MLA_ATTENTION_OPS = {
+    torch.ops.tensor_cast.multihead_latent_attention.default,
+    torch.ops.tensor_cast.multihead_latent_attention_quant.default,
 }
 _TRANSPARENT_OPS = _VIEW_OPS | {_REGION_BEGIN, _REGION_END, _COPY_REGION}
 
@@ -98,6 +121,8 @@ def _meta_shape(node):
 
 
 def _is_dsa_topk_indices(node) -> bool:
+    if isinstance(node, Node) and node.target is torch.ops.tensor_cast.dsa_indexer.default:
+        return True
     if (
         not isinstance(node, Node)
         or node.op != "call_function"
@@ -630,25 +655,143 @@ def _is_p2_chain_tail(getitem_node):
     return False
 
 
-def is_dsa_attention(norm: Node) -> bool:
-    """Return whether the current norm directly feeds a DSA attention region."""
+def _dsa_attention_sinks(norm: Node) -> set[Node]:
+    """Find DSA attention consumers before the next norm or communication boundary."""
     queue, visited = list(norm.users), set()
-    boundaries = _SINGLE_OUTPUT_NORMS | {_ADD_RMS_NORM2, _ALL_REDUCE, _REDUCE_SCATTER, _MOE_TOPK}
+    sinks = set()
+    boundaries = (
+        _SINGLE_OUTPUT_NORMS
+        | _DENSE_MLA_ATTENTION_OPS
+        | {_ADD_RMS_NORM2, _ALL_REDUCE, _ALL_GATHER, _REDUCE_SCATTER, _MOE_TOPK}
+    )
     while queue:
         node = queue.pop()
         if node in visited or node.op == "output":
             continue
         visited.add(node)
         if node.op == "call_function" and node.target in _DSA_ATTENTION_OPS:
-            return True
+            sinks.add(node)
+            continue
         if node.op == "call_function" and node.target in boundaries:
             continue
         queue.extend(node.users)
-    return False
+    return sinks
+
+
+def is_dsa_attention(norm: Node) -> bool:
+    """Return whether the current norm directly feeds a DSA attention region."""
+    return bool(_dsa_attention_sinks(norm))
+
+
+def _shard_mla_metadata(graph, norm, full_tokens, local_tokens, rank, rank_group):
+    """Partition external position/cache metadata with DSA activation rows.
+
+    Covers both MLA regimes. ``MoeLocalTokenRewriter._mark_local_descendants``
+    localizes the MLA activation whether or not MLAPO fused the prolog, so a
+    fused ``mlapo`` / ``mlapo_quant`` node needs the same treatment as the
+    unfused ``apply_rope_single`` / ``siso_reshape_and_cache`` calls. Those two
+    calls are what the unfused branches below key on, and a fused node has
+    neither, so it must be matched explicitly.
+
+    Identify metadata consumers by their operator targets and confirm that each
+    candidate reaches DSA attention before a norm, communication, or dense MLA boundary.
+
+    ``num_prefill_tokens`` / ``num_decode_tokens`` are deliberately left alone:
+    they are global counters and the op splits the local activation between the
+    phases itself (see ``local_mla_phase_token_counts``).
+    """
+    try:
+        rank_index = list(rank_group).index(rank)
+    except ValueError:
+        logger.warning(
+            "rank %s is not part of rank_group %s; skipping MLA metadata sharding",
+            rank,
+            rank_group,
+        )
+        return
+    start = rank_index * local_tokens
+    if not _dsa_attention_sinks(norm):
+        raise RuntimeError("Cannot shard MLA metadata without a DSA attention consumer")
+    queue, visited = list(norm.users), set()
+
+    def shard(source, dim, consumer):
+        shape = _meta_shape(source) if isinstance(source, Node) else None
+        # A scalar or rank-deficient metadata tensor would make shape[dim] raise
+        # IndexError, so validate the axis before indexing it.
+        if shape is None or len(shape) == 0:
+            return source
+        if not -len(shape) <= dim < len(shape) or shape[dim] != full_tokens:
+            logger.debug(
+                "Skipping MLA metadata shard for %s: shape=%s dim=%d full_tokens=%s",
+                source.name,
+                shape,
+                dim,
+                full_tokens,
+            )
+            return source
+        with graph.inserting_before(consumer):
+            sliced = graph.call_function(_SLICE, (source, dim, start, start + local_tokens))
+        sliced.meta = source.meta.copy()
+        if "val" in source.meta:
+            index = [slice(None)] * len(shape)
+            index[dim] = slice(start, start + local_tokens)
+            sliced.meta["val"] = source.meta["val"][tuple(index)]
+        return sliced
+
+    while queue:
+        node = queue.pop(0)
+        if node in visited or node.op == "output":
+            continue
+        visited.add(node)
+        if node.op == "call_function" and node.target in _DSA_ATTENTION_OPS | _DENSE_MLA_ATTENTION_OPS:
+            continue
+        if node.target in _SINGLE_OUTPUT_NORMS | {_ADD_RMS_NORM2, _ALL_REDUCE, _ALL_GATHER, _REDUCE_SCATTER, _MOE_TOPK}:
+            continue
+        wrapped_target = node.args[0] if node.target is _AUTO_FUNCTIONALIZED_V2 and node.args else node.target
+        if (
+            wrapped_target in _UNFUSED_MLA_METADATA_TARGETS | _FUSED_MLAPO_TARGETS
+            or node.target in _INDEX_COPY_TARGETS | _INDEX_PUT_TARGETS
+        ) and _dsa_attention_sinks(node):
+            args = list(node.args)
+            kwargs = dict(node.kwargs)
+            axes = {}
+            if wrapped_target is torch.ops.tensor_cast.apply_rope_single.default:
+                axes = {"cos": -2, "sin": -2}
+            elif wrapped_target in _FUSED_MLAPO_TARGETS:
+                axes = {"cos": -2, "sin": -2, "slot_mapping": 0}
+            elif wrapped_target is torch.ops.tensor_cast.siso_reshape_and_cache.default:
+                axes = {"slot_mapping": 0}
+            if axes:
+                for index, argument in enumerate(wrapped_target._schema.arguments):
+                    if argument.name not in axes:
+                        continue
+                    dim = axes[argument.name]
+                    if node.target is not _AUTO_FUNCTIONALIZED_V2 and index < len(args):
+                        args[index] = shard(args[index], dim, node)
+                    elif kwargs.get(argument.name) is not None:
+                        kwargs[argument.name] = shard(kwargs[argument.name], dim, node)
+                node.kwargs = kwargs
+            elif node.target in _INDEX_COPY_TARGETS:
+                if len(args) >= 3:
+                    args[2] = shard(args[2], 0, node)
+            elif node.target in _INDEX_PUT_TARGETS:
+                if len(args) >= 2 and isinstance(args[1], (list, tuple)):
+                    args[1] = [shard(index, 0, node) if index is not None else None for index in args[1]]
+            node.args = tuple(args)
+        queue.extend(node.users)
 
 
 def _keep_dsa_attention_local(graph, comm, norm, rank, rank_group):
     """Keep the DSA attention region local and restore its output boundary."""
+    sinks = _dsa_attention_sinks(norm)
+    if any(
+        isinstance(phases, (list, tuple)) and True in phases and False in phases
+        for sink in sinks
+        if (phases := sink.kwargs.get("is_decode_values")) is not None
+    ):
+        logger.info("Keeping mixed-phase DSA attention at full-token shape to preserve request boundaries")
+        _insert_all_gather(graph, norm, _shard_dim(norm), rank, rank_group)
+        return
     full_shape = _meta_shape(norm)
     local_shape = _infer_rs_shape(comm, _world_size(rank_group))
     if full_shape is None or local_shape is None:
@@ -667,6 +810,8 @@ def _keep_dsa_attention_local(graph, comm, norm, rank, rank_group):
         full_tokens=full_tokens,
         local_tokens=local_tokens,
     )
+
+    _shard_mla_metadata(graph, norm, full_tokens, local_tokens, rank, rank_group)
 
     # Restore the full-token branch after DSA attention. Dense FFN consumes this
     # all-gather directly; the MoE rewrite keeps gate local while routing the

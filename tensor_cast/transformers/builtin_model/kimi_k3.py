@@ -2086,14 +2086,9 @@ def _make_k3_mla_prolog_hook(original_compute_mla_prolog):
         linear_quant_enabled = (
             self.q_a_proj_scale is not None and self.q_b_proj_scale is not None and self.kv_a_proj_scale is not None
         )
+        # K3 retains its engine-specific prolog contract for both switch values.
         if linear_quant_enabled:
-            return original_compute_mla_prolog(
-                self,
-                hidden_states_view,
-                cos,
-                sin,
-                is_decode_values=is_decode_values,
-            )
+            return self._compute_fused_mla_prolog(hidden_states_view, cos, sin, is_decode_values=is_decode_values)[:4]
 
         qa = torch.mm(hidden_states_view, self.q_a_proj_weight.t())
         return torch.ops.tensor_cast.mla_prolog(
@@ -2839,6 +2834,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
     if not hasattr(MultiheadLatentAttentionTensorCast, "_patched_k3_mla_hooks"):
         _original_mla_forward = MultiheadLatentAttentionTensorCast.forward
         _original_compute_mla_prolog = MultiheadLatentAttentionTensorCast._compute_mla_prolog
+        _original_use_mlapo_fusion = MultiheadLatentAttentionTensorCast._use_mlapo_fusion
         _original_postprocess_attention_output = MultiheadLatentAttentionTensorCast._postprocess_attention_output
 
         def _is_k3_mla(self) -> bool:
@@ -2893,6 +2889,11 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
                 **kwargs,
             )
 
+        def _patched_use_mlapo_fusion(self):
+            # K3 keeps its original four-output prolog and separate cache write.
+            return False if _is_k3_mla(self) else _original_use_mlapo_fusion(self)
+
+        MultiheadLatentAttentionTensorCast._use_mlapo_fusion = _patched_use_mlapo_fusion
         MultiheadLatentAttentionTensorCast._compute_mla_prolog = _patched_compute_mla_prolog
         MultiheadLatentAttentionTensorCast._postprocess_attention_output = _patched_postprocess_attention_output
         MultiheadLatentAttentionTensorCast.forward = _patched_mla_forward_with_k3_position_embeddings

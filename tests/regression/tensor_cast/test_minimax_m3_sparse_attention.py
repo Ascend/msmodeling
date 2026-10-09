@@ -487,6 +487,11 @@ def test_minimax_m3_performance_model_helpers_and_registered_ops():
     )
     siso_props = siso_info.get_perf_properties()
     assert siso_props.memory_write_bytes == key.numel() * kv_cache.element_size()
+    torch.ops.tensor_cast.siso_reshape_and_cache.default(
+        key.unsqueeze(1),
+        torch.empty(4, 4, 1, 4, dtype=torch.bfloat16, device="meta"),
+        slot_mapping,
+    )
 
     gate = torch.empty(2, 8, dtype=torch.bfloat16, device="meta")
     up = torch.empty_like(gate)

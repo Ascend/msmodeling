@@ -206,6 +206,20 @@ class OpInvokeInfo:
         return f"OpInvokeInfo({self.func}, {self.args}, {self.kwargs}, {self.out})"
 
 
+def get_named_args(op_invoke_info: "OpInvokeInfo", min_args: int = 0) -> dict[str, Any]:
+    """Return positional and keyword op arguments keyed by schema name."""
+    named = dict(op_invoke_info.kwargs or {})
+    schema = op_invoke_info.func._schema
+    named.update(
+        {
+            argument.name: value
+            for index, (argument, value) in enumerate(zip(schema.arguments, op_invoke_info.args))
+            if index >= min_args
+        }
+    )
+    return named
+
+
 class Region:
     # if A region is a refernce of B region, then B is root region
     root_region_id_to_reference_count = {}

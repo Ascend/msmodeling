@@ -20,7 +20,7 @@ from typing import Any, Optional, TYPE_CHECKING
 
 import torch
 
-from .. import ops  # noqa: F401
+from .. import config, ops  # noqa: F401
 from ..model_config import MlaConfig, MultiheadLatentAttentionQuantConfig
 from ..parallel_group import _DEFAULT_PG, ParallelGroup
 from ..utils import exact_division
@@ -32,28 +32,51 @@ from .quant_linear import TensorCastQuantLinear
 from .utils import get_partial_sharded, ModelWrapperBase
 
 
-def _get_request_phase_values(attention_meta: Optional[AttentionMetadataBase]) -> Optional[list[bool]]:
+def _get_request_phase_values(
+    attention_meta: Optional[AttentionMetadataBase],
+) -> Optional[list[bool]]:
     """Return per-request phase metadata (``True`` means decode), if present."""
 
     return getattr(attention_meta, "is_decode_values", None)
 
 
-def _get_request_query_lens(attention_meta: Optional[AttentionMetadataBase]) -> Optional[torch.Tensor]:
+def _get_request_query_lens(
+    attention_meta: Optional[AttentionMetadataBase],
+) -> Optional[torch.Tensor]:
     """Return materialized per-request query lengths, if present."""
 
     return getattr(attention_meta, "query_lens", None)
 
 
+def _get_request_query_lens_values(attention_meta: Optional[AttentionMetadataBase]) -> Optional[list[int]]:
+    if attention_meta is None:
+        return None
+    lengths = getattr(attention_meta, "query_lens_values", None)
+    if lengths is not None:
+        return lengths
+    query_lens = _get_request_query_lens(attention_meta)
+    if query_lens is None:
+        return None
+    try:
+        return [int(length) for length in query_lens.tolist()]
+    except (RuntimeError, ValueError, TypeError):
+        return None
+
+
 def _get_mla_phase_token_counts(
-    attention_meta: Optional[AttentionMetadataBase], total_tokens: int, decode_only: bool
+    attention_meta: Optional[AttentionMetadataBase],
+    total_tokens: int,
+    decode_only: bool,
 ) -> tuple[int, int]:
     """Return concrete Prefill/Decode token counts without tensor data control flow."""
     phases = _get_request_phase_values(attention_meta)
-    query_lens = getattr(attention_meta, "query_lens_values", None) if attention_meta is not None else None
+    query_lens = _get_request_query_lens_values(attention_meta)
     if phases is not None and query_lens is not None and len(phases) == len(query_lens):
         prefill_tokens = sum(length for length, is_decode in zip(query_lens, phases) if not is_decode)
         decode_tokens = sum(length for length, is_decode in zip(query_lens, phases) if is_decode)
         return prefill_tokens, decode_tokens
+    if phases is not None and True in phases and False in phases:
+        raise ValueError("Mixed MLA phases require materialized per-request query lengths")
     if attention_meta is not None and attention_meta.is_dcp_decode:
         return 0, total_tokens
     return (0, total_tokens) if decode_only else (total_tokens, 0)
@@ -265,15 +288,143 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         """
         return None
 
-    def _compute_mla_prolog(
+    def _use_mlapo_fusion(self) -> bool:
+        return config.compilation.fusion_patterns.enable_mlapo
+
+    @torch.no_grad()
+    def _compute_mla_prolog(self, hidden_states_view, cos, sin, *, is_decode_values=None):
+        """Unfused preprocessing; adapters may preserve their own prolog hook."""
+        if self.q_lora_rank is None:
+            q = self.q_proj(hidden_states_view)
+            qa_normed = hidden_states_view.new_empty((hidden_states_view.shape[0], 0))
+        else:
+            qa = self.q_a_proj(hidden_states_view)
+            qa_normed = torch.ops.tensor_cast.rms_norm(
+                qa,
+                self.q_a_layernorm.weight,
+                (
+                    getattr(
+                        self.q_a_layernorm,
+                        "variance_epsilon",
+                        getattr(self.q_a_layernorm, "eps", None),
+                    )
+                    or torch.finfo(qa.dtype).eps
+                ),
+            )
+            q = self.q_b_proj(qa_normed)
+        q = q.view(-1, self._num_heads_per_rank, self.qk_head_dim)
+        q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        kv = self.kv_a_proj_with_mqa(hidden_states_view)
+        kv_c, k_rope = kv.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c = torch.ops.tensor_cast.rms_norm(
+            kv_c,
+            self.kv_a_layernorm.weight,
+            (
+                getattr(
+                    self.kv_a_layernorm,
+                    "variance_epsilon",
+                    getattr(self.kv_a_layernorm, "eps", None),
+                )
+                or torch.finfo(kv_c.dtype).eps
+            ),
+        )
+        q_rope = torch.ops.tensor_cast.apply_rope_single(q_rope, cos, sin, True, False)
+        k_rope = torch.ops.tensor_cast.apply_rope_single(k_rope, cos, sin, True, False)
+        return torch.cat((q_nope, q_rope), dim=-1), kv_c, k_rope, qa_normed
+
+    def _compute_unfused_mla_projections(self, kv, q, prefill, decode, attention_meta=None):
+        # Phase counts are local; empty slices preserve the output contracts.
+        prefill, decode = ops.mla.local_mla_phase_token_counts(kv.shape[0], prefill, decode)
+        kv_input = kv[:prefill]
+        q_decode = q[prefill : prefill + decode]
+        phases = _get_request_phase_values(attention_meta)
+        lengths = _get_request_query_lens_values(attention_meta)
+        if prefill and decode and phases is not None and lengths is not None:
+            prefill_parts, decode_parts = [], []
+            offset = 0
+            declared = sum(lengths)
+            for length, is_decode in zip(lengths, phases):
+                start = offset * kv.shape[0] // declared
+                offset += length
+                end = offset * kv.shape[0] // declared
+                if is_decode:
+                    decode_parts.append(q[start:end])
+                else:
+                    prefill_parts.append(kv[start:end])
+            kv_input = torch.cat(prefill_parts, dim=0)
+            q_decode = torch.cat(decode_parts, dim=0)
+            prefill, decode = kv_input.shape[0], q_decode.shape[0]
+        elif prefill and decode:
+            raise ValueError("Mixed MLA projections require materialized per-request query lengths and phases")
+        projected = kv.new_empty((0, self._num_heads_per_rank, self.qk_nope_head_dim + self.v_head_dim))
+        absorbed = q.new_empty((0, self._num_heads_per_rank, self.kv_lora_rank + self.qk_rope_head_dim))
+        if prefill:
+            if self.quant_config is None:
+                projected = torch.mm(kv_input, self.kv_b_proj_weight_t)
+            else:
+                qc = self.quant_config
+                quantized = torch.ops.tensor_cast.quantize(kv_input, qc.kv_projected_scale, qc.kv_projected_offset)
+                projected = torch.ops.tensor_cast.static_quant_linear(
+                    quantized,
+                    self.kv_b_proj_weight_t,
+                    self.kv_b_proj_scale,
+                    self.kv_b_proj_offset,
+                    qc.kv_projected_scale,
+                    qc.kv_projected_offset,
+                    None,
+                    kv.dtype,
+                )
+            projected = projected.view(-1, self._num_heads_per_rank, self.qk_nope_head_dim + self.v_head_dim)
+        if decode:
+            q_nope = q_decode[..., : self.qk_nope_head_dim].transpose(0, 1)
+            if self.quant_config is None:
+                absorbed = torch.bmm(q_nope, self.W_UK_T)
+            else:
+                qc = self.quant_config
+                quantized = torch.ops.tensor_cast.quantize(q_nope, qc.qk_scale, qc.qk_offset)
+                heads = self._num_heads_per_rank
+                absorbed = torch.ops.tensor_cast.grouped_matmul_quant(
+                    list(quantized.unbind(0)),
+                    list(self.W_UK_T.unbind(0)),
+                    [self.kv_b_proj_scale] * heads,
+                    [self.kv_b_proj_offset] * heads,
+                    [qc.qk_scale] * heads,
+                    [qc.qk_offset] * heads,
+                    [None] * heads,
+                    q.dtype,
+                ).view(heads, decode, self.kv_lora_rank)
+            absorbed = torch.cat(
+                (absorbed.transpose(0, 1), q_decode[..., self.qk_nope_head_dim :]),
+                dim=-1,
+            )
+        return projected, absorbed
+
+    def _write_unfused_mla_cache(self, kv, rope, cache, slots):
+        if slots is None:
+            return
+        values = torch.cat((kv, rope), dim=-1)
+        # Reuse the dedicated cache-write op. A bare ``aten.index_copy_`` has no
+        # registered op-properties functor, so the analytic model falls back to
+        # the generic bandwidth functor and charges the entire ``kv_cache`` as a
+        # write plus a read/write argument on every call, instead of only the
+        # appended rows. This is the default path whenever MLAPO is disabled.
+        torch.ops.tensor_cast.siso_reshape_and_cache(values, cache, slots.reshape(-1))
+
+    def _compute_fused_mla_prolog(
         self,
         hidden_states_view: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        *,
-        is_decode_values: Optional[list[bool]] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Build MLA Q/KV states; model adapters may override only this boundary."""
+        **fusion_kwargs,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """Emit fused prolog, phase projections and cache write as one op."""
         if self.q_lora_rank is None:
             self.q_a_proj_weight, self.q_a_proj_scale, self.q_a_proj_offset = self.extract_qparams(self.q_proj)
             self.q_a_layernorm_weight = None
@@ -293,6 +444,9 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             and (self.q_lora_rank is None or getattr(self, "q_b_proj_scale", None) is not None)
             and getattr(self, "kv_a_proj_scale", None) is not None
         )
+        cache = fusion_kwargs.pop("kv_cache", None)
+        if cache is None:
+            cache = hidden_states_view.new_empty((0,))
         if linear_quant_enabled:
             return torch.ops.tensor_cast.mlapo_quant(
                 hidden_states_view,
@@ -315,7 +469,8 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                 self.q_b_proj_offset,
                 self.kv_a_proj_scale,
                 self.kv_a_proj_offset,
-                is_decode_values=is_decode_values,
+                cache,
+                **fusion_kwargs,
             )
         return torch.ops.tensor_cast.mlapo(
             hidden_states_view,
@@ -332,7 +487,8 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             self.qk_rope_head_dim,
             self.kv_lora_rank,
             self.q_lora_rank,
-            is_decode_values=is_decode_values,
+            cache,
+            **fusion_kwargs,
         )
 
     def _postprocess_attention_output(self, attn_output: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -354,12 +510,40 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         num_tokens = batch_size * seq_length
         hidden_states_view = hidden_states.view(num_tokens, -1)
         cos, sin = position_embeddings
-        q_states, kv_c_normed, k_rot, qa_normed = self._compute_mla_prolog(
-            hidden_states_view,
-            cos,
-            sin,
-            is_decode_values=getattr(attention_meta, "is_decode_values", None),
+        num_prefill_tokens, num_decode_tokens = _get_mla_phase_token_counts(
+            attention_meta, num_tokens, self.decode_only
         )
+        fuse_mlapo = self._use_mlapo_fusion()
+        if fuse_mlapo:
+            projection_scales = {}
+            if self.quant_config is not None:
+                projection_scales = {
+                    "kv_projected_scale": self.quant_config.kv_projected_scale,
+                    "kv_projected_offset": self.quant_config.kv_projected_offset,
+                    "qk_scale": self.quant_config.qk_scale,
+                    "qk_offset": self.quant_config.qk_offset,
+                    "projection_weight_scale": self.kv_b_proj_scale,
+                    "projection_weight_offset": self.kv_b_proj_offset,
+                    "kv_scale": self.quant_config.kv_scale,
+                    "kv_offset": self.quant_config.kv_offset,
+                }
+            q_states, kv_c_normed, k_rot, qa_normed, projected_kv, absorbed_q = self._compute_fused_mla_prolog(
+                hidden_states_view,
+                cos,
+                sin,
+                kv_b_proj=self.kv_b_proj_weight_t,
+                w_uk_t=self.W_UK_T,
+                num_prefill_tokens=num_prefill_tokens,
+                num_decode_tokens=num_decode_tokens,
+                kv_cache=kv_cache,
+                slot_mapping=attention_meta.slot_mapping if attention_meta is not None else None,
+                is_decode_values=_get_request_phase_values(attention_meta),
+                **projection_scales,
+            )
+        else:
+            q_states, kv_c_normed, k_rot, qa_normed = self._compute_mla_prolog(
+                hidden_states_view, cos, sin, is_decode_values=_get_request_phase_values(attention_meta)
+            )
 
         if self.q_lora_rank is not None:
             qa_normed = qa_normed.view(batch_size, seq_length, -1)
@@ -377,67 +561,12 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         seq_lens = attention_meta.seq_lens if attention_meta else None
         query_lens = attention_meta.query_lens if attention_meta else None
 
-        num_prefill_tokens, num_decode_tokens = _get_mla_phase_token_counts(
-            attention_meta, int(q_states.shape[0]), self.decode_only
-        )
-        kv_projection_op = (
-            torch.ops.tensor_cast.mla_kv_projection_quant
-            if self.quant_config is not None
-            else torch.ops.tensor_cast.mla_kv_projection
-        )
-        q_absorb_op = (
-            torch.ops.tensor_cast.mla_q_absorb_projection_quant
-            if self.quant_config is not None
-            else torch.ops.tensor_cast.mla_q_absorb_projection
-        )
-        projection_quant_args = ()
-        q_absorb_quant_args = ()
-        if self.quant_config is not None:
-            projection_quant_args = (
-                self.quant_config.kv_projected_scale,
-                self.quant_config.kv_projected_offset,
-                self.kv_b_proj_scale,
-                self.kv_b_proj_offset,
+        if not fuse_mlapo:
+            num_prefill_tokens, num_decode_tokens = _get_mla_phase_token_counts(
+                attention_meta, int(q_states.shape[0]), self.decode_only
             )
-            q_absorb_quant_args = (
-                self.quant_config.qk_scale,
-                self.quant_config.qk_offset,
-                self.kv_b_proj_scale,
-                self.kv_b_proj_offset,
-            )
-        if num_prefill_tokens > 0:
-            projected_kv = kv_projection_op(
-                kv_c_normed,
-                self.kv_b_proj_weight_t,
-                num_prefill_tokens,
-                self._num_heads_per_rank,
-                num_decode_tokens,
-                *projection_quant_args,
-            )
-        else:
-            projected_kv = torch.empty(
-                0,
-                self._num_heads_per_rank,
-                self.qk_nope_head_dim + self.v_head_dim,
-                dtype=kv_c_normed.dtype,
-                device=kv_c_normed.device,
-            )
-        if num_decode_tokens > 0:
-            absorbed_q = q_absorb_op(
-                q_states,
-                self.W_UK_T,
-                num_decode_tokens,
-                self.qk_rope_head_dim,
-                num_prefill_tokens,
-                *q_absorb_quant_args,
-            )
-        else:
-            absorbed_q = torch.empty(
-                0,
-                self._num_heads_per_rank,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-                dtype=q_states.dtype,
-                device=q_states.device,
+            projected_kv, absorbed_q = self._compute_unfused_mla_projections(
+                kv_c_normed, q_states, num_prefill_tokens, num_decode_tokens, attention_meta
             )
 
         # --- Decode Context Parallel (decode path only) ---
@@ -476,7 +605,10 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             #    Flooring to 0 there makes the cost model bill the layer as "no KV to
             #    read" (both the FLOPs term ``sum(query_lens * seq_lens)`` and the
             #    KV-read term ``sum(seq_lens * ...)`` collapse), understating its time.
-            seq_lens = torch.clamp(torch.div(seq_lens + (dcp_size - 1), dcp_size, rounding_mode="floor"), min=1)
+            seq_lens = torch.clamp(
+                torch.div(seq_lens + (dcp_size - 1), dcp_size, rounding_mode="floor"),
+                min=1,
+            )
 
         if self.quant_config is not None:
             quant_config = self.quant_config
@@ -487,24 +619,25 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                 quant_config.query_offset,
                 out_dtype,
             )
-            kv_c_normed = torch.ops.tensor_cast.quantize(
-                kv_c_normed,
-                quant_config.kv_scale,
-                quant_config.kv_offset,
-                out_dtype,
-            )
-            k_rot = torch.ops.tensor_cast.quantize(
-                k_rot,
-                quant_config.kv_scale,
-                quant_config.kv_offset,
-                out_dtype,
-            )
+            if not fuse_mlapo:
+                kv_c_normed = torch.ops.tensor_cast.quantize(
+                    kv_c_normed,
+                    quant_config.kv_scale,
+                    quant_config.kv_offset,
+                    out_dtype,
+                )
+                k_rot = torch.ops.tensor_cast.quantize(
+                    k_rot,
+                    quant_config.kv_scale,
+                    quant_config.kv_offset,
+                    out_dtype,
+                )
 
-            if attention_meta is not None:
-                torch.ops.tensor_cast.concat_and_cache_mla(kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping)
+            if attention_meta is not None and not fuse_mlapo:
+                self._write_unfused_mla_cache(kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping)
         else:
-            if attention_meta is not None:
-                torch.ops.tensor_cast.concat_and_cache_mla(kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping)
+            if attention_meta is not None and not fuse_mlapo:
+                self._write_unfused_mla_cache(kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping)
 
         extra_backend_kwargs = {
             "topk_limit": None,
@@ -737,6 +870,7 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
         )
         self.indexer = DeepseekSparseAttentionIndexer(
             self._inner.indexer,
+            split_bf16=getattr(getattr(self._inner, "config", None), "model_type", None) == "glm_moe_dsa",
             topk_limit=_resolve_sparse_topk_limit(
                 self._inner.indexer,
                 config=getattr(self._inner, "config", None),
@@ -794,9 +928,45 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
 
 
 class DeepseekSparseAttentionIndexer(ModelWrapperBase):
-    def __init__(self, indexer, topk_limit: Optional[int] = None):
+    def __init__(self, indexer, topk_limit: Optional[int] = None, split_bf16: bool = True):
         super().__init__(indexer)
         self._topk_limit = _resolve_sparse_topk_limit(indexer, topk_limit=topk_limit)
+        self._split_bf16 = split_bf16
+        # The fused BF16 indexer wants fp32 normalization parameters, but
+        # ``indexer.k_norm`` is shared: ``Module.float()`` retypes it in place, so
+        # every other reader of that submodule silently loses its original dtype
+        # (the GLM5-next indexer reads the same submodule and does not upcast its
+        # input). Keep wrapper-owned fp32 tensors instead, mirroring the
+        # ``.weight.data`` pattern used by the MLA wrappers, so that no submodule
+        # is registered and no extra ``state_dict`` key appears.
+        self._k_norm_weight: Optional[torch.Tensor] = None
+        self._k_norm_bias: Optional[torch.Tensor] = None
+        self._k_norm_eps: Optional[float] = None
+        if split_bf16 and hasattr(indexer, "k_norm"):
+            k_norm = indexer.k_norm
+            self._k_norm_weight = k_norm.weight.detach().float()
+            bias = getattr(k_norm, "bias", None)
+            self._k_norm_bias = None if bias is None else bias.detach().float()
+            self._k_norm_eps = getattr(k_norm, "eps", None)
+
+    @property
+    def k_norm_weight(self) -> torch.Tensor:
+        """fp32 k-norm weight when ``split_bf16`` is on, else the shared weight."""
+        if self._k_norm_weight is not None:
+            return self._k_norm_weight
+        return self.k_norm.weight
+
+    @property
+    def k_norm_bias(self) -> Optional[torch.Tensor]:
+        if self._k_norm_weight is not None:
+            return self._k_norm_bias
+        return getattr(self.k_norm, "bias", None)
+
+    @property
+    def k_norm_eps(self) -> Optional[float]:
+        if self._k_norm_weight is not None:
+            return self._k_norm_eps
+        return self.k_norm.eps
 
     @property
     def num_heads(self) -> int:
@@ -822,29 +992,48 @@ class DeepseekSparseAttentionIndexer(ModelWrapperBase):
         indexer_cache: torch.Tensor,
         attention_meta: Optional[AttentionMetadataBase] = None,
     ):
-        cos, sin = position_embeddings
-        wq_b_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(self.wq_b)
-        wk_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(self.wk)
-        weights_proj_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(self.weights_proj)
-        # The performance model infers fp8-vs-bf16 behavior from the cache dtype.
-        # The semantic op itself stays shape-only and does not encode the cost model.
-        return torch.ops.tensor_cast.dsa_indexer(
-            hidden_states,
-            qa_normed,
-            cos,
-            sin,
-            indexer_cache,
-            attention_meta.slot_mapping if attention_meta else None,
-            attention_meta.block_table_tensor if attention_meta else None,
-            attention_meta.seq_lens if attention_meta is not None else None,
-            wq_b_weight,
-            wk_weight,
-            weights_proj_weight,
-            self.k_norm.weight,
-            self.num_heads,
-            self.head_dim,
-            self.qk_rope_head_dim,
-            self.topk_limit,
-            query_lens=_get_request_query_lens(attention_meta),
-            is_decode_values=_get_request_phase_values(attention_meta),
+        return self._forward_expanded_indexer(
+            hidden_states, qa_normed, position_embeddings, indexer_cache, attention_meta
         )
+
+    def _forward_expanded_indexer(self, hidden_states, qa_normed, position_embeddings, indexer_cache, attention_meta):
+        """Expose indexer preparation; the core owns scoring and top-k only."""
+        cos, sin = position_embeddings
+        hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
+        qa = qa_normed.reshape(-1, qa_normed.shape[-1])
+        k = self.wk(hidden)
+        norm_input = k.float() if self._split_bf16 else k
+        k = torch.ops.tensor_cast.layer_norm(
+            norm_input,
+            self.k_norm_weight,
+            self.k_norm_bias,
+            self.k_norm_eps,
+        ).to(hidden_states.dtype)
+        k_rope, k_nope = k.split([self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
+        k_rope = torch.ops.tensor_cast.apply_rope_single(k_rope, cos, sin, False, False)
+        k = torch.cat((k_rope, k_nope), dim=-1)
+        slots = attention_meta.slot_mapping if attention_meta is not None else None
+        if slots is not None:
+            torch.ops.tensor_cast.siso_reshape_and_cache(k, indexer_cache, slots.reshape(-1))
+        weights = self.weights_proj(hidden)
+        q = self.wq_b(qa).view(-1, self.num_heads, self.head_dim)
+        q_rope, q_nope = q.split([self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
+        q_rope = torch.ops.tensor_cast.apply_rope_single(q_rope, cos, sin, False, False)
+        q = torch.cat((q_rope, q_nope), dim=-1)
+        topk = self.topk_limit
+        if attention_meta is not None:
+            active_len = getattr(attention_meta, "max_total_seq_len", None)
+            if active_len is None and (lengths := getattr(attention_meta, "seq_lens_values", None)):
+                active_len = max(lengths)
+            if active_len is not None:
+                topk = min(topk, int(active_len))
+        return torch.ops.tensor_cast.dsa_indexer(
+            q,
+            weights,
+            indexer_cache,
+            attention_meta.block_table_tensor if attention_meta is not None else None,
+            attention_meta.seq_lens if attention_meta is not None else None,
+            topk,
+            _get_request_query_lens(attention_meta),
+            is_decode_values=_get_request_phase_values(attention_meta),
+        ).view(hidden_states.shape[0], -1, topk)

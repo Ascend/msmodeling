@@ -282,6 +282,7 @@ def _build_runtime_artifact(
     )
 
 
+
 def capture_model_runner_artifact(
     model_runner: object,
     *,
@@ -355,12 +356,11 @@ def capture_artifact_for_profile(profile: object) -> SimulationExecutionArtifact
         query_len=profile.query_length,
         context_length=0 if profile.context_length is None else profile.context_length,
         do_compile=profile.do_compile,
+        enable_mlapo=profile.enable_mlapo,
         decode=profile.phase is ExecutionPhase.DECODE,
         num_mtp_tokens=profile.num_mtp_tokens,
         num_hidden_layers_override=profile.num_hidden_layers_override,
-        world_size=(
-            parallel.tensor_parallel_size * parallel.pipeline_parallel_size * parallel.data_parallel_size
-        ),
+        world_size=(parallel.tensor_parallel_size * parallel.pipeline_parallel_size * parallel.data_parallel_size),
         tp_size=parallel.tensor_parallel_size,
         pp_size=parallel.pipeline_parallel_size,
         dp_size=parallel.data_parallel_size,
@@ -461,6 +461,7 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         value = getattr(hf_config, key, None)
         if value is not None:
             model_config[key] = value
+    model_config["enable_mlapo"] = profile.enable_mlapo
     root_model_type = getattr(root_config, "model_type", None)
     # Qwen3-VL, GLM-4V and Kimi-K2.5 Specs intentionally match their multimodal root
     # types. Other nested configs keep the effective text type copied above;
@@ -510,20 +511,15 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         if not isinstance(deepstack_indexes, (list, tuple)):
             raise SourceLoadError("vision_config.deepstack_visual_indexes must be a list or tuple")
         if len(deepstack_indexes) != len(set(deepstack_indexes)) or any(
-            isinstance(index, bool) or not isinstance(index, int) or index < 0
-            for index in deepstack_indexes
+            isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in deepstack_indexes
         ):
-            raise SourceLoadError(
-                "vision_config.deepstack_visual_indexes must contain unique non-negative integers"
-            )
+            raise SourceLoadError("vision_config.deepstack_visual_indexes must contain unique non-negative integers")
         if isinstance(depth, int) and any(index >= depth for index in deepstack_indexes):
             raise SourceLoadError("vision_config.deepstack_visual_indexes contains an out-of-range index")
         if isinstance(depth, int) and depth > 0:
             deepstack_set = set(deepstack_indexes)
             model_config["vision_layer_kinds"] = tuple(
-                "qwen3_vl_deepstack_vision_block"
-                if index in deepstack_set
-                else "qwen3_vl_vision_block"
+                "qwen3_vl_deepstack_vision_block" if index in deepstack_set else "qwen3_vl_vision_block"
                 for index in range(depth)
             )
 

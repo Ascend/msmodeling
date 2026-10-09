@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
 import torch
 
 from tools.model_diagnostics import create_model_diagnostics_application
@@ -41,6 +42,13 @@ def test_kimi_k25_padding_metadata_uses_int32_cumulative_lengths() -> None:
     assert dtype_attributes
     assert all(isinstance(attribute.value, ast.Name) for attribute in dtype_attributes)
     assert all(attribute.value.id == "torch" for attribute in dtype_attributes)
+
+
+@pytest.fixture(autouse=True)
+def _reset_kimi_k25_patch_guard() -> None:
+    import tensor_cast.transformers.builtin_model.kimi_k25 as kimi_k25
+
+    kimi_k25._patched_kimi_k25 = False
 
 
 def test_kimi_k25_offline_capture_and_compare() -> None:

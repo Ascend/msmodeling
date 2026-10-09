@@ -3990,21 +3990,11 @@ def _make_glm5_dsa_op(
     op = _make_op_info(
         _FakeTorchOp("tensor_cast.dsa_indexer.default"),
         [
-            torch.empty(1, query_len, 6144, device="meta", dtype=torch.bfloat16),
-            torch.empty(1, query_len, 2048, device="meta", dtype=torch.bfloat16),
-            torch.empty(1, query_len, 64, device="meta", dtype=torch.bfloat16),
-            torch.empty(1, query_len, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(query_len, 32, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(query_len, 32, device="meta", dtype=torch.bfloat16),
             torch.empty(33, 128, 128, device="meta", dtype=torch.bfloat16),
-            torch.empty(query_len, device="meta", dtype=torch.int64),
             torch.empty(1, 33, device="meta", dtype=torch.int64),
             torch.tensor(seq_lens_values, dtype=torch.int64),
-            torch.empty(4096, 2048, device="meta", dtype=torch.int8),
-            torch.empty(128, 6144, device="meta", dtype=torch.bfloat16),
-            torch.empty(32, 6144, device="meta", dtype=torch.bfloat16),
-            torch.empty(128, device="meta", dtype=torch.bfloat16),
-            32,
-            128,
-            64,
             2048,
             torch.tensor(query_lens_values, dtype=torch.int64),
         ],
@@ -4166,6 +4156,133 @@ def test_glm5_bf16_mlapo_cache_postprocess_can_hit(tmp_path):
     assert result.source == QuerySource.MEASURED
     assert result.latency_us == pytest.approx(42.0)
     assert "KvRmsNormRopeCache" in result.details["kernel_type"]
+
+
+def test_bf16_mlapo_requires_all_sub_kernels(tmp_path):
+    """A partial BF16 MLAPO hit must miss instead of silently charging a subset.
+
+    ``_decompose_mlapo`` returns the MLAPO core plus the absorbed
+    ``mla_kv_projection`` / ``mla_q_absorb_projection`` sub-kernels, so a
+    coincidental subset is not a valid answer: it drops the uncovered
+    sub-kernel's latency. The quantized entry already opts in, so the BF16 entry
+    must agree, and the shipped database must carry the flag.
+    """
+    shipped = ProfilingDataSource(_glm5_a3_data_dir())._op_mapping["operator_mappings"]["tensor_cast.mlapo.default"]
+    assert shipped.get("require_all_sub_kernels") is True
+
+    base_yaml = (
+        'version: "test"\n'
+        "operator_mappings:\n"
+        '  "tensor_cast.mlapo.default":\n'
+        "    composite: true\n"
+        "    decomposer: true\n"
+    )
+    decomposer_options = (
+        "    decomposer_options:\n      kv_cache_query:\n        mode: pool_dim0_agnostic\n        block_size: 128\n"
+    )
+    csv_header = (
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us)\n"
+    )
+
+    def build(directory, *, require_all_sub_kernels):
+        directory.mkdir()
+        (directory / "op_mapping.yaml").write_text(
+            base_yaml + ("    require_all_sub_kernels: true\n" if require_all_sub_kernels else "") + decomposer_options,
+            encoding="utf-8",
+        )
+        (directory / "MatMulV2.csv").write_text(
+            csv_header
+            + '"8,64;40,64","DT_BF16;DT_BF16","ND;ND","8,40","DT_BF16","ND",10.0\n'
+            + '"8,16;32,16","DT_BF16;DT_BF16","ND;ND","8,32","DT_BF16","ND",20.0\n',
+            encoding="utf-8",
+        )
+        (directory / "RmsNorm.csv").write_text(
+            csv_header + '"8,16;16","DT_BF16;DT_BF16","ND;ND","8,16","DT_BF16","ND",5.0\n',
+            encoding="utf-8",
+        )
+        # KvRmsNormRopeCache.csv intentionally absent: one sub-kernel cannot resolve.
+        return directory
+
+    partial = ProfilingDataSource(build(tmp_path / "partial", require_all_sub_kernels=False)).lookup(
+        _make_glm5_bf16_mlapo_op()
+    )
+    assert partial is not None
+    assert partial.source == QuerySource.PARTIAL
+    assert partial.latency_us == pytest.approx(35.0)
+
+    strict = ProfilingDataSource(build(tmp_path / "strict", require_all_sub_kernels=True)).lookup(
+        _make_glm5_bf16_mlapo_op()
+    )
+    assert strict is None
+
+
+def test_bf16_mlapo_shares_token_semantics_but_never_goes_opaque(tmp_path):
+    """BF16 MLAPO takes the quantized entry's SP token partition, not its opaqueness.
+
+    ``mlapo_quant`` falls back to the opaque ``mla_preprocess_0_mix_aic`` query
+    outside the sequence-parallel prefill regime. That regime is not transferable
+    to BF16: every measured row of that kernel carries int8 weights, so an opaque
+    query has no BF16-weight answer to give and would instead hand a BF16
+    operator a quantized kernel's latency. The two variants therefore share the
+    SP token partition while only the quantized one may go opaque.
+    """
+    shipped = ProfilingDataSource(_glm5_a3_data_dir())._op_mapping["operator_mappings"]
+    bf16_options = shipped["tensor_cast.mlapo.default"]["decomposer_options"]
+    quant_options = shipped["tensor_cast.mlapo_quant.default"]["decomposer_options"]
+
+    # Shared token semantics: the SP activation axis is partitioned, idempotently.
+    assert quant_options["projection_token_partition"] == "tp"
+    assert bf16_options["projection_token_partition"] == "tp"
+    # Opaque fallback stays quant-only.
+    assert "visible_kernel_regime" not in bf16_options
+    assert "opaque_kernel" not in bf16_options
+    assert quant_options["opaque_kernel"]["weight_quantized"] is True
+
+    opaque_csv = _glm5_a3_data_dir() / "mla_preprocess_0_mix_aic.csv"
+    if not _is_materialized_lfs_payload(opaque_csv):
+        pytest.skip("opaque MLAPO kernel data is not materialized")
+    source = ProfilingDataSource(_glm5_a3_data_dir())
+    opaque_rows = source._load_csv("mla_preprocess_0_mix_aic")
+    assert opaque_rows is not None and not opaque_rows.empty
+    # The justification for the asymmetry above, pinned to the data itself.
+    quantized_flags = opaque_rows["Runtime weight_quantized"].astype(str).str.lower()
+    assert set(quantized_flags) == {"true"}
+
+
+def test_mlapo_miss_reason_names_the_operator_that_missed(tmp_path, monkeypatch):
+    """The regime miss must not blame a hardcoded operator name.
+
+    Reporting ``mlapo_quant`` for a ``mlapo`` miss is misleading once the BF16
+    entry can carry the same sequence-parallel regime gate, so the reason has to
+    point at the operator the caller actually invoked.
+    """
+    from tensor_cast import config
+
+    monkeypatch.setattr(config.compilation.passes, "enable_sequence_parallel", False)
+    (tmp_path / "op_mapping.yaml").write_text(
+        'version: "test"\n'
+        "operator_mappings:\n"
+        '  "tensor_cast.mlapo.default":\n'
+        "    composite: true\n"
+        "    decomposer: true\n"
+        "    decomposer_options:\n"
+        "      visible_kernel_regime:\n"
+        "        requires_sequence_parallel: true\n"
+        "      kv_cache_query:\n"
+        "        mode: pool_dim0_agnostic\n"
+        "        block_size: 128\n",
+        encoding="utf-8",
+    )
+    source = ProfilingDataSource(tmp_path)
+    mapping = source._op_mapping["operator_mappings"]["tensor_cast.mlapo.default"]
+
+    decomposition = source._lookup_composite_decomposed(_make_glm5_bf16_mlapo_op(), mapping, _decompose_mlapo)
+    assert decomposition is None
+    assert source.last_miss_reason == (
+        "structural_mismatch:tensor_cast.mlapo.default:opaque_mla_preprocess:"
+        "visible_kernel_regime_requires_sequence_parallel"
+    )
 
 
 def test_cache_postprocess_accepts_capacity_only_duplicate_rows(tmp_path):
@@ -4518,7 +4635,7 @@ def test_glm5_dsa_chunked_prefill_interpolation_uses_specialized_scatter_lookup(
     assert result is not None
     assert result.source == QuerySource.INTERPOLATED
     sub_kernel_shapes = {detail.kernel_type: detail for detail in result.sub_kernel_shapes}
-    assert sub_kernel_shapes["ScatterNdUpdate"].shape_match_rule == "scatter_cache_pool_dim0_agnostic"
+    assert "LightningIndexer" in sub_kernel_shapes
     # A denser database may keep q_tokens exact and interpolate only effective_kv_len.
     # attention_axes records the complete runtime workload independent of interpolation dimensionality.
     assert leaf_results["LightningIndexer"].details["attention_axes"] == {
@@ -4696,7 +4813,7 @@ def test_glm5_sparse_mla_dsa_cp_does_not_shard_local_tokens_twice():
 )
 def test_glm5_mlapo_quant_dsa_cp_uses_global_q_head_count_once(num_tokens, tp_size, expected_tokens):
     op = _make_op_info(
-        _FakeTorchOp("tensor_cast.mlapo_quant.default"),
+        torch.ops.tensor_cast.mlapo_quant.default,
         [
             torch.empty(num_tokens, 6144, device="meta", dtype=torch.bfloat16),
             torch.empty(1, num_tokens, 64, device="meta", dtype=torch.bfloat16),
@@ -5065,7 +5182,7 @@ def test_glm5_lightning_indexer_uses_rank_zero_sp_context():
     )
 
     assert specs is not None
-    assert specs[0].input_shapes == [(256, 6144), (128, 6144)]
+    assert specs[0].input_shapes == []
     assert specs[-1].attention_params["q_shape_3d"] == (256, 32, 128)
     assert specs[-1].attention_params["actual_seq_lengths_values"] == [256]
     assert specs[-1].attention_params["actual_seq_lengths_kv_values"] == [256]
@@ -5075,7 +5192,7 @@ def test_glm5_lightning_indexer_later_prefill_chunk_keeps_sequence_parallel_proj
     op = _make_glm5_dsa_op()
     op.kwargs = {}
     args = list(op.args)
-    args[7] = torch.tensor([20480], dtype=torch.int64)
+    args[4] = torch.tensor([20480], dtype=torch.int64)
     args.append(torch.tensor([4096], dtype=torch.int64))
     op.args = tuple(args)
 
@@ -5089,8 +5206,8 @@ def test_glm5_lightning_indexer_later_prefill_chunk_keeps_sequence_parallel_proj
     )
 
     assert specs is not None
-    assert specs[0].input_shapes == [(256, 6144), (128, 6144)]
-    assert specs[-1].attention_params["q_shape_3d"] == (256, 32, 128)
+    assert specs[0].input_shapes == []
+    assert specs[-1].attention_params["q_shape_3d"] == (4096, 32, 128)
 
 
 def test_glm5_lightning_indexer_chunked_prefill_keeps_sequence_parallel_shapes():
@@ -5104,7 +5221,7 @@ def test_glm5_lightning_indexer_chunked_prefill_keeps_sequence_parallel_shapes()
     )
 
     assert specs is not None
-    assert specs[0].input_shapes == [(256, 6144), (128, 6144)]
+    assert specs[0].input_shapes == []
     assert specs[-1].attention_params["q_shape_3d"] == (256, 32, 128)
     assert specs[-1].attention_params["actual_seq_lengths_values"] == [256]
     assert specs[-1].attention_params["actual_seq_lengths_kv_values"] == [4352]
@@ -5114,13 +5231,10 @@ def test_glm5_lightning_indexer_valid_mixed_batch_falls_back_from_decomposition(
     op = _make_glm5_dsa_op()
     op.kwargs = {}
     args = list(op.args)
-    args[0] = torch.empty(1, 4097, 6144, device="meta", dtype=torch.bfloat16)
-    args[1] = torch.empty(1, 4097, 2048, device="meta", dtype=torch.bfloat16)
-    args[2] = torch.empty(1, 4097, 64, device="meta", dtype=torch.bfloat16)
-    args[3] = torch.empty(1, 4097, 64, device="meta", dtype=torch.bfloat16)
-    args[5] = torch.empty(4097, device="meta", dtype=torch.int64)
-    args[6] = torch.empty(2, 33, device="meta", dtype=torch.int64)
-    args[7] = torch.tensor([4096, 40001], dtype=torch.int64)
+    args[0] = torch.empty(4097, 32, 128, device="meta", dtype=torch.bfloat16)
+    args[1] = torch.empty(4097, 32, device="meta", dtype=torch.bfloat16)
+    args[3] = torch.empty(2, 33, device="meta", dtype=torch.int64)
+    args[4] = torch.tensor([4096, 40001], dtype=torch.int64)
     args.append(torch.tensor([4096, 1], dtype=torch.int64))
     op.args = tuple(args)
 
@@ -5164,7 +5278,7 @@ def test_glm5_lightning_indexer_multiple_requests_without_query_boundaries_fail_
         seq_lens_values=[4096, 8192],
         is_decode_values=[False, False],
     )
-    op.args = (*op.args[:16], None)
+    op.args = (*op.args[:6], None)
     caplog.set_level("WARNING")
 
     specs = _decompose_dsa_indexer(
@@ -5191,7 +5305,7 @@ def test_glm5_lightning_indexer_decode_does_not_apply_sequence_parallel():
     )
 
     assert specs is not None
-    assert specs[0].input_shapes == [(1, 6144), (128, 6144)]
+    assert specs[0].input_shapes == []
     assert specs[-1].attention_params["q_shape_3d"] == (1, 32, 128)
 
 
@@ -5749,7 +5863,7 @@ def test_mlapo_decode_does_not_fail_on_non_divisible_tokens(tmp_path):
 
     # Decode op with 3 tokens (24 queries * ... per-DP 3), quant weights int8
     op = _make_op_info(
-        _FakeTorchOp("tensor_cast.mlapo_quant.default"),
+        torch.ops.tensor_cast.mlapo_quant.default,
         [
             torch.empty(3, 6144, device="meta", dtype=torch.bfloat16),  # hidden
             None,
@@ -5818,7 +5932,7 @@ def test_mlapo_opaque_decode_lookup_rejects_mixed_or_invalid_phase(
         encoding="utf-8",
     )
     op = _make_op_info(
-        _FakeTorchOp("tensor_cast.mlapo_quant.default"),
+        torch.ops.tensor_cast.mlapo_quant.default,
         [
             torch.empty(3, 6144, device="meta", dtype=torch.bfloat16),
             None,

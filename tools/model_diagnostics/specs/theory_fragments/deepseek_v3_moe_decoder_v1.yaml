@@ -6,41 +6,77 @@ stages:
   - id: mla_projection
     modules:
       - name: mlapo
+        activation: mlapo_enabled
         tensors:
           INPUT[0]: {shape: "[T, H]", dtype: ACT}
           OUTPUT[0]: {shape: "[T, Lh, Hmla]", dtype: ACT}
           OUTPUT[1]: {shape: "[T, KVlora]", dtype: ACT}
           OUTPUT[2]: {shape: "[T, QKrope]", dtype: ACT}
           OUTPUT[3]: {shape: "[T, Qlora]", dtype: ACT}
-    runtime:
-      boundary_operators: [rms_norm]
-      ignored_operator_groups: [rms_norm_kernels, shape_views]
-      ignored_operators: [index, mla_q_absorb_projection, mla_q_absorb_projection_quant]
-
-  - id: dsa_indexer
-    modules:
+          OUTPUT[4]: {shape: "[Tprefill, Lh, QKnope + Vh]", dtype: ACT}
+          OUTPUT[5]: {shape: "[Tdecode, Lh, KVlora + QKrope]", dtype: ACT}
+      - name: qkv_a_projection
+        activation: mlapo_disabled_compiled
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Qlora + KVlora + QKrope]", dtype: OUT}
+      - name: q_a_projection
+        activation: mlapo_disabled_eager
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Qlora]", dtype: OUT}
+      - name: q_b_projection
+        activation: mlapo_disabled
+        tensors:
+          INPUT[0]: {shape: "[T, Qlora]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lh * Hmla]", dtype: OUT}
+      - name: kv_a_projection
+        activation: mlapo_disabled_eager
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, KVlora + QKrope]", dtype: OUT}
       - name: dsa_indexer
-        activation: dsa_enabled
+        activation: dsa_opaque
         tensors:
           INPUT[0]: {shape: "[B, Q, H]", dtype: ACT}
           INPUT[1]: {shape: "[B, Q, Qlora]", dtype: ACT}
           OUTPUT[0]: {shape: "[B, Q, Dsa_k]", dtype: int64}
-    runtime:
-      boundary_operators: [dsa_indexer]
-      ignored_operator_groups: [shape_views]
-      ignored_operators: [mla_q_absorb_projection, mla_q_absorb_projection_quant]
-
-  - id: mla_kv_projection
-    activation: mla_prefill_kv_projection
-    modules:
-      - name: mla_kv_projection
+      - name: mm
+        activation: dsa_expanded_compiled
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: DSA_PREP_IN}
+          OUTPUT[0]: {shape: "[T, Dsa_dim + Dsa_heads]", dtype: ACT}
+      - name: mm
+        activation: dsa_expanded_eager
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, Dsa_dim]", dtype: ACT}
+      - name: mm
+        activation: dsa_expanded_eager
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, Dsa_heads]", dtype: ACT}
+      - name: mm
+        activation: dsa_expanded
+        tensors:
+          INPUT[0]: {shape: "[T, Qlora]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Dsa_heads * Dsa_dim]", dtype: ACT}
+      - name: dsa_indexer
+        activation: dsa_expanded
+        tensors:
+          INPUT[0]: {shape: "[T, Dsa_heads, Dsa_dim]", dtype: ACT}
+          INPUT[1]: {shape: "[T, Dsa_heads]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, Dsa_topk]", dtype: int64}
+      - name: mm
+        activation: mla_prefill_kv_projection
         tensors:
           INPUT[0]: {shape: "[T, KVlora]", dtype: ACT}
           INPUT[1]: {shape: "[KVlora, Lh * (QKnope + Vh)]", dtype: WEIGHT}
-          OUTPUT[0]: {shape: "[Tprefill, Lh, QKnope + Vh]", dtype: ACT}
+          OUTPUT[0]: {shape: "[Tprefill, Lh * (QKnope + Vh)]", dtype: ACT}
     runtime:
-      boundary_operators: [mla_kv_projection]
-      ignored_operator_groups: [shape_views]
+      boundary_operators: [rms_norm]
+      ignored_operator_groups: [rms_norm_kernels, shape_views]
+      ignored_operators: [index, mla_q_absorb_projection, mla_q_absorb_projection_quant, siso_reshape_and_cache, layer_norm, convert_element_type, _to_copy, permute, index_put, index_copy, index_copy_, bmm, t, transpose, slice, split_with_sizes, cat, mul, add, neg, rope, apply_rope_single, dynamic_quantize_symmetric, concat_and_cache_mla, quantize]
 
   - id: sparse_attention
     modules:
@@ -62,9 +98,9 @@ stages:
           INPUT[0]: {shape: "[T, Lh * Vh]", dtype: LINEAR_IN}
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
-      boundary_operators: [concat_and_cache_mla]
+      boundary_operators: [multihead_latent_attention, multihead_latent_attention_quant, mla_sparse_attention, mla_sparse_attention_quant]
       ignored_operator_groups: [collective_communication, rms_norm_kernels, quantization, dtype_cast, shape_views, tensor_storage]
-      ignored_operators: [concat_and_cache_mla, mla_kv_projection, mla_kv_projection_quant, mla_v_up_projection, mla_v_up_projection_quant, constant_pad_nd, slice, add]
+      ignored_operators: [concat_and_cache_mla, mla_kv_projection, mla_kv_projection_quant, mla_v_up_projection, mla_v_up_projection_quant, constant_pad_nd, slice, add, siso_reshape_and_cache, layer_norm]
 
   - id: moe_gate
     modules:
@@ -94,7 +130,7 @@ stages:
       # unfused expansion ops (topk/sum/scatter/bitwise_not/where/gather/...) only
       # appear on alternate compile/quant paths and remain mechanical.
       ignored_operator_groups: [quantization, dtype_cast, collective_communication, rms_norm_kernels, shape_views, tensor_storage, broadcast_shapes]
-      ignored_operators: [sigmoid, add, topk, sum, scatter, bitwise_not, where, gather, div, mul, constant_pad_nd, slice]
+      ignored_operators: [sigmoid, add, topk, sum, scatter, bitwise_not, where, gather, div, mul, constant_pad_nd, slice, siso_reshape_and_cache, layer_norm]
 
   - id: moe_dispatch
     modules:
@@ -104,7 +140,7 @@ stages:
     runtime:
       boundary_operators: [init_routing_v2]
       ignored_operator_groups: [collective_communication, quantization, dtype_cast, shape_views, tensor_split]
-      ignored_operators: [cat]
+      ignored_operators: [cat, siso_reshape_and_cache, layer_norm, permute, t, transpose, slice, bmm, index_put, index_copy, index_copy_]
 
   - id: moe_experts
     modules:
@@ -117,7 +153,7 @@ stages:
     runtime:
       boundary_operators: [grouped_matmul_swiglu, grouped_matmul_quant_swiglu, grouped_matmul_quant_int4_swiglu, grouped_matmul_fp8_swiglu, grouped_matmul_mxfp4_swiglu]
       ignored_operator_groups: [collective_communication, quantization, dtype_cast, tensor_split]
-      ignored_operators: [slice, cat]
+      ignored_operators: [slice, cat, siso_reshape_and_cache, layer_norm]
 
   - id: moe_combine
     modules:
@@ -133,7 +169,7 @@ stages:
     runtime:
       boundary_operators: [unpermute_tokens]
       ignored_operator_groups: [collective_communication, quantization, dtype_cast, shape_views, tensor_split]
-      ignored_operators: [slice, cat]
+      ignored_operators: [slice, cat, siso_reshape_and_cache, layer_norm]
 
   - id: shared_ffn
     modules:
@@ -154,4 +190,4 @@ stages:
       # narrowest boundary that preserves the complete shared FFN contract.
       boundary_operators: [mm, static_quant_linear, static_quant_linear_int4, fp8_linear, mxfp4_linear]
       ignored_operator_groups: [quantization, dtype_cast, slice_select, collective_communication, rms_norm_kernels, shape_views, tensor_storage, tensor_split]
-      ignored_operators: [add]
+      ignored_operators: [add, siso_reshape_and_cache, layer_norm, permute, t, transpose, bmm, cat, index_put, index_copy, index_copy_]

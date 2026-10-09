@@ -7,6 +7,10 @@ matches:
   model_types: [deepseek_v3, deepseek_v32, glm_moe_dsa, kimi_k2]
 
 operator_aliases:
+  qkv_a_projection: mm
+  q_a_projection: mm
+  q_b_projection: mm
+  kv_a_projection: mm
   tensor_cast.mlapo_quant.default: mlapo
   tensor_cast.mla_kv_projection_quant.default: mla_kv_projection
   tensor_cast.multihead_latent_attention.default: mla_sparse_attention_core

@@ -208,6 +208,7 @@ image_width: null
 | `selected_stage_regions` | 否 | Spec 中全部非分层 region | 非空字符串列表；仅在需要限制 input/output 等 region 时使用 |
 | `num_hidden_layers_override` | 否 | `0` | 非负整数；控制本次实际执行的 language decoder 层数 |
 | `do_compile` | 否 | `true` | 必须是布尔值；正式 Theory↔Runtime E2E 使用编译态语义算子 |
+| `enable_mlapo` | 否 | `false` | MLA 前端融合开关；开启时 Prefill/Decode 的前置投影及 cache 写并入 MLAPO |
 | `device` | 否 | `TEST_DEVICE` | 非空字符串 |
 | `quantize_linear_action` | 否 | `DISABLED` | 见量化枚举 |
 | `word_embedding_tp` | 否 | `null` | `col`、`row` 或省略；分别按 hidden/vocab 维切分 embedding |

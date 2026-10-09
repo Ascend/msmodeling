@@ -658,7 +658,21 @@ operator_mappings:
   "tensor_cast.mlapo.default":
     composite: true
     decomposer: true
+    # The decomposer returns the MLAPO core plus the absorbed mla_kv_projection /
+    # mla_q_absorb_projection sub-kernels, so a miss on any one of them must miss
+    # the whole composite rather than silently charge the matched subset.
+    require_all_sub_kernels: true
     decomposer_options:
+      # Same SP token semantics as the quantized entry below. The partition
+      # resolves idempotently, so an already TP-local activation axis is kept.
+      projection_token_partition: tp
+      # Deliberately no visible_kernel_regime / opaque_kernel here. The profiling
+      # database only carries the int8-weight opaque MLAPO rows (Runtime
+      # weight_quantized = true, quant_mode = per_tensor_quant_asymm), so an
+      # opaque query would answer a BF16-weight operator with a quantized
+      # kernel's latency. BF16 must always decompose into its visible sub-kernels.
+      # Analytic MLAPO instead estimates one fused boundary, not this physical
+      # kernel sequence; the two cost models need not agree on kernel launches.
       kv_cache_query:
         mode: pool_dim0_agnostic
         block_size: 128
@@ -676,6 +690,7 @@ operator_mappings:
     decomposer_options:
       visible_kernel_regime:
         requires_sequence_parallel: true
+        # Analytic MLAPO retains a fused boundary in this visible-kernel regime.
         # Opaque means that TC cannot see the internal kernel sequence. The
         # latency is still modeled by the versioned opaque_kernel query below.
         otherwise: opaque_kernel_query
@@ -703,6 +718,15 @@ operator_mappings:
       semantics. DSA CP already supplies the global q-head count, so the
       datasource must not multiply it by TP a second time. Partial ordinary-
       kernel matches remain prohibited.
+
+  "tensor_cast.siso_reshape_and_cache.default":
+    composite: true
+    decomposer: true
+
+  "tensor_cast.layer_norm.default":
+    kernel_type: LayerNormV3
+    alternate_kernel_types: [LayerNormV3WithImplMode]
+    tc_input_count: 3
 
   "tensor_cast.dsa_indexer.default":
     composite: true
@@ -967,7 +991,7 @@ operator_mappings:
 
   "tensor_cast.apply_rope_single.default":
     kernel_type: _triton_rope
-    alternate_kernel_types: [_triton_rope_1, split_qkv_rmsnorm_rope_kernel, split_qkv_rmsnorm_rope_kernel_0, InterleaveRope, ApplyRotaryPosEmb]
+    alternate_kernel_types: [_triton_rope_siso_0, _triton_rope_siso_1, _triton_rope_1, split_qkv_rmsnorm_rope_kernel, split_qkv_rmsnorm_rope_kernel_0, InterleaveRope, ApplyRotaryPosEmb]
     tc_input_count: 1
     notes: >
       [HIGH] Same NPU kernels as apply_rope; TC signature is K-only (x, cos, sin).
@@ -1162,8 +1186,9 @@ operator_mappings:
       (not MoE related), 128 = 2*qk_rope_head_dim (not pre-SwiGlu dim).
 
   "prims.convert_element_type.default":
-    zero_cost: true
-    notes: "Prims dtype conversion, handled at dispatch level"
+    kernel_type: Cast
+    tc_input_count: 1
+    notes: "Materialized dtype conversion."
 
   "aten.expand.default":
     zero_cost: true

@@ -17,6 +17,8 @@
 
 from dataclasses import replace
 
+import pytest
+
 from tools.model_diagnostics import create_model_diagnostics_application
 from tools.model_diagnostics.domain import OUTPUT, ExecutionPhase, ModelRunContext, ParallelContext, SourceKind
 from tools.model_diagnostics.organization.theory import build_theory_regions, flatten_theory_calls
@@ -162,8 +164,10 @@ def test_kimi_k25_all_default_stage_regions_have_theory() -> None:
     assert "vision_setup" not in selected_stage_regions
 
 
-def test_kimi_k25_theory_uses_mla_moe_and_moonvit_shapes() -> None:
+@pytest.mark.parametrize("enable_mlapo", [False, True], ids=["mlapo-off", "mlapo-on"])
+def test_kimi_k25_theory_uses_mla_moe_and_moonvit_shapes(enable_mlapo: bool) -> None:
     context = _context()
+    context = replace(context, model_config={**context.model_config, "enable_mlapo": enable_mlapo})
     spec = create_model_diagnostics_application().spec_provider.get(context)
     calls = flatten_theory_calls(
         build_theory_regions(
@@ -183,8 +187,18 @@ def test_kimi_k25_theory_uses_mla_moe_and_moonvit_shapes() -> None:
     assert by_name["tpool_patch_merger"][0].tensors[-1].shape == (2691, 4, 1152)
     assert by_name["vision_projector_fc0"][0].tensors[-1].shape == (2691, 4608)
     assert by_name["vision_projector_fc1"][0].tensors[-1].shape == (2691, 7168)
-    assert by_name["mlapo"][0].tensors[1].shape == (2723, 8, 192)
-    assert len(by_name["mlapo"]) == 2
+    if enable_mlapo:
+        assert by_name["mlapo"][0].tensors[1].shape == (2723, 8, 192)
+        assert len(by_name["mlapo"]) == 2
+        assert "q_a_projection" not in by_name
+    else:
+        assert "mlapo" not in by_name
+        assert len(by_name["q_a_projection"]) == 2
+        assert by_name["q_a_projection"][0].tensors[-1].shape == (2723, 1536)
+        assert by_name["q_b_projection"][0].tensors[-1].shape == (2723, 8 * 192)
+        assert by_name["kv_a_projection"][0].tensors[-1].shape == (2723, 576)
+        assert by_name["q_a_norm"][0].tensors[-1].shape == (2723, 1536)
+        assert by_name["kv_a_norm"][0].tensors[-1].shape == (2723, 512)
     assert by_name["moe_gate_linear"][0].tensors[-1].shape == (341, 384)
     assert by_name["grouped_matmul_swiglu"][0].tensors[-1].shape == (3024, 2048)
     assert by_name["grouped_matmul"][0].tensors[-1].shape == (3024, 7168)

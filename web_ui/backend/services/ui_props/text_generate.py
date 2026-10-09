@@ -331,6 +331,7 @@ UI: dict[str, UIFieldProps] = {
         choices=[
             {'value': 'enable_multistream', 'label': 'Enable Multistream'},
             {'value': 'enable_sequence_parallel', 'label': 'Enable Sequence Parallel'},
+            {'value': 'enable_mlapo', 'label': 'Enable MLAPO Fusion'},
             {'value': 'enable_matmul_allreduce', 'label': 'Enable Matmul Allreduce'},
             {'value': 'enable_dispatch_ffn_combine', 'label': 'Enable Dispatch FFN Combine'},
         ],

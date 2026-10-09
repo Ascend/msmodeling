@@ -9,6 +9,12 @@ matches:
 # HF source: moonshotai/Kimi-K2.5. The top-level model combines MoonViT3d,
 # PatchMergerMLP and a DeepSeek-V3 MLA/MoE language model.
 operator_aliases:
+  qkv_a_projection: mm
+  q_a_norm: rms_norm
+  kv_a_norm: rms_norm
+  q_a_projection: mm
+  q_b_projection: mm
+  kv_a_projection: mm
   tensor_cast.mlapo.default: mlapo
   tensor_cast.mlapo_quant.default: mlapo
   tensor_cast.multihead_latent_attention.default: multihead_latent_attention
@@ -28,6 +34,7 @@ operator_aliases:
   text_logits_select: index
   text_lm_head: mm
   input_layer_norm: rms_norm
+  q_a_norm_dynamic: rms_norm_dynamic_quant_symmetric
   post_attention_norm: add_rms_norm2
   vision_projector_norm: layer_norm
   logits_cast: prims.convert_element_type.default

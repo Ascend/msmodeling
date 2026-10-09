@@ -10,6 +10,7 @@ stages:
           INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
           OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
       - name: mlapo
+        activation: mlapo_enabled
         tensors:
           # The fused MLA projection receives the activation before its
           # internal dynamic quantization step.
@@ -17,9 +18,50 @@ stages:
           OUTPUT[0]: {shape: "[T, Lh, Hmla]", dtype: OUT}
           OUTPUT[1]: {shape: "[T, KVlora]", dtype: OUT}
           OUTPUT[2]: {shape: "[T, QKrope]", dtype: OUT}
+      - name: qkv_a_projection
+        activation: mlapo_disabled_compiled
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Qlora + KVlora + QKrope]", dtype: OUT}
+      - name: q_a_projection
+        activation: mlapo_disabled_eager
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Qlora]", dtype: OUT}
+      - name: q_a_norm
+        activation: kimi_regular_qa_norm
+        tensors:
+          INPUT[0]: {shape: "[T, Qlora]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, Qlora]", dtype: ACT}
+      - name: q_a_norm_dynamic
+        activation: kimi_dynamic_qa_norm
+        tensors:
+          INPUT[0]: {shape: "[T, Qlora]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, Qlora]", dtype: LINEAR_IN}
+      - name: q_b_projection
+        activation: mlapo_disabled
+        tensors:
+          INPUT[0]: {shape: "[T, Qlora]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lh * Hmla]", dtype: OUT}
+      - name: kv_a_projection
+        activation: mlapo_disabled_eager
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, KVlora + QKrope]", dtype: OUT}
+      - name: kv_a_norm
+        activation: mlapo_disabled
+        tensors:
+          INPUT[0]: {shape: "[T, KVlora]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, KVlora]", dtype: ACT}
+      - name: mm
+        activation: mla_prefill_kv_projection
+        tensors:
+          INPUT[0]: {shape: "[T, KVlora]", dtype: ACT}
+          OUTPUT[0]: {shape: "[Tprefill, Lh * (QKnope + Vh)]", dtype: ACT}
     runtime:
       boundary_operators: [rms_norm]
-      ignored_operators: [view, reshape, apply_rope, concat_and_cache_mla, mla_kv_projection, mla_kv_projection_quant, mla_q_absorb_projection, mla_q_absorb_projection_quant, dynamic_quantize_symmetric]
+      ignored_operator_groups: [shape_views, dtype_cast]
+      ignored_operators: [apply_rope, apply_rope_single, concat_and_cache_mla, siso_reshape_and_cache, mla_kv_projection, mla_kv_projection_quant, mla_q_absorb_projection, mla_q_absorb_projection_quant, dynamic_quantize_symmetric, quantize, slice, split_with_sizes, cat, bmm, t, transpose, permute]
   - id: mla_attention
     modules:
       - name: multihead_latent_attention
