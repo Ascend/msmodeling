@@ -279,7 +279,7 @@ def range_to_enum(params_field: tuple[OptimizerConfigField, ...]):
     for v in params_field:
         if v.dtype != "range":
             continue
-        if not v.dtype_param:
+        if v.dtype_param is None:
             continue
         try:
             _start = int(v.min)
@@ -288,7 +288,11 @@ def range_to_enum(params_field: tuple[OptimizerConfigField, ...]):
         except (ValueError, TypeError):
             logger.error(f"Failed convert to int data, data: {v.min, v.max, v.dtype_param}")
             continue
-        _enums = list(range(_start, _end + _step, _step))
+        if _step <= 0:
+            raise ValueError(
+                f"Invalid range step for field {v.name!r}: expected a positive step, got {v.dtype_param!r}"
+            )
+        _enums = list(range(_start, _end + 1, _step))
         v.min = 0
         v.max = 1
         v.dtype_param = _enums
