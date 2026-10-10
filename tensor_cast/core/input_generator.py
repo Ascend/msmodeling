@@ -114,7 +114,9 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     query_len = request.query_len
     is_decode = request.is_decode
     image_kwargs = {}
-    context_length = request.context_length
+    # Derive the effective context the same way as generate_inputs_varlen so both
+    # entries agree on cache_position / tensor_cast_has_previous_state semantics.
+    context_length = request.context_length or max(seq_len - query_len, 0)
     if model.is_vl_model:
         image_kwargs = generate_image_inputs(
             model,
