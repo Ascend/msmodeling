@@ -388,7 +388,7 @@ dtype_param = "max_batch_size"
 | 基础类型 | `float` | 在 [min, max] 内取浮点数 | — |
 | 基础类型 | `bool` | 布尔开关（参数值 > 0.5 时为 true） | — |
 | 基础类型 | `enum` | 从候选列表中选值（支持数值或字符串） | 候选值列表，如 `[1, 2, 4, 8]` |
-| 基础类型 | `range` | 按步长在 [min, max] 内枚举 | 步长整数，如 `10` |
+| 基础类型 | `range` | 按正步长在 [min, max] 内枚举，仅在步长对齐时包含 max（如 min=1、max=9、step=3 时为 [1, 4, 7]） | 正整数步长，如 `10` |
 | 二元派生 | `ratio` | `int(比例 × target)` | 依赖字段名（字符串），如 `"max_batch_size"` |
 | 二元派生 | `share` | `target.min + target.max - target.value`（互补） | 依赖字段名（字符串） |
 | 二元派生 | `factories` | `product ÷ target` | `{"target_name": "字段名", "product": 值, "dtype": "int"}` |

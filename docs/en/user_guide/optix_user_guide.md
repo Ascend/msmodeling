@@ -580,7 +580,7 @@ In addition, all `dtype` types supported by `target_field` are as follows:
 | Basic type | `float` | Takes a floating-point number within [min, max] | — |
 | Basic type | `bool` | Boolean switch (the parameter value is true when it is greater than 0.5) | — |
 | Basic type | `enum` | Selects a value from the candidate list (supports numeric or string values) | Candidate value list, such as [1, 2, 4, 8] |
-| Basic type | `range` | Enumerates within [min, max] by step | Step integer, such as 10 |
+| Basic type | `range` | Enumerates within [min, max] by a positive step; includes max only when aligned with the step (for example, min=1, max=9, step=3 gives [1, 4, 7]) | Positive step integer, such as 10 |
 | Binary derived | `ratio` | `int(ratio × target)` | Dependent field name (string), such as `"max_batch_size"` |
 | Binary derived | `share` | `target.min + target.max - target.value` (complement) | Dependent field name (string) |
 | Binary derived | `factories` | `product ÷ target` | `{"target_name": "field name", "product": value, "dtype": "int"}` |
