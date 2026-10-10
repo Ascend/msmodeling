@@ -231,6 +231,20 @@ class TestGetValidatorUI:
         validator_ui = get_validator_ui("throughput_optimizer")
         assert isinstance(validator_ui, dict)
 
+    def test_get_validator_ui_video_generate_parallel_contract(self):
+        """video_generate exposes UI metadata for its cross-field validators."""
+        validator_ui = get_validator_ui("video_generate")
+        assert set(validator_ui) == {
+            "cfgParallelRequiresUseCfg",
+            "numDevicesMatchesUlyssesSize",
+        }
+        assert validator_ui["cfgParallelRequiresUseCfg"]["fields"] == ["cfg-parallel", "use-cfg"]
+        assert validator_ui["numDevicesMatchesUlyssesSize"]["fields"] == [
+            "num-devices",
+            "ulysses-size",
+            "cfg-parallel",
+        ]
+
     def test_get_validator_ui_unknown_module_raises(self):
         """get_validator_ui() with unknown module raises ModuleNotFoundError."""
         with pytest.raises(ModuleNotFoundError):

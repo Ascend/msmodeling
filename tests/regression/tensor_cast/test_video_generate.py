@@ -1043,6 +1043,36 @@ class TestVideoGeneration(unittest.TestCase):
         except Exception as e:
             self.fail(f"test_classifier_free_guidance_parallel {test_desc} failed with exception: {e!s}")
 
+    def test_cfg_parallel_groups_pair_matching_ulysses_ranks(self):
+        """CFG rank pairs preserve contiguous Ulysses blocks across both CFG halves."""
+        from cli.inference import video_generate
+
+        real_parallel_group = video_generate.ParallelGroup
+        captured_rank_groups = []
+
+        def capture_parallel_group(rank, rank_groups, global_world_size):
+            captured_rank_groups.append(rank_groups)
+            return real_parallel_group(rank, rank_groups, global_world_size)
+
+        with patch.object(video_generate, "ParallelGroup", side_effect=capture_parallel_group):
+            run_inference(
+                device=self.device,
+                model_id=self.model_id,
+                batch_size=self.batch_size,
+                seq_len=self.seq_len,
+                height=self.height,
+                width=self.width,
+                frame_num=self.frame_num,
+                sample_step=self.sample_step,
+                dtype="float16",
+                world_size=4,
+                ulysses_size=2,
+                use_cfg=True,
+                cfg_parallel=True,
+            )
+
+        self.assertEqual(captured_rank_groups, [[[0, 2], [1, 3]]])
+
     def test_process_input_with_ulysses_size_1(self):
         """Test process_input function when ulysses_size is 1."""
         # Mock model_config

@@ -373,7 +373,7 @@ python -m cli.inference.video_generate <model_id> [options]
 | `--sample-step` | denoise step 数 |
 | `--dtype` | `float16`、`float32`、`bfloat16` |
 | `--num-devices` | 总卡数 |
-| `--ulysses-size` | Ulysses sequence parallel 大小，必须整除 `--num-devices` |
+| `--ulysses-size` | Ulysses 序列并行大小；非 CFG 并行时必须等于 `--num-devices`，CFG 并行时 `--num-devices` 必须为该值的两倍 |
 | `--use-cfg` | 启用 CFG |
 | `--cfg-parallel` | 使用 CFG 并行 |
 | `--dit-cache` | 启用 DiT block cache |
@@ -407,18 +407,19 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --width 1280 \
   --frame-num 129 \
   --sample-step 50 \
-  --num-devices 8 \
+  --num-devices 4 \
   --ulysses-size 4 \
   --dtype float16
 ```
 
-配置要求：
+并行配置要求：
 
 ```text
-world-size % ulysses-size == 0
+非 CFG 并行：num-devices == ulysses-size
+CFG 并行：   必须启用 --use-cfg，且 num-devices == 2 * ulysses-size
 ```
 
-如果不满足，程序会报错。Web UI 中也会提前校验。
+CLI 和 Web UI 都会在推理前拒绝无效组合。
 
 ### 5.4 CFG 与 CFG Parallel 示例
 
@@ -437,7 +438,7 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --cfg-parallel
 ```
 
-`--use-cfg` 会模拟 classifier-free guidance。`--cfg-parallel` 适合比较 CFG 对通信和并行效率的影响。
+`--use-cfg` 用于模拟 classifier-free guidance，启用 `--cfg-parallel` 时必须同时指定。CFG 并行会按每个 Ulysses rank `u` 配对设备 `[u, U + u]`，其中 `U` 为 `--ulysses-size`，且 `u` 的范围为 `[0, U)`。
 
 ### 5.5 DiT Cache 示例
 

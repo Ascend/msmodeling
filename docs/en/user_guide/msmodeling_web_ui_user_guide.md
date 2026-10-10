@@ -319,8 +319,8 @@ This tool simulates the Diffusion Transformer forward process and is commonly us
 | --frame-num              | Number of frames |
 | --sample-step            | Number of denoise steps |
 | --dtype                  | `float16`, `float32`, or `bfloat16` |
-| --world-size             | Total number of devices |
-| --ulysses-size           | Ulysses sequence parallel size, which must divide `world-size` |
+| --num-devices            | Total number of devices |
+| --ulysses-size           | Ulysses sequence parallel size; without CFG parallel, must equal `--num-devices`; with CFG parallel, `--num-devices` must be twice this value |
 | --use-cfg                | Enable CFG |
 | --cfg-parallel           | Use CFG parallelism |
 | --dit-cache              | Enable DiT block cache |
@@ -354,18 +354,19 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --width 1280 \
   --frame-num 129 \
   --sample-step 50 \
-  --world-size 8 \
+  --num-devices 4 \
   --ulysses-size 4 \
   --dtype float16
 ```
 
-Configuration requirement:
+Parallel configuration requirements:
 
 ```text
-world-size % ulysses-size == 0
+without CFG parallel: num-devices == ulysses-size
+with CFG parallel:    --use-cfg and num-devices == 2 * ulysses-size
 ```
 
-If this is not satisfied, the program reports an error. The Web UI also validates it in advance.
+The CLI and Web UI reject invalid combinations before inference.
 
 ### 5.4 CFG and CFG Parallel Example
 
@@ -378,13 +379,13 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --width 1280 \
   --frame-num 81 \
   --sample-step 30 \
-  --world-size 8 \
+  --num-devices 8 \
   --ulysses-size 4 \
   --use-cfg \
   --cfg-parallel
 ```
 
-`--use-cfg` simulates classifier-free guidance. `--cfg-parallel` is suitable for comparing the impact of CFG on communication and parallelism efficiency.
+`--use-cfg` simulates classifier-free guidance and is required with `--cfg-parallel`. With CFG parallel, device ranks are paired as `[u, U + u]` for each Ulysses rank `u` in `[0, U)`, where `U` is `--ulysses-size`.
 
 ### 5.5 DiT Cache Example
 
@@ -746,7 +747,7 @@ Check:
 Common causes:
 
 - `num-devices` is not divisible by `tp-size`.
-- `world-size` is not divisible by `ulysses-size`.
+- For video generation, `world-size`/`num-devices` must equal `ulysses-size` without CFG parallel, or `2 * ulysses-size` with CFG parallel and `--use-cfg`.
 - `TP * DP * EP` exceeds the number of deployed devices.
 - Some fine-grained TP/DP parameters do not match the total device count.
 
@@ -829,14 +830,16 @@ Keep the other parameters unchanged and compare:
 
 ### 10.3 Example C: Video Generation Ulysses Scalability
 
-Test in sequence:
+Test non-CFG configurations in sequence:
 
 ```text
-world-size=8, ulysses-size=1
-world-size=8, ulysses-size=2
-world-size=8, ulysses-size=4
+world-size=1, ulysses-size=1
+world-size=2, ulysses-size=2
+world-size=4, ulysses-size=4
 world-size=8, ulysses-size=8
 ```
+
+For CFG-parallel comparisons, use `world-size=2 * ulysses-size`, enable `--use-cfg`, and add `--cfg-parallel`.
 
 Observe:
 

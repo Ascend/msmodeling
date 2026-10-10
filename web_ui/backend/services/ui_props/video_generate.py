@@ -66,11 +66,18 @@ OPTION_SOURCE_REGISTRY = {
 
 # UI field properties (labels, tooltips, validation, etc.)
 VALIDATOR_UI = {
-    "cfgParallelRequiresWorldSize2": {
-        "fields": ["use-cfg", "cfg-parallel", "num-devices"],
+    "cfgParallelRequiresUseCfg": {
+        "fields": ["cfg-parallel", "use-cfg"],
         "message": I18nText(
-            "启用 CFG 并行时 world_size 必须 ≥ 2",
-            "cfg_parallel requires world_size ≥ 2",
+            "启用 cfg-parallel 时必须同时启用 use-cfg",
+            "cfg-parallel requires use-cfg to be enabled",
+        ),
+    },
+    "numDevicesMatchesUlyssesSize": {
+        "fields": ["num-devices", "ulysses-size", "cfg-parallel"],
+        "message": I18nText(
+            "num-devices 必须等于 ulysses-size，启用 cfg-parallel 时须等于 2 × ulysses-size",
+            "num-devices must equal ulysses-size, or 2 × ulysses-size with cfg-parallel",
         ),
     },
 }
@@ -106,7 +113,10 @@ UI: dict[str, UIFieldProps] = {
     ),
     "num-devices": UIFieldProps(
         label=I18nText('设备数', 'World Size'),
-        tooltip=I18nText('总设备数量（≥1）。', 'Total device count (≥1).'),
+        tooltip=I18nText(
+            '总设备数量（非 CFG 时必须等于 ulysses-size；CFG 并行时必须等于 2 × ulysses-size）。',
+            'Total device count (must equal ulysses-size without CFG; 2 × ulysses-size with CFG parallel).',
+        ),
         default=8,
         required=True,
         group={'zh': '并行', 'en': 'Parallelism'},
@@ -212,8 +222,8 @@ UI: dict[str, UIFieldProps] = {
     "ulysses-size": UIFieldProps(
         label=I18nText('Ulysses 并行', 'Ulysses Parallel Size'),
         tooltip=I18nText(
-            'Ulysses 序列并行度数；逗号分隔多值时每个取值单独仿真，结果区生成多用例对比（如 1,2,4，须整除 world_size）。',
-            'Ulysses SP degree; with a comma-list each value runs independently and yields a multi-case comparison (e.g. 1,2,4; must divide world_size).',
+            'Ulysses 序列并行度数；逗号分隔多值时每个取值单独仿真，结果区生成多用例对比。非 CFG 时 num-devices 必须等于此值；CFG 并行时必须等于其两倍。',
+            'Ulysses SP degree; with a comma-list each value runs independently and yields a multi-case comparison. num-devices must equal this value without CFG, or twice this value with CFG parallel.',
         ),
         placeholder=I18nText('如 1,2,4', 'e.g. 1,2,4'),
         multi_values=True,
@@ -297,8 +307,8 @@ UI: dict[str, UIFieldProps] = {
     "cfg-parallel": UIFieldProps(
         label=I18nText('CFG 并行', 'CFG Parallel'),
         tooltip=I18nText(
-            'CFG 使用并行计算（隐式要求 world_size ≥ 2）。此字段仅在 use_cfg 启用时有效',
-            'Use parallel computation for CFG (implicitly requires world_size ≥ 2). This field is only effective when use_cfg is enabled',
+            'CFG 使用并行计算（要求同时启用 use_cfg，且 num-devices = 2 × ulysses-size）。',
+            'Use parallel computation for CFG (requires use_cfg and num-devices = 2 × ulysses-size).',
         ),
         default=True,
         group={'zh': 'CFG', 'en': 'CFG'},

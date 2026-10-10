@@ -640,9 +640,9 @@ Run a simulated diffusion transformer forward and dump perf stats.
 | `--attention-backend` | Attention Options | 可选 | 选择 attention 后端。<br>1. 类型：Str。<br>2. 参考值：`dense`、`block_sparse_attention`。<br>3. 默认值：`dense`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `block_sparse_attention` 与 `block-sparse-attention`。 |
 | `--attention-block-size` | Attention Options | 可选 | 设置 BSA block size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`128`。 |
 | `--attention-sparsity` | Attention Options | 可选 | 设置 BSA 跳过的 KV block 比例。<br>1. 类型：Float。<br>2. 取值范围：`[0.0, 1.0)`。<br>3. 默认值：`0.0`。 |
-| `--num-devices` | Parallel Options | 可选 | 指定参与分布式仿真的总设备数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
+| `--num-devices` | Parallel Options | 可选 | 指定参与分布式仿真的总设备数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。<br>4. 必须等于 `--ulysses-size`；启用 `--cfg-parallel` 时必须等于 `2 * --ulysses-size`。 |
 | `--ulysses-size` | Parallel Options | 可选 | 指定 Ulysses 并行规模。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
-| `--cfg-parallel` | Parallel Options | 可选 | 启用 CFG 并行策略。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| `--cfg-parallel` | Parallel Options | 可选 | 启用 CFG 并行策略。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 需要同时启用 `--use-cfg`；此时 `--num-devices` 必须等于 `2 * --ulysses-size`。 |
 | `--compile` | Optimization Options | 可选 | 在仿真前编译主 transformer。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 使用 `dynamic=False, fullgraph=True`；启用 DiT cache 时，cache transformer 使用相同策略。 |
 | `--compile-allow-graph-break` | Optimization Options | 可选 | 允许编译期间发生 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 会将主 transformer 和 DiT cache transformer 的编译方式改为 `fullgraph=False`。 |
 | `--dit-cache` | Cache Options | 可选 | 启用 DiT block cache。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |

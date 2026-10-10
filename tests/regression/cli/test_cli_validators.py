@@ -117,8 +117,21 @@ class TestValidatorIntegration:
         # The error should mention parallel-related fields
         assert len(captured.err) > 0
 
-    def test_video_generate_valid_args_pass(self):
-        """vi: valid args → parse_module_args returns Namespace."""
+    @pytest.mark.parametrize(
+        ("parallel_args", "num_devices", "ulysses_size", "cfg_parallel"),
+        [
+            ([], 1, 1, False),
+            (["--num-devices", "2", "--ulysses-size", "2"], 2, 2, False),
+            (
+                ["--num-devices", "4", "--ulysses-size", "2", "--use-cfg", "--cfg-parallel"],
+                4,
+                2,
+                True,
+            ),
+        ],
+    )
+    def test_video_generate_valid_parallel_contract(self, parallel_args, num_devices, ulysses_size, cfg_parallel):
+        """vi: non-CFG uses N=U; CFG-parallel uses N=2U and requires CFG."""
         ns = self._parse(
             "video_generate",
             [
@@ -132,9 +145,47 @@ class TestValidatorIntegration:
                 "1",
                 "--sample-step",
                 "1",
+                *parallel_args,
             ],
         )
-        assert ns.batch_size == 1
+        assert ns.num_devices == num_devices
+        assert ns.ulysses_size == ulysses_size
+        assert ns.cfg_parallel is cfg_parallel
+
+    @pytest.mark.parametrize(
+        ("parallel_args", "error"),
+        [
+            (
+                ["--num-devices", "2", "--ulysses-size", "1"],
+                "num-devices (2) must equal ulysses-size (1)",
+            ),
+            (
+                ["--num-devices", "2", "--ulysses-size", "2", "--use-cfg", "--cfg-parallel"],
+                "num-devices (2) must equal 2 * ulysses-size (2) = 4",
+            ),
+            (
+                ["--num-devices", "2", "--ulysses-size", "1", "--cfg-parallel"],
+                "cfg-parallel requires use-cfg to be enabled",
+            ),
+        ],
+    )
+    def test_video_generate_invalid_parallel_contract_rejected_during_parse(self, parallel_args, error, capsys):
+        """vi: invalid parallel combinations fail registry parsing before inference."""
+        with pytest.raises(SystemExit) as exc_info:
+            self._parse(
+                "video_generate",
+                [
+                    "--model-id",
+                    "test-model",
+                    "--batch-size",
+                    "1",
+                    "--seq-len",
+                    "16",
+                    *parallel_args,
+                ],
+            )
+        assert exc_info.value.code == 2
+        assert error in capsys.readouterr().err
 
     def test_image_generate_no_validators(self):
         """ig: no validators defined → parse_module_args returns Namespace."""
