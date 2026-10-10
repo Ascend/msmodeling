@@ -319,10 +319,10 @@ This tool simulates the Diffusion Transformer forward process and is commonly us
 | --frame-num              | Number of frames |
 | --sample-step            | Number of denoise steps |
 | --dtype                  | `float16`, `float32`, or `bfloat16` |
-| --world-size             | Total number of devices |
-| --ulysses-size           | Ulysses sequence parallel size, which must divide `world-size` |
+| --world-size             | Total number of devices; must equal `--ulysses-size`, or `2 * --ulysses-size` with `--cfg-parallel` |
+| --ulysses-size           | Ulysses sequence parallel size |
 | --use-cfg                | Enable CFG |
-| --cfg-parallel           | Use CFG parallelism |
+| --cfg-parallel           | Use CFG parallelism; requires `--use-cfg` and `world-size = 2 * ulysses-size` |
 | --dit-cache              | Enable DiT block cache |
 | --cache-step-range       | Step range in which DiT Cache takes effect, in the `start,end` format |
 | --cache-step-interval    | Refresh the cache every N steps. 1 is equivalent to no reuse |
@@ -362,7 +362,8 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
 Configuration requirement:
 
 ```text
-world-size % ulysses-size == 0
+non-CFG: world-size == ulysses-size
+CFG-parallel: world-size == 2 * ulysses-size and --use-cfg is enabled
 ```
 
 If this is not satisfied, the program reports an error. The Web UI also validates it in advance.

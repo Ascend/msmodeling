@@ -138,7 +138,7 @@ NUM_DEVICES = Param(
     group="Parallel Options",
     cli_aliases=("world-size",),
     cli_metavar="<N>",
-    cli_help="Number of devices. [default: 1]",
+    cli_help="Number of devices. Must equal --ulysses-size, or 2 * --ulysses-size with --cfg-parallel. [default: 1]",
 )
 
 ULYSSES_PARALLEL_SIZE = Param(
@@ -157,7 +157,7 @@ CFG_PARALLEL = Param(
     default=False,
     cli_action="store_true",
     group="Parallel Options",
-    cli_help="Enable classifier-free guidance parallelism. [default: off]",
+    cli_help="Enable classifier-free guidance parallelism. Requires --use-cfg. [default: off]",
 )
 
 # Cache Options
@@ -216,6 +216,8 @@ SPEC = ModuleSpec(
     log_options_after_group="Sampling",
     requires_model_id=True,
     validators=[
+        ValidatorRef(name="cfgParallelRequiresUseCfg", fn=V.cfg_parallel_requires_use_cfg),
+        ValidatorRef(name="numDevicesMatchesUlyssesSize", fn=V.num_devices_matches_ulysses_size),
         ValidatorRef(
             name="cfgParallelRequiresWorldSize2",
             fn=V.cfg_parallel_requires_world_size_2,

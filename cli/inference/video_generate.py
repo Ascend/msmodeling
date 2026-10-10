@@ -269,7 +269,11 @@ def run_inference(
                 logger.warning("DiT cache is enabled but no blocks were replaced; fallback to baseline model path.")
                 cache_model = None
     if use_cfg and cfg_parallel:
-        cfg_parallel_group = ParallelGroup(0, [[0, 1]], world_size)  # cfg parallel group can only be size 2
+        cfg_parallel_group = ParallelGroup(
+            0,
+            [[u, ulysses_size + u] for u in range(ulysses_size)],
+            world_size,
+        )
     else:
         cfg_parallel_group = None
 
@@ -355,9 +359,6 @@ def main():
     args = parse_module_args(spec, parser)
     print_logo()
     configure_std_logging(args)
-
-    if args.num_devices % args.ulysses_size != 0:
-        raise ValueError(f"World size {args.num_devices!r} must be divisible by ulysses size {args.ulysses_size!r}.")
 
     run_inference(
         device=args.device,

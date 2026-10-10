@@ -372,10 +372,10 @@ python -m cli.inference.video_generate <model_id> [options]
 | `--frame-num` | 帧数 |
 | `--sample-step` | denoise step 数 |
 | `--dtype` | `float16`、`float32`、`bfloat16` |
-| `--num-devices` | 总卡数 |
-| `--ulysses-size` | Ulysses sequence parallel 大小，必须整除 `--num-devices` |
+| `--num-devices` | 总卡数；必须等于 `--ulysses-size`，启用 `--cfg-parallel` 时必须等于 `2 * --ulysses-size` |
+| `--ulysses-size` | Ulysses sequence parallel 大小 |
 | `--use-cfg` | 启用 CFG |
-| `--cfg-parallel` | 使用 CFG 并行 |
+| `--cfg-parallel` | 使用 CFG 并行；需要启用 `--use-cfg`，且 `num-devices = 2 * ulysses-size` |
 | `--dit-cache` | 启用 DiT block cache |
 | `--cache-step-range` | DiT Cache 生效 step 范围，格式 `start,end` |
 | `--cache-step-interval` | 每 N step 刷新一次 cache，`1` 等价于不复用 |
@@ -415,7 +415,8 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
 配置要求：
 
 ```text
-world-size % ulysses-size == 0
+非 CFG：world-size == ulysses-size
+CFG 并行：world-size == 2 * ulysses-size，且启用 --use-cfg
 ```
 
 如果不满足，程序会报错。Web UI 中也会提前校验。

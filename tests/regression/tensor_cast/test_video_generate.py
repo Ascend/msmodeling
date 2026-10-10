@@ -1754,6 +1754,107 @@ class TestCliVideoGenerateRunInference(unittest.TestCase):
 
         assert captured["forward_batch_shapes"] == [2]
 
+    def test_cfg_parallel_uses_contiguous_ulysses_rank_blocks(self):
+        from cli.inference import video_generate as video_generate_mod
+
+        captured: dict[str, object] = {}
+
+        class DummyRuntime:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def __enter__(self) -> "DummyRuntime":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                pass
+
+            def table_averages(self, *args: object, **kwargs: object) -> str:
+                return "runtime table"
+
+        class DummyCfgGroup:
+            def __init__(self, rank: int, rank_groups: list[list[int]], world_size: int) -> None:
+                captured["rank_groups"] = rank_groups
+                self.world_size = len(rank_groups[0])
+
+            def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+                return input_
+
+        class DummySpGroup:
+            def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+                return input_
+
+        class DummyModel:
+            sp_group = DummySpGroup()
+
+            def forward(self, **kwargs: object) -> torch.Tensor:
+                return torch.zeros([1], device="meta")
+
+        model_config = types.SimpleNamespace(
+            transformer_config=types.SimpleNamespace(
+                parallel_config=types.SimpleNamespace(ulysses_size=2),
+                model_config={"_class_name": "WanTransformer3DModel"},
+                dtype=torch.float16,
+            )
+        )
+        model_selection = DiffusersModelSelection(
+            repository_root="/cache/Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+            variant_path="/cache/Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+            variant_id=None,
+            source=None,
+            is_remote=True,
+        )
+
+        with (
+            patch.object(video_generate_mod, "AnalyticPerformanceModel", lambda device_profile: object()),
+            patch.object(video_generate_mod, "MemoryTracker", lambda device_profile: object()),
+            patch.object(video_generate_mod, "Runtime", DummyRuntime),
+            patch.object(video_generate_mod, "ParallelGroup", DummyCfgGroup),
+            patch.object(
+                video_generate_mod, "use_hunyuanvideo15_t2v_static_branch", lambda config: contextlib.nullcontext()
+            ),
+            patch.object(
+                video_generate_mod,
+                "generate_diffusers_inputs",
+                lambda *args, **kwargs: {"hidden_states": torch.zeros([1, 3], device="meta")},
+            ),
+            patch.object(
+                video_generate_mod,
+                "process_input",
+                lambda input_kwargs, model_config: (input_kwargs, None),
+            ),
+            patch.dict(
+                sys.modules,
+                {
+                    "tensor_cast.diffusers.diffusers_attention": types.SimpleNamespace(
+                        get_sp_group=lambda: None,
+                        set_sp_group=lambda group: None,
+                        use_custom_sdpa=lambda *args, **kwargs: contextlib.nullcontext(),
+                    ),
+                    "tensor_cast.diffusers.diffusers_model": types.SimpleNamespace(
+                        build_diffusers_transformer_model=lambda *args, **kwargs: (DummyModel(), model_config)
+                    ),
+                    "tensor_cast.diffusers.model_resolver": types.SimpleNamespace(
+                        resolve_diffusers_model_selection=lambda model_id, remote_source: model_selection
+                    ),
+                },
+            ),
+        ):
+            video_generate_mod.run_inference(
+                device="TEST_DEVICE",
+                model_id="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+                batch_size=1,
+                seq_len=128,
+                sample_step=1,
+                use_cfg=True,
+                world_size=4,
+                ulysses_size=2,
+                cfg_parallel=True,
+                quantize_linear_action=QuantizeLinearAction.DISABLED,
+            )
+
+        assert captured["rank_groups"] == [[0, 2], [1, 3]]
+
     def test_hunyuanvideo15_registry_helpers_select_blocks(self):
         hunyuan15 = types.SimpleNamespace(transformer_blocks=[torch.nn.Identity()])
         assert len(_get_hunyuanvideo15_blocks_with_setters(hunyuan15)) == 1

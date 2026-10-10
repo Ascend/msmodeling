@@ -50,6 +50,20 @@ OPTION_SOURCE_REGISTRY = {
 
 # UI field properties (labels, tooltips, validation, etc.)
 VALIDATOR_UI = {
+    "cfgParallelRequiresUseCfg": {
+        "fields": ["cfg-parallel", "use-cfg"],
+        "message": I18nText(
+            "启用 cfg-parallel 时必须同时启用 use-cfg",
+            "cfg-parallel requires use-cfg to be enabled",
+        ),
+    },
+    "numDevicesMatchesUlyssesSize": {
+        "fields": ["num-devices", "ulysses-size", "cfg-parallel"],
+        "message": I18nText(
+            "num-devices 必须等于 ulysses-size，启用 cfg-parallel 时须等于 2 × ulysses-size",
+            "num-devices must equal ulysses-size, or 2 × ulysses-size with cfg-parallel",
+        ),
+    },
     "cfgParallelRequiresWorldSize2": {
         "fields": ["use-cfg", "cfg-parallel", "num-devices"],
         "message": I18nText(

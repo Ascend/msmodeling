@@ -120,6 +120,69 @@ class TestValidatorIntegration:
         )
         assert ns.batch_size == 1
 
+    @pytest.mark.parametrize(
+        ("num_devices", "ulysses_size", "cfg_parallel", "use_cfg", "message"),
+        [
+            ("2", "2", True, True, "must equal"),
+            ("2", "1", False, False, "must equal"),
+            ("4", "2", True, False, "requires use-cfg"),
+        ],
+    )
+    def test_video_generate_rejects_invalid_cfg_parallel_configuration(
+        self, num_devices, ulysses_size, cfg_parallel, use_cfg, message, capsys
+    ):
+        argv = [
+            "--model-id",
+            "test-model",
+            "--batch-size",
+            "1",
+            "--seq-len",
+            "16",
+            "--num-devices",
+            num_devices,
+            "--ulysses-size",
+            ulysses_size,
+        ]
+        if cfg_parallel:
+            argv.append("--cfg-parallel")
+        if use_cfg:
+            argv.append("--use-cfg")
+
+        with pytest.raises(SystemExit) as exc_info:
+            self._parse("video_generate", argv)
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert message in captured.err
+
+    @pytest.mark.parametrize(
+        ("num_devices", "ulysses_size", "cfg_parallel", "use_cfg"),
+        [("1", "1", False, False), ("2", "2", False, False), ("2", "1", True, True)],
+    )
+    def test_video_generate_accepts_valid_cfg_parallel_configuration(
+        self, num_devices, ulysses_size, cfg_parallel, use_cfg
+    ):
+        argv = [
+            "--model-id",
+            "test-model",
+            "--batch-size",
+            "1",
+            "--seq-len",
+            "16",
+            "--num-devices",
+            num_devices,
+            "--ulysses-size",
+            ulysses_size,
+        ]
+        if cfg_parallel:
+            argv.append("--cfg-parallel")
+        if use_cfg:
+            argv.append("--use-cfg")
+
+        ns = self._parse("video_generate", argv)
+        assert ns.num_devices == int(num_devices)
+        assert ns.ulysses_size == int(ulysses_size)
+
     def test_image_generate_no_validators(self):
         """ig: no validators defined → parse_module_args returns Namespace."""
         # image_generate has validators=[] (empty), so no cross-field check fires.
