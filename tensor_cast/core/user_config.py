@@ -428,7 +428,10 @@ class UserInputConfig:
             image_batch_size=self.image_batch_size,
             image_height=self.image_height,
             image_width=self.image_width,
-            context_length=self.context_length,
+            # Keep the invariant seq_len == context_length + query_len so downstream
+            # entries (e.g. cache_position / tensor_cast_has_previous_state in
+            # generate_inputs) see the cached-prefix tokens as real context.
+            context_length=effective_context_len,
         )
 
     def get_effective_prefix_cache_hit_rate(self, is_decode: Optional[bool] = None):
