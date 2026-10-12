@@ -29,6 +29,10 @@ from ..config.base_config import REQUESTRATES, CONCURRENCYS
 
 FINE_TUNE_MODE_PD_MIXED = "pd_mixed"
 FINE_TUNE_MODE_PD_DISAGGREGATION = "pd_disaggregation"
+# PD disaggregation uses a fixed TTFT band independent of slo_coefficient.
+PD_TTFT_LOWER_RATIO = 0.8
+# Stop PD request-rate trials that differ only within this relative tolerance.
+REQUEST_RATE_CONVERGENCE_TOLERANCE = 0.03
 
 
 class StopFineTune(Exception):
@@ -57,7 +61,9 @@ class FineTune:
         self.fine_tune_type = cycle(self.fine_tune_target)
         self.step_size = step_size
         self.fine_tune_mode = fine_tune_mode
-        self.ttft_lower_bound = self.ttft_slo * (1 - self.slo_coefficient)
+        self.ttft_lower_bound = self.ttft_slo * (
+            PD_TTFT_LOWER_RATIO if fine_tune_mode == FINE_TUNE_MODE_PD_DISAGGREGATION else 1 - self.slo_coefficient
+        )
         self.ttft_upper_bound = self.ttft_slo
         self.tpot_lower_bound = self.tpot_slo * (1 - self.slo_coefficient)
         self.tpot_upper_bound = self.tpot_slo
@@ -76,6 +82,8 @@ class FineTune:
         self.pd_initial_request_rate = None
         self.pd_lower_concurrency = None
         self.pd_upper_concurrency = None
+        self.pd_lower_request_rate = None
+        self.pd_upper_request_rate = None
 
     @staticmethod
     def update_field(
@@ -139,6 +147,8 @@ class FineTune:
         self.pd_initial_request_rate = None
         self.pd_lower_concurrency = None
         self.pd_upper_concurrency = None
+        self.pd_lower_request_rate = None
+        self.pd_upper_request_rate = None
 
     @staticmethod
     def is_field_name(field: OptimizerConfigField, names: tuple) -> bool:
@@ -251,6 +261,59 @@ class FineTune:
 
         return self.set_field_value(concurrency_field, next_concurrency)
 
+    def handle_pd_disaggregation_request_rate(
+        self,
+        simulate_run_info: tuple[OptimizerConfigField, ...],
+        performance_index: PerformanceIndex,
+    ) -> bool:
+        """Bracket request rates by TTFT, then bisect to the inclusive target band.
+
+        The band is [PD_TTFT_LOWER_RATIO * SLO, SLO], independent of slo_coefficient.
+        Stop before another benchmark when the next available rate is within
+        REQUEST_RATE_CONVERGENCE_TOLERANCE of the current rate, using the larger
+        rate as the relative scale. Rate convergence does not imply TTFT compliance.
+        """
+        if self.ttft_penalty == 0:
+            return False
+        request_rate_field = self.find_field(simulate_run_info, REQUESTRATES)
+        if not self.is_field_adjustable(request_rate_field):
+            return False
+        current_rate = float(request_rate_field.value)
+        actual_ttft = performance_index.time_to_first_token
+        if actual_ttft is None or isinf(actual_ttft) or isnan(actual_ttft):
+            raise ValueError("Missing or non-finite performance data for TTFT.")
+        if current_rate <= 0:
+            raise StopFineTune("Current request rate must be positive.")
+
+        if actual_ttft > self.ttft_upper_bound:
+            self.pd_upper_request_rate = current_rate
+            next_rate = (
+                current_rate / 2
+                if self.pd_lower_request_rate is None
+                else (self.pd_lower_request_rate + current_rate) / 2
+            )
+        elif actual_ttft < self.ttft_lower_bound:
+            self.pd_lower_request_rate = current_rate
+            next_rate = (
+                current_rate * 2
+                if self.pd_upper_request_rate is None
+                else (current_rate + self.pd_upper_request_rate) / 2
+            )
+        else:
+            raise StopFineTune(f"TTFT is within [{PD_TTFT_LOWER_RATIO} * SLO, SLO].")
+
+        next_rate = request_rate_field.find_available_value(next_rate)
+        # Zero means unlimited QPS; it must never be used as a lower-pressure trial.
+        if next_rate <= 0:
+            return False
+        if isclose(float(next_rate), current_rate, rel_tol=REQUEST_RATE_CONVERGENCE_TOLERANCE):
+            raise StopFineTune(
+                f"Request rate converged: next trial {next_rate} is within "
+                f"{REQUEST_RATE_CONVERGENCE_TOLERANCE:.0%} relative tolerance of current {current_rate}."
+            )
+        request_rate_field.value = next_rate
+        return True
+
     def fine_tune_pd_disaggregation(self, params: np.ndarray, performance_index: PerformanceIndex):
         simulate_run_info = map_param_with_value(params, self.target_field)
         request_rate_field = self.find_field(simulate_run_info, REQUESTRATES)
@@ -271,6 +334,10 @@ class FineTune:
         self.add_history(self.last_value, REQUESTRATES, request_rate_field.value)
 
         concurrency_updated = self.handle_pd_disaggregation_concurrency(simulate_run_info, performance_index)
+        if concurrency_updated:
+            # TTFT bounds measured at another concurrency are no longer comparable.
+            self.pd_lower_request_rate = None
+            self.pd_upper_request_rate = None
         if is_initial_request_rate:
             if concurrency_updated or request_rate_updated:
                 return simulate_run_info
@@ -279,8 +346,7 @@ class FineTune:
             return simulate_run_info
 
         self.check_config_and_performance(performance_index)
-        self.direction_of_field_update(performance_index)
-        if self.handle_request_rate(simulate_run_info, performance_index):
+        if self.handle_pd_disaggregation_request_rate(simulate_run_info, performance_index):
             return simulate_run_info
         raise StopFineTune("Parameter value reached its boundary or did not change.")
 

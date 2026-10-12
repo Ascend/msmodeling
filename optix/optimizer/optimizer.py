@@ -497,7 +497,8 @@ class PSOOptimizer(PerformanceTuner):
                         e,
                     )
                     break
-                except StopFineTune:
+                except StopFineTune as e:
+                    logger.info("PD disaggregation fine-tuning stopped: {}", e)
                     break
                 params = field_to_param(simulate_run_info)
                 fine_tune_run_method = (

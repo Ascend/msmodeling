@@ -190,6 +190,8 @@ value = 100
 
 本例 P 的请求率固定为不限速。D 的请求率保留可调范围，是因为 `top_k>0` 时，D 阶段微调会先不限速测量 QPS，再以该 QPS 为请求率调整并发。D 的 `REQUESTRATE` 范围需要覆盖预期 QPS；如果实测值超过 `1000`，应扩大上限。`top_k=0` 时不执行这一步微调，也不检查该范围。
 
+Decode 的 `pd_disaggregation` 微调优先按 TPOT 调整并发；并发无法继续变化后，若设置 `ttft_penalty>0`，则二分调整请求率，使实测 TTFT 落在 `[0.8 × ttft_slo, ttft_slo]`。例如请求率 2.4 req/s 时 TTFT 超标，先降至 1.2；若此时 TTFT 低于目标的 0.8 倍，再试 1.8。尚未找到两侧速率边界时先减半或翻倍；找到两侧后取中点。下一候选速率经配置范围和数据类型约束后，若与当前速率的差值不超过两者较大值的 3%，会直接停止，不再执行该候选的压测；该容差由 `REQUEST_RATE_CONVERGENCE_TOLERANCE` 定义。达到速率范围、数据类型精度限制或最大微调次数时也会结束。请求率收敛不代表 TTFT 达标，因此目标区间不可达时仍需检查最终指标。该分支不受 `step_size` 和 `slo_coefficient` 控制；本例 Decode 的 `ttft_penalty=0`，不启用请求率续调。 该 TTFT 区间是请求率调整的停止条件；最终推荐仍从 TPOT 达标的候选中选择请求吞吐最高者，因此推荐结果不保证落入此 TTFT 区间。
+
 ### 使用 AISBench 时怎么改
 
 将两个阶段的 `benchmark_policy` 改为 `"ais_bench"`，再把上述 `benchmark_command_overrides` 改为 AISBench 的配置。例如 P 阶段：

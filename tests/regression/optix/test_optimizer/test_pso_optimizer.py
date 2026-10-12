@@ -1011,6 +1011,95 @@ class TestRefineOptimizationCandidates:
         opt.scheduler.stop_target_server.assert_not_called()
         opt.scheduler.benchmark.stop.assert_called_once()
 
+    def test_pd_disaggregation_rate_bisection_stops_after_measured_ttft_enters_band(self):
+        from optix.optimizer.experience_fine_tunning import FineTune
+
+        fields = (
+            OptimizerConfigField(name="CONCURRENCY", min=1, max=1, value=1, dtype="int"),
+            OptimizerConfigField(name="REQUESTRATE", min=0.1, max=10, value=2.0, dtype="float"),
+        )
+        opt = self._create_optimizer(
+            target_field=fields, max_fine_tune=10, ttft_slo=1.0, manage_simulator_lifecycle=False
+        )
+        opt.fine_tune = FineTune(
+            ttft_penalty=1.0,
+            tpot_penalty=1.0,
+            ttft_slo=1.0,
+            target_field=fields,
+            fine_tune_mode="pd_disaggregation",
+        )
+        opt.default_run_param = np.array([2.0])
+        opt.scheduler.run_benchmark_only.side_effect = [
+            PerformanceIndex(
+                throughput=2.49,
+                generate_speed=1000,
+                time_to_first_token=ttft,
+                time_per_output_token=0.04,
+                success_rate=1.0,
+            )
+            for ttft in (1.5, 1.2, 0.5, 0.9)
+        ]
+        record_fitness, record_params, record_res = opt.refine_default_candidate()
+
+        assert opt.scheduler.run_benchmark_only.call_count == 4
+        measured_rates = [call.args[0][0] for call in opt.scheduler.run_benchmark_only.call_args_list]
+        assert measured_rates == pytest.approx([0.0, 2.4, 1.2, 1.8])
+        assert len(record_fitness) == len(record_params) == len(record_res) == 5
+        assert record_res[-1].time_to_first_token == pytest.approx(0.9)
+        opt.scheduler.run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "ttfts, expected_rates",
+        [
+            ((1.01, 1.01, 0.79, 1.01, 0.79, 0.79, 0.79), [0.0, 2.4, 1.2, 1.8, 1.5, 1.65, 1.725]),
+            ((1.01, 1.01, 0.79, 1.01, 0.79, 1.01, 0.79), [0.0, 2.4, 1.2, 1.8, 1.5, 1.65, 1.575]),
+        ],
+        ids=["ttft-step", "ttft-noise"],
+    )
+    def test_pd_rate_convergence_stops_before_another_benchmark(self, ttfts, expected_rates):
+        from optix.optimizer.experience_fine_tunning import FineTune
+
+        fields = (
+            OptimizerConfigField(name="CONCURRENCY", min=100, max=100, value=100, dtype="int"),
+            OptimizerConfigField(name="REQUESTRATE", min=0.01, max=10, value=2.0, dtype="float"),
+        )
+        opt = self._create_optimizer(
+            target_field=fields, max_fine_tune=30, ttft_slo=1.0, manage_simulator_lifecycle=False
+        )
+        opt.fine_tune = FineTune(
+            ttft_penalty=1.0,
+            tpot_penalty=1.0,
+            ttft_slo=1.0,
+            target_field=fields,
+            fine_tune_mode="pd_disaggregation",
+        )
+        opt.default_run_param = np.array([2.0])
+        opt.scheduler.run_benchmark_only.side_effect = [
+            PerformanceIndex(
+                throughput=2.49,
+                generate_speed=1000,
+                time_to_first_token=ttft,
+                time_per_output_token=0.04,
+                success_rate=1.0,
+            )
+            for ttft in ttfts
+        ]
+        with patch("optix.optimizer.optimizer.logger") as mock_logger:
+            record_fitness, record_params, record_res = opt.refine_default_candidate()
+
+        measured_rates = [call.args[0][0] for call in opt.scheduler.run_benchmark_only.call_args_list]
+        assert measured_rates == pytest.approx(expected_rates)
+        assert opt.scheduler.run_benchmark_only.call_count == len(expected_rates)
+        assert len(record_fitness) == len(record_params) == len(record_res) == len(expected_rates) + 1
+        assert all(
+            perf.time_to_first_token < opt.fine_tune.ttft_lower_bound
+            or perf.time_to_first_token > opt.fine_tune.ttft_upper_bound
+            for perf in record_res[1:]
+        )
+        assert any("Request rate converged:" in str(call.args[-1]) for call in mock_logger.info.call_args_list)
+        opt.scheduler.run.assert_not_called()
+        opt.scheduler.stop_target_server.assert_not_called()
+
 
 class TestOptimizerMain:
     """Test optimizer.main() function

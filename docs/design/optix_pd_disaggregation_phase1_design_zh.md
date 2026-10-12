@@ -227,7 +227,7 @@ P/D 搜索配置 `use_request_rate_calibration=false` 时，`CONCURRENCY` 在范
 
 Decode 双跑成立的前提是服务端启用 prefix caching，且 benchmark 两轮生成完全一致的 workload。使用 `dataset_name="random"` 时应显式配置同一个 `--seed`；服务启动参数中的 `--seed` 不能替代 benchmark 的 seed。Prefill 仍可关闭 prefix caching 并保持单次 benchmark。该双跑只用于第一步独立 Decode 搜索，以近似隔离 D 节点能力；用户启动完整 PD 服务后的第二步 benchmark-only 微调直接测量真实 PD 链路，不受此双跑配置约束。
 
-`top_k>0` 且 Decode 启用 `pd_disaggregation` 阶段 FineTune 时，会先临时使用 `REQUESTRATE=0` 进行不限流探测，并将实测 QPS 作为后续 FineTune 的初始请求速率。并发仍按 TPOT 是否超过 SLO 维护上下界并二分调整；并发可以继续移动时优先调整并发，并发到达边界或二分结果不再变化后，若 `ttft_penalty>0` 且 TTFT 偏离 SLO 区间，则按 `pd_mixed` 的比例步长规则继续调整请求速率。初始 QPS 后续不再被强制回填为固定值。Decode 必须配置 `min < max` 的 `REQUESTRATE` 范围，且范围应覆盖预期实测 QPS；`top_k=0` 时不做该校验。
+`top_k>0` 且 Decode 启用 `pd_disaggregation` 阶段 FineTune 时，会先临时使用 `REQUESTRATE=0` 进行不限流探测，并将实测 QPS 作为后续 FineTune 的初始请求速率。并发仍按 TPOT 是否超过 SLO 维护上下界并二分调整；并发可以继续移动时优先调整并发，并发到达边界或二分结果不再变化后，若 `ttft_penalty>0`，则通过二分查找调整请求速率，直到实测 TTFT 落入 `[0.8 × ttft_slo, ttft_slo]`（含端点）。TTFT 超标时记录速率上界，尚无下界则速率减半，否则取当前速率与下界的中点；TTFT 低于目标的 0.8 倍时记录速率下界，尚无上界则速率翻倍，否则取当前速率与上界的中点。速率受配置范围和数据类型限制。下一候选速率完成范围限制和类型转换后，若与当前速率的差值不超过两者较大值的 `REQUEST_RATE_CONVERGENCE_TOLERANCE`（默认 3%），立即以请求率收敛为原因停止，不再执行该候选的 benchmark；收敛不表示 TTFT 已命中目标区间。不能继续变化或达到 `max_fine_tune` 时也提前停止；降速不得将请求率设为代表不限速的 `0`。该速率分支不使用 `step_size` 或 `slo_coefficient`；并发发生变化时清空速率上下界，避免复用不同并发下的 TTFT 判断。初始 QPS 后续不再被强制回填为固定值。Decode 必须配置 `min < max` 的 `REQUESTRATE` 范围，且范围应覆盖预期实测 QPS；`top_k=0` 时不做该校验。
 
 P/D 配比计算中，Prefill 和 Decode 均直接使用各自 benchmark 返回的正数 `throughput`（req/s）作为 QPS。Decode 不再使用 `CONCURRENCY/TPOT_s`；若任一阶段缺少有效吞吐，配比计算失败并提示检查 benchmark 指标解析。
 
@@ -304,7 +304,8 @@ msmodeling optix --mode standard -e vllm -b vllm_benchmark -c ./pd_fine_tune.tom
 | UT-P/D 阶段 FineTune 可选 | 边界测试 | `top_k=0` | 执行 P/D 搜索 | 两阶段均跳过 FineTune，保留 PSO 最优结果并正常输出配比和 summary |
 | UT-Decode 请求速率范围 | 边界测试 | `fine_tune_mode=pd_disaggregation` | 使用固定或不包含实测 QPS 的范围 | 在运行微调前或固定速率时明确报错 |
 | UT-固定速率 TTFT 回退 | 单元测试 | `fine_tune_mode=pd_mixed`、请求速率固定 | 构造 TPOT 达标且 TTFT 超标的指标 | 请求速率不变，并发降低 |
-| UT-PD 分离速率续调 | 单元测试 | `fine_tune_mode=pd_disaggregation`、`ttft_penalty>0` | 先用实测 QPS 初始化，再令二分并发收敛且 TTFT 超标 | 首轮使用实测 QPS，后续降低请求速率，并发仍按二分逻辑调整 |
+| UT-PD 分离速率续调 | 单元测试 | `fine_tune_mode=pd_disaggregation`、`ttft_penalty>0` | 先用实测 QPS 初始化，再令二分并发收敛且 TTFT 超标 | 首轮使用实测 QPS，后续按 TTFT 二分速率（2.4 → 1.2 → 1.8），TTFT 在目标 0.8～1 倍区间停止；覆盖上下限、整数收敛、历史重置和并发变化清空速率上下界 |
+| UT-PD 请求率相对收敛 | 边界与集成测试 | `fine_tune_mode=pd_disaggregation`、并发固定、TTFT 不在目标区间 | 构造不同速率尺度、升降速、3% 边界、范围裁剪及 TTFT 阶跃和上下沿跳变 | 候选速率相对变化不超过 3% 时立即停止，不更新当前速率或追加 benchmark；记录请求率收敛原因，不将其视为 TTFT 达标；0.15 → 0.075 仍可继续 |
 | UT-最大施压速率 | 边界测试 | `use_request_rate_calibration=false` | 分别使用包含和不包含 0 的 `REQUESTRATE` 范围 | 包含 0 时固定为 0，否则固定为数值 max |
 | UT-benchmark 次数配置 | 边界测试 | 构造 P/D 阶段配置 | 省略、配置 1、2、0 | 默认值为 1；1、2 可用；0 校验失败 |
 | UT-Decode cache 预热 | 单元测试 | `use_request_rate_calibration=false`、Decode `benchmark_run_count=2` | 两轮返回不同吞吐 | 服务只启动一次、benchmark 执行两次，仅第二轮进入结果和 QPS |
