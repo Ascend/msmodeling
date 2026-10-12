@@ -8,7 +8,6 @@
   "baseline_tolerance": 0.25,
   "operator_top_n": 10,
   "operator_tolerance": 0.1,
-  "compilation_config": ["enable_matmul_allreduce"],
   "user_input": {
     "device": "ATLAS_800_A3_560T_128G_DIE",
     "model_id": "moonshotai/Kimi-K2.5",
