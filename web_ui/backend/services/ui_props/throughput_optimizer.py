@@ -68,6 +68,7 @@ GROUPS = [
     {"group_key": "Model", "defaultCollapsed": True},
     {"group_key": "PD Ratio", "defaultCollapsed": True},
     {"group_key": "Multimodal", "defaultCollapsed": True},
+    {"group_key": "KV Cache Offload", "defaultCollapsed": True},
 ]
 
 
@@ -647,6 +648,52 @@ UI: dict[str, UIFieldProps] = {
         default=None,
         group={'zh': 'MTP', 'en': 'MTP'},
         control='number',
+    ),
+    # KV Cache Offload Options (RFC docs/RFC/rfc_kv_cache_offloading_*)
+    "enable-decode-kv-offload": UIFieldProps(
+        label=I18nText('启用 Decode 稀疏 KV Offload', 'Enable Decode Sparse KV Offload'),
+        tooltip=I18nText(
+            '把 device 主 KV 移到 host，设备仅保留 indexer 与 top-k 热 buffer；每步按命中率补拉 miss 行。',
+            'Move the device main KV to host, keeping only indexer + a top-k hot buffer on device; miss rows are fetched per step by hit rate.',
+        ),
+        group={'zh': 'KV Cache Offload', 'en': 'KV Cache Offload'},
+        control='switch',
+    ),
+    "decode-offload-buffer-multiplier": UIFieldProps(
+        label=I18nText('热 buffer 倍率', 'Hot Buffer Multiplier'),
+        tooltip=I18nText(
+            '热 buffer 大小 = multiplier × top-k（上游实测 2.0 时命中率 80-90%）。',
+            'Hot buffer size = multiplier × top-k (upstream measures 80-90 percent hit rate at 2.0).',
+        ),
+        group={'zh': 'KV Cache Offload', 'en': 'KV Cache Offload'},
+        control='number',
+    ),
+    "decode-offload-hit-rate": UIFieldProps(
+        label=I18nText('热 buffer 命中率', 'Hot Buffer Hit Rate'),
+        tooltip=I18nText(
+            '热 buffer 命中率（保守默认 0.85；上游 2×top-k 实测 80-90%）。',
+            'Hot buffer hit rate (conservative default 0.85; upstream 2×top-k measures 80-90%).',
+        ),
+        group={'zh': 'KV Cache Offload', 'en': 'KV Cache Offload'},
+        control='number',
+    ),
+    "host-memory-available-gb": UIFieldProps(
+        label=I18nText('Host 可用内存预算 (GB)', 'Host Memory Available (GB)'),
+        tooltip=I18nText(
+            '卸载 KV 池的 Host 内存预算（GB）；0 表示不做 Host 容量检查，超限候选会 fail-fast。',
+            'Host memory budget for the offload KV pool (GB); 0 disables the host capacity check, over-budget candidates fail fast.',
+        ),
+        group={'zh': 'KV Cache Offload', 'en': 'KV Cache Offload'},
+        control='number',
+    ),
+    "enable-prefill-kv-offload": UIFieldProps(
+        label=I18nText('启用 Prefill 层级 KV Offload', 'Enable Prefill Layerwise KV Offload'),
+        tooltip=I18nText(
+            'N 个有 cache 层共享 B 个物理 NPU buffer，主 KV 其余部分驻留 host。',
+            'N cache-bearing layers share B physical NPU buffers; the rest of the main KV lives on host.',
+        ),
+        group={'zh': 'KV Cache Offload', 'en': 'KV Cache Offload'},
+        control='switch',
     ),
 }
 

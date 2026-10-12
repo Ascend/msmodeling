@@ -80,6 +80,23 @@ class UserInputConfig:
     query_len: int = 0
     context_length: int = 0
     prefix_cache_hit_rate: float = 0.0
+    # KV cache offload (RFC docs/RFC/rfc_kv_cache_offloading_*). Decode sparse
+    # offload moves the device main KV to host; only indexer + a top-k hot
+    # buffer stay on device. The sparse window (top-k) is resolved from the
+    # model checkpoint config, and the host link bandwidth comes from the
+    # DeviceProfile -- neither is user-facing. Defaults keep offload OFF.
+    enable_decode_kv_offload: bool = False
+    decode_offload_buffer_multiplier: float = 2.0
+    decode_offload_hit_rate: float = 0.85
+    # Host memory budget for the offload KV pool (GB). 0 disables the host
+    # capacity check; when set, candidates whose offloaded KV pool exceeds the
+    # budget fail fast instead of returning undeployable results.
+    host_memory_available_gb: float = 0.0
+    # Prefill layerwise KV offload (RFC docs/RFC/rfc_kv_cache_offloading_*). N
+    # cache-bearing layers share B physical NPU buffers (round-robin); the rest
+    # of the main KV lives on host. B/I are fixed code-level defaults (see
+    # ModelRunner._PREFILL_OFFLOAD_*). Defaults keep offload OFF (no change).
+    enable_prefill_kv_offload: bool = False
     do_compile: bool = False
     allow_graph_break: bool = False
     dynamic_shapes: bool = False

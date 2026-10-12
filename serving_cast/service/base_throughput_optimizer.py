@@ -28,6 +28,7 @@ from tensor_cast.core.input_generator import (
     generate_inputs_varlen,
     RequestInfo,
 )
+from tensor_cast.core.kv_offload import HostKVCapacityExceeded, fold_offload_transfer_time_ms
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from tensor_cast.pipeline_parallel import PipelineProfile, PipelineStageProfile
 from .latency_table import ForwardLatencyRecord, ForwardShapeKey
@@ -57,6 +58,31 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_BATCH_SIZE = 512
+
+
+def _host_capacity_rejected_metrics(exc: HostKVCapacityExceeded) -> ModelRunnerMetrics:
+    """Synthesize an OOM-flagged metrics row for a host-capacity-rejected candidate.
+
+    ``device_memory_available_gb < 0`` routes the candidate into the existing OOM
+    early-stop path (the search shrinks its upper bound and keeps feasible rows);
+    the offload fields carry the rejected pool size and phase for diagnostics.
+    """
+    return ModelRunnerMetrics(
+        total_device_memory_gb=0.0,
+        model_weight_size_gb=0.0,
+        peak_memory_usage_gb=0.0,
+        kv_cache_size_gb=0.0,
+        kv_cache_per_token_gb=0.0,
+        model_activation_size_gb=0.0,
+        reserved_memory_gb=0.0,
+        execution_time_s={},
+        tps_per_model={},
+        run_time_s=0.0,
+        batch_size=0,
+        device_memory_available_gb=-1.0,
+        host_kv_pool_gb=exc.host_kv_pool_gb,
+        offload_mode=exc.phase,
+    )
 
 
 @dataclass(frozen=True)
@@ -493,8 +519,19 @@ class BaseThroughputOptimizer(ABC):
         self._cache_forward_latency_record(key, self._build_forward_latency_record(metrics))
 
     def _build_forward_latency_record(self, metrics: ModelRunnerMetrics) -> ForwardLatencyRecord:
+        # offload fields are ModelRunnerMetrics fields (RFC docs/RFC/rfc_kv_cache_offloading_*).
+        # fold_offload_transfer_time_ms is the shared phase-aware fold-in
+        # (prefill: transfer overlaps compute -> max; decode: serial -> "+");
+        # its getattr/isinstance contract keeps this robust to lightweight
+        # metrics mocks (SimpleNamespace) that predate the offload substrate.
+        base_latency_ms = self._select_latency_s(metrics.execution_time_s) * 1000
+        latency_ms = fold_offload_transfer_time_ms(
+            base_latency_ms,
+            getattr(metrics, "offload_mode", "none"),
+            getattr(metrics, "offload_transfer_time_ms", 0.0),
+        )
         return ForwardLatencyRecord(
-            latency_ms=self._select_latency_s(metrics.execution_time_s) * 1000,
+            latency_ms=latency_ms,
             memory_left_gb=metrics.device_memory_available_gb,
             breakdowns=format_breakdowns(metrics.breakdowns),
             memory_info=build_memory_info(metrics),
@@ -669,7 +706,16 @@ class BaseThroughputOptimizer(ABC):
 
         runner = self.model_runner
         assert runner is not None, "initialize() must set model_runner"
-        metrics = runner.run_inference(requests, generate_inputs_func=generate_inputs)
+        try:
+            metrics = runner.run_inference(requests, generate_inputs_func=generate_inputs)
+        except HostKVCapacityExceeded as exc:
+            # Host-pool capacity is a search-domain signal (review 10-09): probe
+            # batches may legitimately outgrow --host-memory-available-gb. Fold
+            # the candidate into the existing OOM early-stop path (available < 0)
+            # so the search shrinks its upper bound and keeps feasible results
+            # instead of aborting the whole run.
+            logger.warning("Candidate rejected: %s", exc)
+            metrics = _host_capacity_rejected_metrics(exc)
 
         return metrics
 
@@ -755,10 +801,17 @@ class BaseThroughputOptimizer(ABC):
                     )
                     for chunk in chunks
                 ]
-                metrics = self.model_runner.run_inference(
-                    requests,
-                    generate_inputs_func=generate_inputs_varlen,
-                )
+                try:
+                    metrics = self.model_runner.run_inference(
+                        requests,
+                        generate_inputs_func=generate_inputs_varlen,
+                    )
+                except HostKVCapacityExceeded as exc:
+                    # Search-domain signal (see _get_forward_info): fold the
+                    # chunk into the OOM early-stop path; the loop below breaks
+                    # on a negative ``device_memory_available_gb``.
+                    logger.warning("Candidate chunk rejected: %s", exc)
+                    metrics = _host_capacity_rejected_metrics(exc)
                 completed_requests = sum(chunk.is_last_chunk for chunk in chunks)
                 chunk_results.append((metrics, completed_requests))
                 if metrics.device_memory_available_gb < 0:
@@ -779,7 +832,13 @@ class BaseThroughputOptimizer(ABC):
                     )
                 )
 
-        metrics = self.model_runner.run_inference(requests, generate_inputs_func=generate_inputs_varlen)
+        try:
+            metrics = self.model_runner.run_inference(requests, generate_inputs_func=generate_inputs_varlen)
+        except HostKVCapacityExceeded as exc:
+            # Search-domain signal (see _get_forward_info): fold the
+            # candidate into the OOM early-stop path instead of aborting.
+            logger.warning("Candidate rejected: %s", exc)
+            metrics = _host_capacity_rejected_metrics(exc)
         completed_requests = sum(row["samples"] for row in composition_rows)
 
         return [(metrics, completed_requests)], composition_rows

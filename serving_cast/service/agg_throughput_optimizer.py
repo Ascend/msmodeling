@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from tensor_cast.core.kv_offload import fold_offload_transfer_time_ms
 from tensor_cast.core.model_runner import ModelRunner
 from .base_throughput_optimizer import BaseThroughputOptimizer
 from .latency_table import ForwardLatencyTable, ForwardShapeKey
@@ -247,6 +248,17 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         breakdown_weight_totals = {}
         for batch_result, completed_requests in chunk_results:
             prefill_last_latency = self._select_latency_s(batch_result.execution_time_s) * 1000
+            # KV offload (RFC docs/RFC/rfc_kv_cache_offloading_*): chunked prefill
+            # must pay the layerwise round trip with the same overlap semantics
+            # as _build_forward_latency_record (shared phase-aware fold helper:
+            # prefill transfer overlaps compute -> max; decode misses are serial
+            # -> "+", only reachable if a chunk batch reports decode-phase
+            # offload metrics).
+            prefill_last_latency = fold_offload_transfer_time_ms(
+                prefill_last_latency,
+                getattr(batch_result, "offload_mode", "none"),
+                getattr(batch_result, "offload_transfer_time_ms", 0.0),
+            )
             if is_first_chunk:
                 prefill_latency = prefill_last_latency
                 is_first_chunk = False

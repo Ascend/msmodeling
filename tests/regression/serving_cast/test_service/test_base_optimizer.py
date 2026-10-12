@@ -921,6 +921,57 @@ class TestBaseBackend(unittest.TestCase):
 
         self.backend.model_runner.run_inference.assert_not_called()
 
+    def test_get_forward_info_folds_host_capacity_signal_into_oom_path(self):
+        # Review (ChenHuiwen 10-09): exceeding --host-memory-available-gb is a
+        # search-domain signal, not a fatal error -- the candidate boundary must
+        # fold it into the OOM early-stop path so the search shrinks and keeps
+        # already-feasible candidates instead of aborting the whole run.
+        from tensor_cast.core.kv_offload import HostKVCapacityExceeded
+
+        self.backend.model_runner = Mock()
+        self.backend.model_runner.run_inference.side_effect = HostKVCapacityExceeded(
+            "host KV pool for decode offload requires 2.00 GB, exceeding the configured host memory budget of 1.00 GB",
+            host_kv_pool_gb=2.0,
+            phase="decode",
+        )
+
+        metrics = self.backend._get_forward_info(
+            4,
+            OptimizerData(input_length=200, output_length=64, prefix_cache_hit_rate=0.5, batch_size=1),
+            is_decode=True,
+        )
+
+        self.assertEqual(metrics.device_memory_available_gb, -1.0)
+        self.assertEqual(metrics.host_kv_pool_gb, 2.0)
+        self.assertEqual(metrics.offload_mode, "decode")
+
+    def test_get_batched_forward_info_breaks_chunk_loop_on_host_capacity_signal(self):
+        from tensor_cast.core.kv_offload import HostKVCapacityExceeded
+
+        self.backend.model_runner = Mock()
+        self.backend.model_runner.model = Mock()
+        self.backend.model_runner.model.model_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_size=1)
+        )
+        optimizer_data = Mock()
+        optimizer_data.output_length = 32
+        optimizer_data.build_concurrency_samples.return_value = [
+            {"num_input_tokens": 400, "query_len": 300, "request_ratio": 0.5, "samples": 2},
+        ]
+        self.backend.model_runner.run_inference.side_effect = HostKVCapacityExceeded(
+            "host KV pool for prefill offload requires 7.00 GB",
+            host_kv_pool_gb=7.0,
+            phase="prefill",
+        )
+        chunk_plan = [PrefillChunk(index=0, query_len=300, seq_len=400)]
+
+        chunk_results, _ = self.backend._get_batched_forward_info(4, optimizer_data, chunk_plan)
+
+        self.assertEqual(len(chunk_results), 1)
+        metrics, _ = chunk_results[0]
+        self.assertEqual(metrics.device_memory_available_gb, -1.0)
+        self.assertEqual(metrics.offload_mode, "prefill")
+
 
 if __name__ == "__main__":
     unittest.main()

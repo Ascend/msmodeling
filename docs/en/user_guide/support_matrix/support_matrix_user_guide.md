@@ -78,6 +78,7 @@ This document summarizes the currently supported model types and simulation feat
 | Compilation and fusion options | Enables optimization paths such as compilation, Sequence Parallel, MoE fusion, and Embedding TP during the optimization process to more closely match real serving deployment modes. |
 | Multi-stream compute-communication overlap | In the compiled throughput optimization path, splits computation and communication across different execution streams through multi-stream scheduling, modeling inter-stream synchronization overhead and the end-to-end benefit of compute-communication overlap. |
 | Result visualization and export | Outputs candidate configuration curves, raw optimization results, and operator-level traces for comparing different parallelism and batch combinations. |
+| KV Cache Offload modeling | Models the memory and transfer costs of Decode sparse / Prefill layerwise KV cache offloading into the throughput search, evaluating TTFT, TPOT, and concurrency-ceiling changes when offload is enabled. Currently targets DSA indexer-style models such as GLM-5.2 (the sparse window is read from the model config; the indexer cache stays on device; PP>1 is mutually exclusive). |
 
 ### Fine-Grained Serving Simulation
 

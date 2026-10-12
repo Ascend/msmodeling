@@ -41,7 +41,7 @@ metadata:
 
 重要类型：
 
-- `DeviceProfile(name, vendor, comm_grid, mma_ops, gp_ops, compute_efficiency, memory_size_bytes, memory_bandwidth_bytes_ps, memory_efficiency, static_cost)`
+- `DeviceProfile(name, vendor, comm_grid, mma_ops, gp_ops, compute_efficiency, memory_size_bytes, memory_bandwidth_bytes_ps, memory_efficiency, host_bandwidth_bytes_ps, host_latency_s, host_transfer_efficiency, static_cost)`
 - `CommGrid(grid=torch.arange(...).reshape(...), topologies={start_dim: InterconnectTopology(...)})`
 - `InterconnectTopology(bandwidth_bytes_ps, latency_s, comm_efficiency, type=InterconnectType.CLOS/FULL_MESH)`
 - `StaticCost(mma_op_cost_s, gp_op_cost_s, comm_op_cost_s)`

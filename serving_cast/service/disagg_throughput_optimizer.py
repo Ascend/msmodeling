@@ -19,6 +19,7 @@ from collections.abc import Mapping
 
 import pandas as pd
 
+from tensor_cast.core.kv_offload import fold_offload_transfer_time_ms
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.performance_model.empirical import PROFILING_SOURCE_SCOPE
 from .base_throughput_optimizer import BaseThroughputOptimizer
@@ -199,6 +200,14 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 prefill_ttft_sum_ms = 0.0
                 for batch_result, completed_requests in chunk_results:
                     chunk_latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000
+                    # KV offload (RFC docs/RFC/rfc_kv_cache_offloading_*): fold the
+                    # transfer cost into chunked prefill via the shared phase-aware
+                    # helper (same semantics as _build_forward_latency_record).
+                    chunk_latency_ms = fold_offload_transfer_time_ms(
+                        chunk_latency_ms,
+                        getattr(batch_result, "offload_mode", "none"),
+                        getattr(batch_result, "offload_transfer_time_ms", 0.0),
+                    )
                     latency_ms += chunk_latency_ms
                     _accumulate_values(
                         profiling_source_times_s,
@@ -247,6 +256,16 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             else:
                 batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
                 latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000 + optimizer_data.serving_cost
+                # KV offload (RFC docs/RFC/rfc_kv_cache_offloading_*): this branch reads raw
+                # execution time instead of the offload-aware ForwardLatencyRecord, so the
+                # offload transfer cost must be folded here with the shared phase-aware
+                # helper (decode miss-row H2D is serial -> "+"; prefill layerwise round
+                # trip overlaps compute -> "max").
+                latency_ms = fold_offload_transfer_time_ms(
+                    latency_ms,
+                    getattr(batch_result, "offload_mode", "none"),
+                    getattr(batch_result, "offload_transfer_time_ms", 0.0),
+                )
                 device_memory_available_gb = batch_result.device_memory_available_gb
                 breakdowns = format_breakdowns(batch_result.breakdowns)
                 memory_info = build_memory_info(batch_result)

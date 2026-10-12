@@ -67,6 +67,16 @@ def _(
     return torch.empty_like(x)
 
 
+@register_tensor_cast_op("kv_offload_transfer")
+def _(kv: torch.Tensor, direction: int) -> torch.Tensor:
+    """Model a host<->device KV cache offload transfer (no real copy in sim).
+
+    direction: 0 = device->host (save), 1 = host->device (onload).
+    """
+    del direction
+    return torch.empty_like(kv)
+
+
 @register_tensor_cast_op("matmul_all_reduce")
 def _(
     mat1: torch.Tensor,

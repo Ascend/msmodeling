@@ -191,6 +191,26 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 - `--enable-optimize-prefill-decode-ratio` 不能与 `--disagg` 同时使用
 - 启用 PD 配比时，必须同时指定 `--prefill-devices-per-instance` 与 `--decode-devices-per-instance`
 
+### 2.4 KV Cache Offload 场景
+
+将 KV Cache 卸载（Decode 稀疏 / Prefill 层级）的显存与传输代价建模进寻优，评估开启 offload 后 TTFT、TPOT 与并发上限的变化。当前面向 GLM-5.2 等 DSA indexer 型模型（稀疏窗口自动读取模型 config 的 `index_topk`；indexer 缓存常驻设备、不参与卸载；dense/GQA 模型不支持 Decode offload；PP>1 与 offload 互斥）。
+
+#### 示例
+
+```bash
+# offload 开/关配对（固定并发，对比 ΔTPOT）
+msmodeling inference throughput-optimizer zai-org/GLM-5.2 \
+  --device ATLAS_800_A3_752T_128G_DIE --num-devices 32 --tp-sizes 8 --ep-sizes 4 \
+  --input-length 80000 --output-length 2048 --batch-range 10 10 \
+  --enable-decode-kv-offload --decode-offload-buffer-multiplier 2.0 --decode-offload-hit-rate 0.85
+```
+
+#### 说明与约束
+
+- 稀疏窗口 top-k 从模型 checkpoint config 解析（GLM-5.2 `index_topk=2048`），不是 CLI 参数；config 未声明时开启 Decode offload 会被拒绝。
+- host 链路带宽取 DeviceProfile（A3 = 70 GB/s/die/方向理论峰值）；带宽档位敏感性需 profile 变体。
+- Prefill 层级 offload 的 B/I 使用代码默认（`B=2`、`I=0`）。
+
 ## 3 结果说明
 
 命令执行成功后，终端会先打印输入配置和最优配置摘要，随后展示候选并行配置表。输出指标包括吞吐量、TTFT、TPOT、并发度，以及模式相关字段（如 QPS 或 PD 配比）。例如 2.1 PD 混部场景输出：
@@ -470,6 +490,23 @@ PD Ratio Optimization Options:
   --decode-devices-per-instance DECODE_DEVICES_PER_INSTANCE
                         Number of devices per Decode instance. Required when --enable-optimize-prefill-decode-ratio
                         is set. Determines the parallelism configuration search space for Decode phase.
+
+KV Cache Offload Options:
+  --enable-decode-kv-offload
+                        Enable Decode sparse KV cache offload: move the device main KV to host, keep only indexer + a
+                        top-k hot buffer on device; miss rows are fetched per step by hit rate. (default: False)
+  --decode-offload-buffer-multiplier <FLOAT>
+                        Hot buffer size as a multiple of topk (>= 1: the buffer must hold at least one full top-k window for a positive hit rate to be deployable; upstream measures 80-90 percent hit rate at 2.0).
+                        (default: 2.0)
+  --decode-offload-hit-rate <FLOAT>
+                        Top-k hot buffer hit rate for decode KV offload (conservative default 0.85). (default: 0.85)
+  --host-memory-available-gb <FLOAT>
+                        Host memory budget for the offload KV pool in GB. 0 disables the host capacity check; when set, candidates whose offloaded KV pool exceeds the budget fold into the OOM early-stop path instead of returning undeployable results.
+                        (default: 0.0)
+  --enable-prefill-kv-offload
+                        Enable Prefill layerwise KV cache offload: N layers share B physical NPU buffers, the rest of the
+                        main KV lives on host. B/I use code-level defaults (see ModelRunner._PREFILL_OFFLOAD_*).
+                        (default: False)
 ```
 
 主要参数说明如下：
@@ -508,6 +545,11 @@ PD Ratio Optimization Options:
 | `--enable-shared-expert-tp` | Model & Quantization Options | 可选 | 启用 vLLM 风格的 shared experts 张量并行。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. shared experts 使用 dense MLP TP，并延迟执行 `down_proj` 规约。 |
 | `--compilation-config` | Model & Quantization Options | 可选 | 按需启用指定的编译特性。<br>1. 类型：List[Str]。<br>2. 取值范围：`enable_multistream`、`enable_sequence_parallel`、`enable_matmul_allreduce`、`enable_dispatch_ffn_combine`，可同时传入多个，以空格分隔，例如 `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`。<br>3. 默认值：`None`，未指定时所有编译特性保持关闭。<br>4. 该参数自 PR #573 起统一替代原 `--enable_sequence_parallel` / `--enable_dispatch_ffn_combine` 等分散开关。<br>5. 取值大小写及下划线/连字符写法均可，例如 `enable_multistream` 与 `enable-multistream`。 |
 | `--word-embedding-tp` | Model & Quantization Options | 可选 | 启用 word embedding 张量并行并指定并行模式。<br>1. 类型：Str。<br>2. 参考值：`col`、`row`。<br>3. 默认值：`None`，表示不启用 embedding TP。 |
+| `--enable-decode-kv-offload` | KV Cache Offload Options | 可选 | 开启 Decode 稀疏 KV Cache 卸载建模。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 稀疏窗口 top-k 从模型 checkpoint config（`index_topk`，或 `topk_limit` + `index_n_heads`）解析，config 未声明时开启即拒绝；dense/GQA 模型（无 indexer cache）同样拒绝。 |
+| `--decode-offload-buffer-multiplier` | KV Cache Offload Options | 可选 | 热 buffer 容量 = multiplier × top-k。<br>1. 类型：Float。<br>2. 取值范围：≥ 1（buffer 须容纳至少一个完整 top-k 窗口，正命中率才可部署）。<br>3. 默认值：`2.0`（上游实测 2×top-k 命中率 80–90%）。 |
+| `--decode-offload-hit-rate` | KV Cache Offload Options | 可选 | 热 buffer 命中率，决定每步 miss 行回载量。<br>1. 类型：Float。<br>2. 取值范围：`[0, 1]`。<br>3. 默认值：`0.85`（保守下界）。<br>4. `hit_rate = 1` 时每步仍有新 KV 回写代价，卸载不免费。 |
+| `--enable-prefill-kv-offload` | KV Cache Offload Options | 可选 | 开启 Prefill 层级 KV Cache 卸载建模（N 层共享 B 个物理 buffer）。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. B/I 使用代码级默认（`B=2`、`I=0`，见 `ModelRunner._PREFILL_OFFLOAD_*`）；与 PP>1 互斥。 |
+| `--host-memory-available-gb` | KV Cache Offload Options | 可选 | offload KV 池的 host 内存预算（GB）。<br>1. 类型：Float。<br>2. 取值范围：≥ 0。<br>3. 默认值：`0`（不做容量检查）。<br>4. >0 时，卸载池超预算的候选折入 OOM 提前停止路径（搜索收缩并保留可行解），不产出不可部署结果。 |
 | `--performance-model` | Performance Model Options | 可选 | 指定性能模型类型。<br>1. 类型：Str。<br>2. 参考值：`analytic`、`profiling`。<br>3. 默认值：`analytic`。<br>4. `profiling` 模式需配合 `--profiling-database-path` 使用。 |
 | `--profiling-database-path` | Performance Model Options | 条件必选 | 指定 profiling 模式使用的实测算子 CSV 数据库目录。<br>1. 类型：Str。<br>2. 取值范围：数据库目录路径，例如 `tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/`。<br>3. 默认值：`None`；使用 `--performance-model profiling` 时必填。 |
 | `--chrome-trace-file` | Debug Options | 可选 | 生成 Chrome Trace 文件，用于可视化分析算子级性能。<br>1. 类型：Str。<br>2. 参考值：Trace 文件路径，例如 `trace.json`。<br>3. 默认值：`None`，表示不生成 Chrome Trace 文件。 |

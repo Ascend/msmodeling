@@ -314,6 +314,19 @@ class ParallelRunner:
         """Build a runner while preserving the existing workload-cache behavior."""
         if self._workload_cache is None:
             return self._get_model_runnner(user_input)
+        if getattr(user_input, "enable_decode_kv_offload", False) or getattr(
+            user_input, "enable_prefill_kv_offload", False
+        ):
+            # KV offload accounting is device-specific (the transfer cost uses
+            # each device's host link) and must run on every evaluation, so
+            # replayed cache metrics would silently drop the offload state.
+            logger.warning(
+                "KV offload is enabled: bypassing the workload cache so "
+                "per-device offload accounting runs on every evaluation "
+                "(cache-key replay would drop offload mode/transfer state); "
+                "compile-shape search will re-run the model per candidate."
+            )
+            return self._get_model_runnner(user_input)
 
         model_key = self._workload_cache.make_model_key(user_input)
         capture_runner = None

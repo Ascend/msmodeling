@@ -2638,6 +2638,50 @@ def _estimate_pipeline_send_recv(
     )
 
 
+@register_op_estimator(torch.ops.tensor_cast.kv_offload_transfer.default, None)
+def _estimate_kv_offload_transfer(
+    op_invoke_info: OpInvokeInfo,
+    device_profile: DeviceProfile,
+) -> PerformanceModel.Result:
+    """Estimate a host<->device KV cache offload transfer.
+
+    Models ``time = host_latency + payload_bytes / (host_bandwidth * efficiency)``;
+    a zero-payload transfer still pays ``host_latency`` (a host round trip never
+    happens for free). The effective bandwidth is
+    ``host_bandwidth_bytes_ps * host_transfer_efficiency`` -- a profile whose
+    product is ``<= 0`` cannot model this op; emit the op only on profiles whose
+    host link is configured, and report the effective bandwidth (never 0.0) in
+    the statistics so downstream analysis sees the real link.
+    """
+    kv = op_invoke_info.args[0]
+    direction = int(op_invoke_info.args[1]) if len(op_invoke_info.args) > 1 else 0
+
+    host_bandwidth = device_profile.host_bandwidth_bytes_ps
+    host_latency = device_profile.host_latency_s
+    bandwidth_bytes_ps = host_bandwidth * device_profile.host_transfer_efficiency
+    if bandwidth_bytes_ps <= 0:
+        raise ValueError(
+            f"effective bandwidth is {bandwidth_bytes_ps} for device {device_profile.name}; "
+            "host_bandwidth_bytes_ps and host_transfer_efficiency must both be > 0 "
+            "to model kv_offload_transfer."
+        )
+
+    payload_bytes = int(bytes_of_tensor(kv))
+    # A zero-payload transfer still pays the host-link latency.
+    transfer_time_s = host_latency + (payload_bytes / bandwidth_bytes_ps if payload_bytes > 0 else 0.0)
+
+    return PerformanceModel.Result(
+        execution_time_s=transfer_time_s,
+        statistics={
+            StatsKey.COMMUNICATION: transfer_time_s,
+            "message_size_bytes": payload_bytes,
+            "direction": direction,
+            "host_latency_s": host_latency,
+            "bandwidth_bytes_ps": bandwidth_bytes_ps,
+        },
+    )
+
+
 def _tag_statistics(stats: dict[str, object], prefix: str) -> dict[str, object]:
     tagged: dict[str, object] = {}
     for key, value in stats.items():

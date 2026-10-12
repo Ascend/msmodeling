@@ -193,6 +193,26 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 - `--enable-optimize-prefill-decode-ratio` cannot be used together with `--disagg`
 - Both `--prefill-devices-per-instance` and `--decode-devices-per-instance` must be specified when PD ratio optimization is enabled
 
+### 2.4 KV Cache Offload Scenario
+
+Models the memory and transfer costs of KV cache offloading (Decode sparse / Prefill layerwise) into the search, so you can evaluate how TTFT, TPOT and the concurrency ceiling change with offload enabled. Currently targets DSA indexer-style models such as GLM-5.2 (the sparse window is read automatically from the model config `index_topk`; the indexer cache stays on device and is not offloaded; dense/GQA models do not support Decode offload; PP>1 is mutually exclusive with offload).
+
+#### Example
+
+```bash
+# offload on/off pair (fixed concurrency, compare delta TPOT)
+msmodeling inference throughput-optimizer zai-org/GLM-5.2 \
+  --device ATLAS_800_A3_752T_128G_DIE --num-devices 32 --tp-sizes 8 --ep-sizes 4 \
+  --input-length 80000 --output-length 2048 --batch-range 10 10 \
+  --enable-decode-kv-offload --decode-offload-buffer-multiplier 2.0 --decode-offload-hit-rate 0.85
+```
+
+#### Notes and constraints
+
+- The sparse window top-k is resolved from the model checkpoint config (GLM-5.2 `index_topk=2048`) and is not a CLI flag; enabling Decode offload is rejected when the config declares none.
+- The host link bandwidth comes from the DeviceProfile (A3 = 70 GB/s/die/direction theoretical peak); bandwidth-tier sensitivity requires profile variants.
+- Prefill layerwise offload uses code-level defaults for B/I (`B=2`, `I=0`).
+
 ## 3 Result Information
 
 The script outputs performance metrics (throughput, TTFT, TPOT, concurrency, and mode-specific fields such as QPS or PD ratio). Example:
@@ -416,6 +436,23 @@ PD Ratio Optimization Options:
   --decode-devices-per-instance DECODE_DEVICES_PER_INSTANCE
                         Number of devices per decode instance. Required when --enable-optimize-prefill-decode-ratio
                         is set. Determines the parallelism configuration search space for decode phase.
+
+KV Cache Offload Options:
+  --enable-decode-kv-offload
+                        Enable Decode sparse KV cache offload: move the device main KV to host, keep only indexer + a
+                        top-k hot buffer on device; miss rows are fetched per step by hit rate. (default: False)
+  --decode-offload-buffer-multiplier <FLOAT>
+                        Hot buffer size as a multiple of topk (>= 1: the buffer must hold at least one full top-k window for a positive hit rate to be deployable; upstream measures 80-90 percent hit rate at 2.0).
+                        (default: 2.0)
+  --decode-offload-hit-rate <FLOAT>
+                        Top-k hot buffer hit rate for decode KV offload (conservative default 0.85). (default: 0.85)
+  --host-memory-available-gb <FLOAT>
+                        Host memory budget for the offload KV pool in GB. 0 disables the host capacity check; when set, candidates whose offloaded KV pool exceeds the budget fold into the OOM early-stop path instead of returning undeployable results.
+                        (default: 0.0)
+  --enable-prefill-kv-offload
+                        Enable Prefill layerwise KV cache offload: N layers share B physical NPU buffers, the rest of the
+                        main KV lives on host. B/I use code-level defaults (see ModelRunner._PREFILL_OFFLOAD_*).
+                        (default: False)
 ```
 
 The main parameters are described as follows:
@@ -466,6 +503,11 @@ The main parameters are described as follows:
 | --prefill-devices-per-instance          | PD Ratio Optimization Options | Conditionally required | Required when PD ratio optimization is enabled. Specifies the number of devices per prefill instance.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: none.<br>4. Determines the parallelism configuration search space for the prefill phase. |
 | --decode-devices-per-instance           | PD Ratio Optimization Options | Conditionally required | Required when PD ratio optimization is enabled. Specifies the number of devices per decode instance.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: none.<br>4. Determines the parallelism configuration search space for the decode phase. |
 | --enable-optimize-prefill-decode-ratio  | PD Ratio Optimization Options | Optional | Enables the prefill/decode instance ratio optimization mode.<br>1. Type: Bool.<br>2. Value range: switch parameter.<br>3. Default: `False`.<br>4. Cannot be used together with `--disagg`. |
+| --enable-decode-kv-offload              | KV Cache Offload Options | Optional | Enables Decode sparse KV cache offload modeling.<br>1. Type: Bool.<br>2. Value range: switch parameter.<br>3. Default: `False`.<br>4. The sparse window top-k is resolved from the model checkpoint config (`index_topk`, or `topk_limit` + `index_n_heads`); enabling is rejected when the config declares none, and dense/GQA models (no indexer cache) are rejected as well. |
+| --decode-offload-buffer-multiplier      | KV Cache Offload Options | Optional | Hot buffer capacity = multiplier × top-k.<br>1. Type: Float.<br>2. Value range: ≥ 1 (the buffer must hold at least one full top-k window for a deployable positive hit rate).<br>3. Default: `2.0` (upstream measures an 80–90% hit rate at 2×top-k). |
+| --decode-offload-hit-rate               | KV Cache Offload Options | Optional | Hot buffer hit rate, determining the per-step miss-row reload volume.<br>1. Type: Float.<br>2. Value range: [0, 1].<br>3. Default: `0.85` (conservative lower bound).<br>4. Even at `hit_rate = 1` each step still pays the new-KV write-back cost — offload is never free. |
+| --enable-prefill-kv-offload             | KV Cache Offload Options | Optional | Enables Prefill layerwise KV cache offload modeling (N layers share B physical buffers).<br>1. Type: Bool.<br>2. Value range: switch parameter.<br>3. Default: `False`.<br>4. B/I use code-level defaults (`B=2`, `I=0`, see `ModelRunner._PREFILL_OFFLOAD_*`); mutually exclusive with PP>1. |
+| --host-memory-available-gb              | KV Cache Offload Options | Optional | Host memory budget for the offload KV pool (GB).<br>1. Type: Float.<br>2. Value range: ≥ 0.<br>3. Default: `0` (capacity check disabled).<br>4. When > 0, candidates whose offloaded KV pool exceeds the budget fold into the OOM early-stop path (the search shrinks and keeps feasible rows) instead of returning undeployable results. |
 
 ### Search Dimensions and Ranges
 

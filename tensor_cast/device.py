@@ -120,6 +120,13 @@ class DeviceProfile:
     memory_bandwidth_bytes_ps: float = 0  # Bytes/s
     memory_efficiency: float = 1.0
 
+    # Host (CPU) <-> device (NPU) link attributes for KV cache offload
+    # modeling. ``0`` means host-transfer cost is not modeled for this
+    # profile; Phase 1/2 emit ``kv_offload_transfer`` only when configured.
+    host_bandwidth_bytes_ps: float = 0  # Bytes/s, unidirectional
+    host_latency_s: float = 0.0
+    host_transfer_efficiency: float = 1.0
+
     static_cost: StaticCost = field(default_factory=StaticCost)
 
     # TODO: add cache properties
@@ -145,6 +152,13 @@ TEST_INTERCONNECT = CommGrid(
     },
 )
 
+# Shared A-series NPU<->Host link calibration values. The latency and the
+# transfer efficiency are placeholders pending per-device pinned H2D/D2H copy
+# measurements (RFC rfc_kv_cache_offloading open items); the A3 host-link
+# bandwidth has its own confirmed constant (ATLAS_800.A3_HOST_BANDWIDTH_BYTES_PS).
+_HOST_LINK_LATENCY_S = 5e-6
+_HOST_LINK_TRANSFER_EFFICIENCY = 0.8
+
 TEST_DEVICE = DeviceProfile(
     name="TEST_DEVICE",
     vendor="TEST_VENDOR",
@@ -166,6 +180,10 @@ TEST_DEVICE = DeviceProfile(
     # The efficiencies are something we need to calibrate
     compute_efficiency=0.7,
     memory_efficiency=0.6,
+    # Placeholder NPU<->Host PCIe Gen5 x16 unidirectional bandwidth.
+    host_bandwidth_bytes_ps=32 * 1e9,
+    host_latency_s=_HOST_LINK_LATENCY_S,
+    host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
     comm_grid=TEST_INTERCONNECT,
     static_cost=StaticCost(mma_op_cost_s=5 * 1e-6, gp_op_cost_s=2 * 1e-6),
 )
@@ -174,6 +192,12 @@ TEST_DEVICE = DeviceProfile(
 class ATLAS_800:
     # TODO(jgong5): double-confirm static cost
     STATIC_COST = StaticCost(mma_op_cost_s=5 * 1e-6, gp_op_cost_s=2 * 1e-6, comm_op_cost_s=10 * 1e-6)
+
+    # The A3 specification gives 140 GB/s per direction for a dual-die card.
+    # DeviceProfile is die-level, so use 70 GB/s/die/direction as the
+    # theoretical host-link peak.  Keep the transfer-efficiency factor below
+    # until pinned H2D/D2H measurements are available for the target workload.
+    A3_HOST_BANDWIDTH_BYTES_PS = 70 * 1e9
 
     # TODO(jgong5): double-confirm latency
     # TODO(jgong5): double-confirm communication efficiency
@@ -250,6 +274,9 @@ class ATLAS_800:
         # The efficiencies are something we need to calibrate
         compute_efficiency=0.7,
         memory_efficiency=0.6,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=A2_INTERCONNECT,
         static_cost=STATIC_COST,
     )
@@ -273,6 +300,9 @@ class ATLAS_800:
         # The efficiencies are something we need to calibrate
         compute_efficiency=0.7,
         memory_efficiency=0.6,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=A2_INTERCONNECT,
         static_cost=STATIC_COST,
     )
@@ -296,6 +326,9 @@ class ATLAS_800:
         # The efficiencies are something we need to calibrate
         compute_efficiency=0.7,
         memory_efficiency=0.6,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=A2_INTERCONNECT,
         static_cost=STATIC_COST,
     )
@@ -319,6 +352,9 @@ class ATLAS_800:
         # The efficiencies are something we need to calibrate
         compute_efficiency=0.7,
         memory_efficiency=0.6,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=A2_INTERCONNECT_PCIE,
         static_cost=STATIC_COST,
     )
@@ -342,6 +378,9 @@ class ATLAS_800:
         # The efficiencies are something we need to calibrate
         compute_efficiency=0.7,
         memory_efficiency=0.6,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=A2_INTERCONNECT_PCIE,
         static_cost=STATIC_COST,
     )
@@ -365,6 +404,9 @@ class ATLAS_800:
         # The efficiencies are something we need to calibrate
         compute_efficiency=0.7,
         memory_efficiency=0.6,
+        host_bandwidth_bytes_ps=A3_HOST_BANDWIDTH_BYTES_PS,
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=A3_INTERCONNECT,
         static_cost=STATIC_COST,
     )
@@ -388,6 +430,9 @@ class ATLAS_800:
         # The efficiencies are something we need to calibrate
         compute_efficiency=0.7,
         memory_efficiency=0.6,
+        host_bandwidth_bytes_ps=A3_HOST_BANDWIDTH_BYTES_PS,
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=A3_INTERCONNECT,
         static_cost=STATIC_COST,
     )
@@ -593,6 +638,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C425T,
         **Mem.M112G_1_4T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.PCIE2_UB4,
         static_cost=STATIC_COST,
     )
@@ -602,6 +650,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C425T,
         **Mem.M84G_1_4T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.PCIE2_UB4,
         static_cost=STATIC_COST,
     )
@@ -611,6 +662,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M112G_1_4T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_UB_1K,
         static_cost=STATIC_COST,
     )
@@ -620,6 +674,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M128G_1_6T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_UB_1K,
         static_cost=STATIC_COST,
     )
@@ -629,6 +686,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M96G_4_0T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_UB_1K,
         static_cost=STATIC_COST,
     )
@@ -638,6 +698,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C425T,
         **Mem.M96G_4_0T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_UB_1K,
         static_cost=STATIC_COST,
     )
@@ -647,6 +710,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M112G_1_4T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_ROCE_64,
         static_cost=STATIC_COST,
     )
@@ -656,6 +722,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M128G_1_6T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_ROCE_64,
         static_cost=STATIC_COST,
     )
@@ -665,6 +734,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M96G_4_0T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_ROCE_64,
         static_cost=STATIC_COST,
     )
@@ -674,6 +746,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C425T,
         **Mem.M96G_4_0T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_ROCE_64,
         static_cost=STATIC_COST,
     )
@@ -683,6 +758,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M112G_1_4T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_FM16,
         static_cost=STATIC_COST,
     )
@@ -692,6 +770,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M128G_1_6T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_FM16,
         static_cost=STATIC_COST,
     )
@@ -701,6 +782,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M96G_4_0T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_FM16,
         static_cost=STATIC_COST,
     )
@@ -710,6 +794,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C425T,
         **Mem.M96G_4_0T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.SERVER_FM16,
         static_cost=STATIC_COST,
     )
@@ -719,6 +806,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M128G_1_6T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.POD_1K,
         static_cost=STATIC_COST,
     )
@@ -728,6 +818,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M96G_4_0T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.POD_1K,
         static_cost=STATIC_COST,
     )
@@ -737,6 +830,9 @@ class A5:
         vendor="HUAWEI",
         **Chip.C486T,
         **Mem.M144G_4T,
+        host_bandwidth_bytes_ps=0,  # Uncalibrated NPU<->Host link: KV offload fails fast on this device (RFC sec.4 open item)
+        host_latency_s=_HOST_LINK_LATENCY_S,
+        host_transfer_efficiency=_HOST_LINK_TRANSFER_EFFICIENCY,
         comm_grid=Interconnect.POD_1K,
         static_cost=STATIC_COST,
     )

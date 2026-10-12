@@ -250,6 +250,308 @@ class ModelRunner:
 
         return peak_memory_usage_gb
 
+    # Prefill layerwise offload shape defaults (RFC §2.4). B=2 shared physical
+    # buffers is the upstream-measured anchor (2x top-k hot buffer reaches an
+    # 80-90 percent hit rate); I=0 assumes every layer is cache-bearing --
+    # deriving I for hybrid-attention models is an RFC open item. Deliberately
+    # not user-facing: revisit in code only when a hybrid model needs it.
+    _PREFILL_OFFLOAD_SHARED_BUFFERS = 2
+    _PREFILL_OFFLOAD_INDEPENDENT_LAYERS = 0
+
+    @staticmethod
+    def _resolve_model_sparse_topk(model) -> int:
+        """Resolve the DSA sparse attention window (top-k) from the model config.
+
+        The window is a property of the model checkpoint, not a deployment
+        choice, so it is read from the config instead of a CLI flag. Mirrors
+        the DSA predicate in ``config_resolver`` (composite configs keep the
+        fields on ``text_config`` / ``hf_text_config``) and the adapter
+        normalization in the MLA layer (``index_topk``, or ``topk_limit``
+        together with ``index_n_heads``). Returns 0 when the config declares
+        no usable window; callers fail fast on 0.
+        """
+        model_config = getattr(model, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "hf_text_config", None)
+        config = text_config or hf_config
+        topk = getattr(config, "index_topk", None)
+        if topk is None:
+            topk_limit = getattr(config, "topk_limit", None)
+            if topk_limit is not None and hasattr(config, "index_n_heads"):
+                topk = topk_limit
+        if isinstance(topk, bool) or not isinstance(topk, (int, float)) or topk <= 0:
+            return 0
+        return int(topk)
+
+    def _apply_decode_kv_offload_accounting(
+        self,
+        peak_memory_usage_gb: float,
+        kv_cache_bytes: int,
+        indexer_cache_bytes: int,
+        main_kv_per_token: int,
+        batch_size: int,
+        is_decode: bool,
+    ) -> tuple[float, float, str, float, float]:
+        """Peak/KV accounting for decode sparse KV offload.
+
+        (RFC docs/RFC/rfc_kv_cache_offloading_*). When decode offload is enabled
+        and this is a decode step, the main KV lives on host: drop it from the
+        device peak, add the top-k hot buffer, and compute the per-step miss-row
+        H2D transfer time. Otherwise return the inputs unchanged with
+        ``offload_mode="none"`` so non-offload runs are byte-identical.
+
+        Returns ``(peak_gb, kv_cache_size_gb, offload_mode, host_kv_pool_gb,
+        offload_transfer_time_ms)``.
+        """
+        kv_cache_size_gb = (kv_cache_bytes + indexer_cache_bytes) / 1024**3
+        offload_mode = "none"
+        host_kv_pool_gb = 0.0
+        offload_transfer_time_ms = 0.0
+        if not (getattr(self.user_input, "enable_decode_kv_offload", False) and is_decode):
+            return (
+                peak_memory_usage_gb,
+                kv_cache_size_gb,
+                offload_mode,
+                host_kv_pool_gb,
+                offload_transfer_time_ms,
+            )
+
+        from .kv_offload import (
+            HostKVCapacityExceeded,
+            decode_hot_buffer_bytes,
+            decode_offload_miss_transfer_time_ms,
+        )
+
+        user_input = self.user_input
+        topk = ModelRunner._resolve_model_sparse_topk(getattr(self, "model", None))
+        if topk <= 0:
+            # A zero/unknown top-k would free the whole main KV while fetching
+            # nothing: a physically impossible free benefit. The window is a
+            # property of the model checkpoint config, not a deployment choice.
+            raise ValueError(
+                "decode KV offload requires the model checkpoint config to "
+                "declare the sparse attention window (index_topk, or topk_limit "
+                "with index_n_heads); refusing to remove the main KV without a "
+                "sparse top-k window (model config resolves none)"
+            )
+        if indexer_cache_bytes <= 0:
+            # Only sparse-attention models with an indexer can restore a decode
+            # step from a top-k hot buffer; dense/GQA models read the full KV.
+            raise ValueError(
+                "decode KV offload requires a sparse-attention model with an "
+                "indexer cache (dense/GQA attention is unsupported)"
+            )
+        host_bw = self.device_profile.host_bandwidth_bytes_ps
+        # Fail fast on the effective bandwidth (bw x efficiency), matching the
+        # prefill accounting and the kv_offload_transfer estimator: a mis-set
+        # efficiency of 0 would otherwise keep the benefit (main KV freed) while
+        # the pure-function transfer math silently returns swap-only cost.
+        if host_bw * self.device_profile.host_transfer_efficiency <= 0:
+            raise ValueError(
+                f"device profile {self.device_profile.name!r} has no usable host "
+                "bandwidth; configure host_bandwidth_bytes_ps and "
+                "host_transfer_efficiency before enabling decode KV offload"
+            )
+        if user_input.decode_offload_buffer_multiplier < 1:
+            # A sub-1x hot buffer cannot hold even one full top-k window, so the
+            # configured hit rate has no physical carrier: the device would keep
+            # (almost) no resident KV while still on-loading miss rows from host.
+            raise ValueError(
+                "decode offload hot buffer multiplier must be >= 1: the device "
+                "hot buffer must hold at least one full top-k window for a "
+                "positive hit rate to be physically deployable"
+            )
+        hot_bytes = decode_hot_buffer_bytes(
+            main_kv_per_token,
+            topk=topk,
+            buffer_multiplier=user_input.decode_offload_buffer_multiplier,
+            num_seqs=batch_size,
+        )
+        # Main KV is offloaded to host: remove it from the device peak and add
+        # the hot buffer; the device-resident KV becomes indexer + hot buffer.
+        peak_memory_usage_gb = peak_memory_usage_gb - kv_cache_bytes / 1024**3 + hot_bytes / 1024**3
+        kv_cache_size_gb = (indexer_cache_bytes + hot_bytes) / 1024**3
+        host_kv_pool_gb = kv_cache_bytes / 1024**3
+        host_limit_gb = getattr(user_input, "host_memory_available_gb", 0.0)
+        if host_limit_gb > 0 and host_kv_pool_gb > host_limit_gb:
+            raise HostKVCapacityExceeded(
+                f"host KV pool for decode offload requires {host_kv_pool_gb:.2f} GB, "
+                f"exceeding the configured host memory budget of {host_limit_gb:.2f} GB "
+                "(--host-memory-available-gb); reduce batch/context or raise the budget",
+                host_kv_pool_gb=host_kv_pool_gb,
+                phase="decode",
+            )
+        offload_transfer_time_ms = decode_offload_miss_transfer_time_ms(
+            main_kv_per_token,
+            topk=topk,
+            hit_rate=user_input.decode_offload_hit_rate,
+            num_seqs=batch_size,
+            host_bandwidth_bytes_ps=host_bw,
+            host_latency_s=self.device_profile.host_latency_s,
+            host_efficiency=self.device_profile.host_transfer_efficiency,
+        )
+        offload_mode = "decode"
+        return (
+            peak_memory_usage_gb,
+            kv_cache_size_gb,
+            offload_mode,
+            host_kv_pool_gb,
+            offload_transfer_time_ms,
+        )
+
+    def _apply_prefill_kv_offload_accounting(
+        self,
+        peak_memory_usage_gb: float,
+        kv_cache_bytes: int,
+        indexer_cache_bytes: int,
+        main_kv_per_token: int,
+        batch_size: int,
+        is_decode: bool,
+        num_layers: int,
+    ) -> tuple[float, float, str, float, float]:
+        """Peak/KV/transfer accounting for prefill layerwise KV offload.
+
+        (RFC docs/RFC/rfc_kv_cache_offloading_*). On a prefill step with offload
+        ON, only ``ratio = (I + min(B, N-I)) / N`` of the main KV stays on device
+        (B shared physical buffers round-robin across N layers); the rest is on
+        host. Drop the offloaded share from device peak so the optimizer's OOM
+        search finds a larger prefill batch (the benefit). The transfer is a
+        d2h+h2d round trip of the full main KV plus one host-link latency term;
+        the first-version cost model is the aggregate ``max(compute, transfer)``
+        folded into TTFT -- transfers hide when prefill is compute-bound and
+        dominate when the host link is the bottleneck. This aggregate model
+        matches the per-layer ``Σ max`` for uniform layers but omits pipeline
+        fill/drain overlap, so it is a first-order approximation rather than a
+        pessimistic upper bound (per-layer makespan refinement tracked as RFC
+        open enhancements). OFF or decode -> unchanged, "none".
+
+        Returns ``(peak_gb, kv_cache_size_gb, offload_mode, host_kv_pool_gb,
+        offload_transfer_time_ms)``.
+        """
+        kv_cache_size_gb = (kv_cache_bytes + indexer_cache_bytes) / 1024**3
+        offload_mode = "none"
+        host_kv_pool_gb = 0.0
+        offload_transfer_time_ms = 0.0
+        if not (getattr(self.user_input, "enable_prefill_kv_offload", False) and not is_decode):
+            return (
+                peak_memory_usage_gb,
+                kv_cache_size_gb,
+                offload_mode,
+                host_kv_pool_gb,
+                offload_transfer_time_ms,
+            )
+
+        from .kv_offload import HostKVCapacityExceeded, prefill_layerwise_footprint_ratio
+
+        ratio = prefill_layerwise_footprint_ratio(
+            num_layers,
+            ModelRunner._PREFILL_OFFLOAD_INDEPENDENT_LAYERS,
+            ModelRunner._PREFILL_OFFLOAD_SHARED_BUFFERS,
+        )
+        kv_gb = kv_cache_bytes / 1024**3
+        indexer_gb = indexer_cache_bytes / 1024**3
+        # Device holds only `ratio` of the main KV (B shared buffers); the
+        # remaining (1 - ratio) is offloaded to host. Only the offloaded share
+        # counts toward the host pool and the round-trip transfer -- a ratio of
+        # 1 (nothing to offload) must be a no-op on both.
+        offloaded_gb = kv_gb * (1 - ratio)
+        peak_memory_usage_gb = peak_memory_usage_gb - offloaded_gb
+        kv_cache_size_gb = ratio * kv_gb + indexer_gb
+        host_kv_pool_gb = offloaded_gb
+        host_limit_gb = getattr(self.user_input, "host_memory_available_gb", 0.0)
+        if host_limit_gb > 0 and host_kv_pool_gb > host_limit_gb:
+            raise HostKVCapacityExceeded(
+                f"host KV pool for prefill offload requires {host_kv_pool_gb:.2f} GB, "
+                f"exceeding the configured host memory budget of {host_limit_gb:.2f} GB "
+                "(--host-memory-available-gb); reduce batch/context or raise the budget",
+                host_kv_pool_gb=host_kv_pool_gb,
+                phase="prefill",
+            )
+
+        host_bw_raw = self.device_profile.host_bandwidth_bytes_ps
+        bandwidth = host_bw_raw * self.device_profile.host_transfer_efficiency
+        if bandwidth <= 0:
+            raise ValueError(
+                f"device profile {self.device_profile.name!r} has no usable host "
+                "bandwidth; configure host_bandwidth_bytes_ps before enabling "
+                "prefill KV offload"
+            )
+        if ratio < 1:
+            # d2h (save) + h2d (onload) round trip of the offloaded share only,
+            # plus one host-link latency term for the round trip.
+            offload_transfer_time_ms = (
+                self.device_profile.host_latency_s + (2 * kv_cache_bytes * (1 - ratio)) / bandwidth
+            ) * 1000.0
+        offload_mode = "prefill"
+        return (
+            peak_memory_usage_gb,
+            kv_cache_size_gb,
+            offload_mode,
+            host_kv_pool_gb,
+            offload_transfer_time_ms,
+        )
+
+    def _apply_kv_offload_accounting(
+        self,
+        peak_memory_usage_gb: float,
+        kv_cache_bytes: int,
+        indexer_cache_bytes: int,
+        main_kv_per_token: int,
+        batch_size: int,
+        is_decode: bool,
+        num_layers: int,
+    ) -> tuple[float, float, str, float, float]:
+        """Dispatch decode/prefill KV offload accounting by phase.
+
+        Only the phase matching the run is applied; the other path is a no-op,
+        so a single run_inference call accounts for at most one offload mode
+        (this avoids a no-op recomputing kv_cache_size_gb and undoing the
+        active phase's adjustment).
+        """
+        if is_decode:
+            return self._apply_decode_kv_offload_accounting(
+                peak_memory_usage_gb,
+                kv_cache_bytes,
+                indexer_cache_bytes,
+                main_kv_per_token,
+                batch_size,
+                is_decode,
+            )
+        return self._apply_prefill_kv_offload_accounting(
+            peak_memory_usage_gb,
+            kv_cache_bytes,
+            indexer_cache_bytes,
+            main_kv_per_token,
+            batch_size,
+            is_decode,
+            num_layers,
+        )
+
+    @staticmethod
+    def _resolve_offload_cache_layers(
+        per_layer_kv_bytes: dict[int, int],
+        enable_prefill_offload: bool,
+    ) -> int:
+        """Count the cache-bearing layers and gate prefill-offload applicability.
+
+        The prefill layerwise ratio must spread the shared physical buffers
+        across the layers that actually hold paged KV (linear-attention layers
+        are excluded upstream of this call), not the total hidden-layer count
+        -- otherwise a hybrid model (e.g. 2 KV layers out of 8) silently yields
+        a phantom capacity gain (2/8 instead of 2/2). Non-uniform cache-bearing
+        layers are refused under prefill offload: a uniform shared-buffer ratio
+        would be meaningless there.
+        """
+        distinct_sizes = set(per_layer_kv_bytes.values())
+        if enable_prefill_offload and len(distinct_sizes) > 1:
+            raise ValueError(
+                "prefill layerwise KV offload assumes uniform cache-bearing "
+                f"layers; got {len(distinct_sizes)} distinct per-layer KV sizes -- "
+                "refusing to apply a uniform shared-buffer ratio to a non-uniform "
+                "layout"
+            )
+        return len(per_layer_kv_bytes)
+
     # -----------------------------------------------------
     # public API
     # -----------------------------------------------------
@@ -290,6 +592,16 @@ class ModelRunner:
 
         run_start = time.perf_counter()
         if isinstance(self.model, PipelineModel):
+            if getattr(self.user_input, "enable_decode_kv_offload", False) or getattr(
+                self.user_input, "enable_prefill_kv_offload", False
+            ):
+                # The pipeline path never runs the offload accounting (KV is
+                # stage-sharded), so enabling offload here would silently drop
+                # the transfer cost. Refuse instead of pretending it works.
+                raise ValueError(
+                    "KV cache offload is not supported with pipeline parallelism "
+                    "(pp > 1) yet; disable --pp-sizes or the offload flags"
+                )
             pipeline_runner = PipelineRunner(
                 model=self.model,
                 perf_models=self.perf_models,
@@ -377,15 +689,42 @@ class ModelRunner:
         # linear_attention 层占位张量不计入 KV cache 字节（判定集中维护于
         # kv_cache_excluded_layer_indices，确保 kv_cache_bytes 与 kv_cache_per_token 口径一致）。
         excluded_layers = kv_cache_excluded_layer_indices(self.model)
-        kv_cache_bytes = sum(
-            bytes_of_tensor(kv_cache)
+        per_layer_kv_bytes = {
+            layer_idx: bytes_of_tensor(kv_cache)
             for layer_idx, kv_cache in input_kwargs["kv_cache_by_layers"].items()
             if layer_idx not in excluded_layers
-        )
+        }
+        kv_cache_bytes = sum(per_layer_kv_bytes.values())
         indexer_cache_bytes = sum(
             bytes_of_tensor(kv_cache) for kv_cache in input_kwargs.get("indexer_cache_by_layers", {}).values()
         )
-        kv_cache_size_gb = (kv_cache_bytes + indexer_cache_bytes) / 1024**3
+        is_decode_step = bool(requests) and all(getattr(r, "is_decode", False) for r in requests)
+        # Hot-buffer sizing must follow the requests' concurrency: the optimizer
+        # encodes the searched batch in requests[0].concurrency (the
+        # user_input-derived batch_size is NOT the served batch on that path).
+        # Mirror the per-request expansion used by generate_inputs.
+        offload_num_seqs = sum(
+            (int(getattr(r, "concurrency", 1) or 1) + data_parallel_size - 1) // data_parallel_size for r in requests
+        )
+        cache_layer_count = self._resolve_offload_cache_layers(
+            per_layer_kv_bytes,
+            getattr(self.user_input, "enable_prefill_kv_offload", False),
+        )
+        (
+            peak_memory_usage_gb,
+            kv_cache_size_gb,
+            offload_mode,
+            host_kv_pool_gb,
+            offload_transfer_time_ms,
+        ) = self._apply_kv_offload_accounting(
+            peak_memory_usage_gb,
+            kv_cache_bytes,
+            indexer_cache_bytes,
+            int(input_kwargs["kv_cache_per_token"]),
+            offload_num_seqs,
+            is_decode_step,
+            cache_layer_count,
+        )
         kv_cache_per_token_gb = (
             input_kwargs["kv_cache_per_token"] + input_kwargs.get("indexer_cache_per_token", 0)
         ) / 1024**3
@@ -450,6 +789,9 @@ class ModelRunner:
             perf_model_name=perf_model_name,
             profiling_source_times_s=profiling_source_times_s,
             profiling_miss_reasons=profiling_miss_reasons,
+            offload_mode=offload_mode,
+            host_kv_pool_gb=host_kv_pool_gb,
+            offload_transfer_time_ms=offload_transfer_time_ms,
         )
 
     def _build_pipeline_metrics(
@@ -615,6 +957,11 @@ class ModelRunnerMetrics:
     pipeline_profile: Optional[PipelineProfile] = None
     profiling_source_times_s: Dict[str, float] = field(default_factory=dict)
     profiling_miss_reasons: Dict[str, int] = field(default_factory=dict)
+    # KV cache offload substrate (RFC docs/RFC/rfc_kv_cache_offloading_*).
+    # Populated by Phase 1/2 when offload is active; 0 / "none" otherwise.
+    offload_mode: str = "none"  # "none" | "decode" | "prefill"
+    host_kv_pool_gb: float = 0.0
+    offload_transfer_time_ms: float = 0.0
 
     def print_info(self):
         print(f"Number of Queries per DP rank: {self.batch_size}")

@@ -369,6 +369,62 @@ ENABLE_OPTIMIZE_PREFILL_DECODE_RATIO = Param(
     cli_help="Enable PD ratio optimization mode",
 )
 
+# KV Cache Offload Options (RFC docs/RFC/rfc_kv_cache_offloading_*)
+ENABLE_DECODE_KV_OFFLOAD = Param(
+    name="enable-decode-kv-offload",
+    data_type="boolean",
+    default=False,
+    cli_action="store_true",
+    group="KV Cache Offload Options",
+    cli_help="Enable Decode sparse KV cache offload: move the device main KV to host, "
+    "keep only indexer + a top-k hot buffer on device (RFC docs/RFC/rfc_kv_cache_offloading_*).",
+)
+
+DECODE_OFFLOAD_BUFFER_MULTIPLIER = Param(
+    name="decode-offload-buffer-multiplier",
+    data_type="number",
+    default=2.0,
+    min=1.0,
+    group="KV Cache Offload Options",
+    cli_metavar="<FLOAT>",
+    cli_help="Hot buffer size as a multiple of topk (>= 1: the buffer must hold at "
+    "least one full top-k window for a positive hit rate to be deployable; upstream "
+    "measures 80-90 percent hit rate at 2.0).",
+)
+
+DECODE_OFFLOAD_HIT_RATE = Param(
+    name="decode-offload-hit-rate",
+    data_type="number",
+    default=0.85,
+    min=0.0,
+    max=1.0,
+    group="KV Cache Offload Options",
+    cli_metavar="<FLOAT>",
+    cli_help="Top-k hot buffer hit rate for decode KV offload (conservative default 0.85).",
+)
+
+HOST_MEMORY_AVAILABLE_GB = Param(
+    name="host-memory-available-gb",
+    data_type="number",
+    default=0.0,
+    min=0.0,
+    group="KV Cache Offload Options",
+    cli_metavar="<FLOAT>",
+    cli_help="Host memory budget for the offload KV pool in GB. 0 disables the host "
+    "capacity check; when set, candidates whose offloaded KV pool exceeds the "
+    "budget fail fast instead of returning undeployable results.",
+)
+
+ENABLE_PREFILL_KV_OFFLOAD = Param(
+    name="enable-prefill-kv-offload",
+    data_type="boolean",
+    default=False,
+    cli_action="store_true",
+    group="KV Cache Offload Options",
+    cli_help="Enable Prefill layerwise KV cache offload: N layers share B physical NPU "
+    "buffers, the rest of the main KV lives on host (RFC docs/RFC/rfc_kv_cache_offloading_*).",
+)
+
 
 # ── ModuleSpec definition ───────────────────────────────────────────
 
@@ -494,5 +550,11 @@ SPEC = ModuleSpec(
         PREFILL_DEVICES_PER_INSTANCE,
         DECODE_DEVICES_PER_INSTANCE,
         ENABLE_OPTIMIZE_PREFILL_DECODE_RATIO,
+        # KV Cache Offload Options
+        ENABLE_DECODE_KV_OFFLOAD,
+        DECODE_OFFLOAD_BUFFER_MULTIPLIER,
+        DECODE_OFFLOAD_HIT_RATE,
+        HOST_MEMORY_AVAILABLE_GB,
+        ENABLE_PREFILL_KV_OFFLOAD,
     ],
 )
