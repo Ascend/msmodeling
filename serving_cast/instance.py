@@ -59,8 +59,10 @@ class Instance:
 
         if request.state == RequestState.ARRIVES_SERVER:
             request.state = RequestState.PREFILLING
-        else:
-            request.state = RequestState.DECODING
+        # KVS_TRANSFERRING requests keep their state here; BatchScheduler's
+        # KV-receive branch (_receive_remote_kvs) allocates the input KV slots
+        # on the decode side and only then transitions to DECODING. Transitioning
+        # eagerly would skip the receive branch and leak the input KV accounting.
 
         engine = self.load_balancer.select(request)
         engine.handle(request)

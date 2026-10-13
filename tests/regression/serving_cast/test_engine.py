@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from serving_cast.engine import BatchScheduler
+from serving_cast.instance import Instance
 from serving_cast.kv_cache_manager import KVCacheManager
 from serving_cast.request import Request, RequestState
 
@@ -59,6 +60,56 @@ class TestBatchScheduler(unittest.TestCase):
         self.assertEqual(request.seq_len, 11)
         self.assertEqual(scheduler.kv_manager.used_slots_in_request(request.id), 1)
         self.assertEqual(request.state, RequestState.DECODING)
+
+    def test_single_output_token_request_records_first_token_timestamp(self):
+        scheduler = self._scheduler()
+        request = Request(id=11, num_input_tokens=16, num_output_tokens=1)
+        request.state = RequestState.PREFILLING
+        request.num_current_max_new_tokens = 0
+        request.leaves_client_time = 1.0
+        request.arrives_server_time = 1.5
+        scheduler.running_queue.append(request)
+        scheduler.requests[request.id] = request
+        scheduler.kv_manager.allocate_slots(request.id, 16)
+
+        with patch("serving_cast.stime.now", return_value=2.5):
+            scheduler._postprocess_batch([request])
+
+        self.assertEqual(request.state, RequestState.DECODE_DONE)
+        self.assertTrue(request.prefill_done_time_already_recorded)
+        self.assertEqual(request.prefill_done_time, 2.5)
+        self.assertEqual(request.decode_done_time, 2.5)
+        # TTFT must be non-negative and equal to E2E for single output token
+        self.assertEqual(request.client_time_to_first_token(), 1.5)
+        self.assertEqual(request.server_time_to_first_token(), 1.0)
+        self.assertEqual(request.serving_time(), request.client_time_to_first_token())
+        self.assertEqual(request.time_per_output_token(), 0)
+        self.assertNotIn(request.id, scheduler.requests)
+        self.assertEqual(scheduler.running_queue, [])
+
+    def test_kvs_transferring_request_allocates_input_kv_on_decode_side(self):
+        # After PD handoff, the decode-side scheduler must run the KV-receive
+        # branch: allocate num_input_tokens slots for the transferred KV before
+        # the first decode step, matching the aggregated instance's accounting
+        # (input tokens + one slot per generated decode token).
+        scheduler = self._scheduler()
+        request = Request(id=12, num_input_tokens=10, num_output_tokens=3)
+        # simulate the prefill side's handoff: decode step already prepared
+        request.prepare_decode_step(query_len=3, average_tokens=1.5)
+        request.need_kv_transfer = True
+        request.kv_transfer_done = False
+        request.state = RequestState.KVS_TRANSFERRING
+        scheduler.waiting_queue.append(request)
+        scheduler.requests[request.id] = request
+
+        batch = scheduler._schedule()
+
+        self.assertTrue(request.kv_transfer_done)
+        self.assertEqual(request.state, RequestState.DECODING)
+        # 10 input slots (received KV) + 1 slot for the first decode step
+        self.assertEqual(scheduler.kv_manager.used_slots_in_request(request.id), 11)
+        self.assertIn(request, scheduler.running_queue)
+        self.assertEqual(batch, [request])
 
     def test_duplicate_active_request_id_is_rejected_before_queue_mutation(self):
         scheduler = self._scheduler()
@@ -119,6 +170,41 @@ class TestBatchScheduler(unittest.TestCase):
         self.assertEqual(waiting_after, [])
         self.assertIsNot(running_before, running_after)
         self.assertIsNot(waiting_before, waiting_after)
+
+
+class TestInstanceHandleKvHandoff(unittest.TestCase):
+    @staticmethod
+    def _instance() -> Instance:
+        instance = object.__new__(Instance)
+        instance.id = 0
+        engine = Mock()
+        instance.load_balancer = Mock()
+        instance.load_balancer.select.return_value = engine
+        return instance, engine
+
+    def test_kvs_transferring_state_is_preserved_until_kv_received(self):
+        # Instance.handle must NOT eagerly transition KVS_TRANSFERRING -> DECODING:
+        # BatchScheduler's receive branch (_receive_remote_kvs) only fires for
+        # KVS_TRANSFERRING requests and performs the transition after allocating
+        # the input KV slots on the decode side.
+        instance, engine = self._instance()
+        request = Request(id=21, num_input_tokens=256, num_output_tokens=3)
+        request.state = RequestState.KVS_TRANSFERRING
+
+        instance.handle(request)
+
+        self.assertEqual(request.state, RequestState.KVS_TRANSFERRING)
+        engine.handle.assert_called_once_with(request)
+
+    def test_arrives_server_still_transitions_to_prefilling(self):
+        instance, engine = self._instance()
+        request = Request(id=22, num_input_tokens=16, num_output_tokens=2)
+        request.state = RequestState.ARRIVES_SERVER
+
+        instance.handle(request)
+
+        self.assertEqual(request.state, RequestState.PREFILLING)
+        engine.handle.assert_called_once_with(request)
 
 
 if __name__ == "__main__":

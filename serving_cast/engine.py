@@ -335,6 +335,12 @@ class BatchScheduler(stime.Task):
                     assert request.query_len == self.decode_query_len
                     request.seq_len -= request.query_len - generated_tokens
                 if request.num_decoded_tokens >= request.num_output_tokens:
+                    if request.state == RequestState.PREFILLING:
+                        # The final token was generated during prefill (e.g. single
+                        # output token requests); record the first-token timestamp
+                        # before finishing, otherwise prefill_done_time keeps its
+                        # initial value 0 and TTFT becomes non-positive.
+                        request.state = RequestState.PREFILL_DONE
                     self._process_finished_request(request)
                     self.requests.pop(request.id)
                     continue
