@@ -124,6 +124,10 @@ def compare(file_a: Path, file_b: Path, output: Path) -> None:
 
     name_a = file_a.stem
     name_b = file_b.stem
+    # 同 stem（如不同目录下的同名 CSV）会导致列名/字典键冲突，B 侧覆盖 A 侧
+    if name_a == name_b:
+        name_a = f"{name_a}(A)"
+        name_b = f"{name_b}(B)"
 
     # 按 Stage 对齐（保留原始顺序，RSN 不合并）
     max_segs = max(len(segs_a), len(segs_b))

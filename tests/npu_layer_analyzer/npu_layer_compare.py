@@ -266,7 +266,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--layer-index", type=int, default=None, help="指定 Dense 层号")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
-    output_dir = Path(args.output_dir)
+    # 相对路径按调用者 cwd 解释，统一 resolve 为绝对路径后再传给子进程
+    # （run_cmd 以 SCRIPT_DIR 为 cwd 启动子工具，原样传相对路径会被解释到错误目录）
+    output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     npu_layer_csvs: dict[str, Path] = {}  # type → path (npu_layer_analyzer 层提取结果)
@@ -274,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Step 1: npu_layer_analyzer ──
     if not args.layer_only and args.csv:
-        csv_path = Path(args.csv)
+        csv_path = Path(args.csv).resolve()
         if not csv_path.is_file():
             print(f"[ERROR] CSV 不存在: {csv_path}")
             return 1
@@ -300,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Step 2: layer_analyzer ──
     if not args.npu_only and args.json:
-        json_path = Path(args.json)
+        json_path = Path(args.json).resolve()
         if not json_path.is_file():
             print(f"[ERROR] 文件不存在: {json_path}")
             return 1
