@@ -29,6 +29,7 @@ from typing import Any, Protocol
 
 from loguru import logger
 
+from ..common import CSV_HEADER_FIELDS
 from ..config.base_config import CONCURRENCYS, REQUESTRATES
 from ..config.config import (
     DataStorageConfig,
@@ -228,7 +229,11 @@ def _phase_qps_candidates(
         candidates[0]["rank"] = 1
         return candidates
     with open_file(csv_path, "r") as file:
-        rows = list(csv.DictReader(file))
+        reader = csv.DictReader(file)
+        # First access reads the header; normalize keys before reading data rows.
+        original_fieldnames = reader.fieldnames
+        reader.fieldnames = [CSV_HEADER_FIELDS.get(name, name) for name in original_fieldnames or []]
+        rows = list(reader)
     rows.sort(
         key=lambda row: (
             float("inf") if _optional_float(row.get("fitness")) is None else _optional_float(row.get("fitness"))

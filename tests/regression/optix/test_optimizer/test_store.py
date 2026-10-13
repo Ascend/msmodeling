@@ -215,6 +215,47 @@ class TestDataStorage(unittest.TestCase):
         storage.save(performance_index, params, extra_key="extra_val")
         assert storage.save_file.exists()
 
+    def test_save_units_preserves_values_and_result_selection(self):
+        import csv
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = MagicMock(store_dir=Path(tmp_dir), pso_top_k=1)
+            storage = DataStorage(config)
+            performance = PerformanceIndex(
+                generate_speed=2000,
+                time_to_first_token=0.3,
+                time_per_output_token=0.04,
+                success_rate=0.95,
+                throughput=4,
+            )
+            params = (OptimizerConfigField(name="REQUESTRATE", value=5),)
+            storage.save(performance, params, fitness=0.5, duration=10)
+            storage.save(performance, params, fitness=0.6, duration=11)
+
+            with storage.save_file.open(encoding="utf-8", newline="") as file:
+                rows = list(csv.DictReader(file))
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["generate_speed(tokens/s)"], "2000.0")
+            self.assertEqual(rows[0]["time_to_first_token(s)"], "0.3")
+            self.assertEqual(rows[0]["time_per_output_token(s)"], "0.04")
+            self.assertEqual(rows[0]["throughput(requests/s)"], "4.0")
+            self.assertEqual(rows[0]["REQUESTRATE(requests/s)"], "5")
+            self.assertEqual(rows[0]["duration(s)"], "10")
+            self.assertEqual(rows[0]["success_rate"], "0.95")
+            self.assertIn("fitness", rows[0])
+            with patch("optix.optimizer.store.get_settings") as settings:
+                settings.return_value.ttft_penalty = 3
+                settings.return_value.tpot_penalty = 3
+                settings.return_value.ttft_slo = 0.5
+                settings.return_value.tpot_slo = 0.05
+                settings.return_value.slo_coefficient = 0.1
+                best = storage.get_best_result()
+            self.assertEqual(best.iloc[0]["generate_speed"], 2000)
+            history = DataStorage.load_history_position(config.store_dir, {"REQUESTRATE": 5})
+            self.assertEqual(len(history), 2)
+            self.assertEqual(history[0]["time_to_first_token"], 0.3)
+
     def test_save_appends_to_existing_file(self):
         import tempfile
 

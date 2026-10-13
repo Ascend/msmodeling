@@ -323,13 +323,13 @@ Each row in the output CSV corresponds to a parameter set. The first column, `ca
 | Field | Description |
 | --- | --- |
 | case_id | Case identifier that associates the main result with its metrics sampling trace. |
-| generate_speed | Throughput. |
-| time_to_first_token | TTFT latency, in seconds. |
-| time_per_output_token | TPOT latency, in seconds. |
-| success_rate | Success rate of requests returned by the test. |
-| throughput | Test throughput, in requests per second. |
+| generate_speed(tokens/s) | Output token throughput, in tokens per second. |
+| time_to_first_token(s) | TTFT latency, in seconds. |
+| time_per_output_token(s) | TPOT latency, in seconds. |
+| success_rate | Dimensionless request success rate, from 0 to 1. |
+| throughput(requests/s) | Test throughput, in requests per second. |
 | CONCURRENCY | Concurrency. |
-| REQUESTRATE | Send rate. |
+| REQUESTRATE(requests/s) | Send rate, in requests per second. |
 | error | Records the reason why this parameter set did not execute properly, recorded when a sending error occurs. |
 | backup | Data recording address, recorded when `--backup` is enabled. |
 | real_evaluation | Marks whether the data is obtained from real test results. `false` indicates that this set of data is predicted by the gp model. |
@@ -338,8 +338,8 @@ Each row in the output CSV corresponds to a parameter set. The first column, `ca
 | would_early_exit | Whether the early-exit condition was met. This can also be `true` in `report` mode. |
 | early_exit | Whether the current case was actually terminated early. Only `terminate` mode can set this to `true`. |
 | early_exit_reason | Reason that triggered the early-exit decision. |
-| early_exit_decision_elapsed_seconds | Elapsed time from case start until the early-exit decision, in seconds. |
-| estimated_time_saved_seconds | Estimated time that would have been saved in `report` mode, in seconds. |
+| early_exit_decision_elapsed_seconds(s) | Elapsed time from case start until the early-exit decision, in seconds. |
+| estimated_time_saved_seconds(s) | Estimated time that would have been saved in `report` mode, in seconds. |
 | estimated_time_saved_ratio | Estimated saved time divided by the complete case duration. |
 | result_source | Result source. An actually terminated result uses `early_exit_metrics`. |
 | usable_as_best | Whether the result can participate in best-result and reference selection. It is `false` only when the case is actually terminated early; a case that meets the condition in `report` mode completes normally and remains `true`. |

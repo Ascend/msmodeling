@@ -289,8 +289,23 @@ class TestPdDisaggOrchestrator:
             ),
         )
 
-    def test_service_search_stops_after_ratio_recommendation(self, tmp_path):
+    @pytest.mark.parametrize("with_units", [False, True])
+    def test_service_search_stops_after_ratio_recommendation(self, tmp_path, with_units):
         runner = _FakePhaseRunner()
+        if with_units:
+            original_run = runner.run
+
+            def run_with_units(*args):
+                result, csv_path = original_run(*args)
+                contents = csv_path.read_text(encoding="utf-8")
+                contents = contents.replace(
+                    "fitness,throughput,time_to_first_token,time_per_output_token",
+                    "fitness,throughput(requests/s),time_to_first_token(s),time_per_output_token(s)",
+                )
+                csv_path.write_text(contents, encoding="utf-8")
+                return result, csv_path
+
+            runner.run = run_with_units
         orchestrator = PdDisaggOrchestrator(self._settings(tmp_path), "run123", runner)
 
         summary = orchestrator.run()

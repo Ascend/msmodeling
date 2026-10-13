@@ -22,7 +22,7 @@ from typing import Any, Optional
 import numpy as np
 from loguru import logger
 
-from ..common import read_csv_s
+from ..common import CSV_COLUMN_HEADERS, read_csv_s
 from ..config.base_config import RUN_TIME
 from ..config.config import (
     DataStorageConfig,
@@ -158,7 +158,7 @@ class DataStorage:
         else:
             with open_file(self.save_file, "w") as f:
                 data_writer = csv.writer(f)
-                data_writer.writerow(_column)
+                data_writer.writerow([CSV_COLUMN_HEADERS.get(column, column) for column in _column])
                 data_writer.writerow([self._safe_sanitize_csv_value(_v) for _v in _value])
 
     @staticmethod

@@ -26,6 +26,27 @@ from .io_utils import ensure_existing_file
 
 _KEY_WORD = "HBM"
 
+# CSV labels describe stored values; no numeric conversion is performed.
+_SECONDS_UNIT = "s"
+CSV_COLUMN_UNITS = {
+    "generate_speed": "tokens/s",
+    "time_to_first_token": _SECONDS_UNIT,
+    "time_per_output_token": _SECONDS_UNIT,
+    "throughput": "requests/s",
+    "REQUESTRATE": "requests/s",
+    "duration": _SECONDS_UNIT,
+    "early_exit_decision_elapsed_seconds": _SECONDS_UNIT,
+    "estimated_time_saved_seconds": _SECONDS_UNIT,
+    "reference_generate_speed": "tokens/s",
+    "observed_generate_speed": "tokens/s",
+    "metrics_window_generate_speed": "tokens/s",
+    "metrics_window_time_to_first_token": _SECONDS_UNIT,
+    "metrics_window_time_per_output_token": _SECONDS_UNIT,
+    "warmup_end_elapsed_seconds": _SECONDS_UNIT,
+}
+CSV_COLUMN_HEADERS = {name: f"{name}({unit})" for name, unit in CSV_COLUMN_UNITS.items()}
+CSV_HEADER_FIELDS = {header: name for name, header in CSV_COLUMN_HEADERS.items()}
+
 
 def get_train_sub_path(base_path: Path):
     # Generate a new subdirectory under the training output directory
@@ -40,7 +61,7 @@ def get_train_sub_path(base_path: Path):
 def read_csv_s(path, **kwargs):
     try:
         ensure_existing_file(path)
-        return pd.read_csv(path, **kwargs)
+        return pd.read_csv(path, **kwargs).rename(columns=CSV_HEADER_FIELDS)
     except Exception as e:
         raise ValueError("Failed to read csv %r." % path) from e
 

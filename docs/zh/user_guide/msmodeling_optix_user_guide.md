@@ -596,13 +596,13 @@ OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并
 |字段|说明|
 |---|---|
 |`case_id`|关联主结果和 metrics 采样轨迹的 Case 标识。|
-|`generate_speed`|吞吐。|
-|`time_to_first_token`|TTFT 时延，单位为秒。|
-|`time_per_output_token`|TPOT 时延，单位为秒。|
-|`success_rate`|测试返回请求成功率。|
-|`throughput`|测试吞吐，单位为请求数/秒。|
+|`generate_speed(tokens/s)`|输出 token 吞吐，单位为 token/秒。|
+|`time_to_first_token(s)`|TTFT 时延，单位为秒。|
+|`time_per_output_token(s)`|TPOT 时延，单位为秒。|
+|`success_rate`|请求成功率，无量纲比例，取值为 0～1。|
+|`throughput(requests/s)`|测试吞吐，单位为请求数/秒。|
 |`CONCURRENCY`|并发数。|
-|`REQUESTRATE`|发送速率。|
+|`REQUESTRATE(requests/s)`|发送速率，单位为请求数/秒。|
 |`error`|记录这次参数没有正常执行的原因，在发送错误时记录。|
 |`backup`|数据记录地址，当开启 `--backup` 时记录。|
 |`real_evaluation`|标记数据是否由真实测试结果得到。`false` 代表该组数据由 GP 模型预测得到。|
@@ -611,8 +611,8 @@ OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并
 |`would_early_exit`|是否满足早停条件；`report` 模式下也可能为 `true`。|
 |`early_exit`|当前 Case 是否被实际提前终止；仅 `terminate` 模式可能为 `true`。|
 |`early_exit_reason`|触发早停的原因。|
-|`early_exit_decision_elapsed_seconds`|从 Case 开始到形成早停决定的时间，单位为秒。|
-|`estimated_time_saved_seconds`|`report` 模式下估算的可节省时间，单位为秒。|
+|`early_exit_decision_elapsed_seconds(s)`|从 Case 开始到形成早停决定的时间，单位为秒。|
+|`estimated_time_saved_seconds(s)`|`report` 模式下估算的可节省时间，单位为秒。|
 |`estimated_time_saved_ratio`|估算可节省时间占完整 Case 时长的比例。|
 |`result_source`|结果来源；实际早停结果为 `early_exit_metrics`。|
 |`usable_as_best`|该结果能否参与最优结果和 reference 选择；仅实际提前终止的结果为 `false`。`report` 模式下满足条件的 Case 会完整运行，该字段仍为 `true`。|
