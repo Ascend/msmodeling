@@ -573,7 +573,8 @@ class PSOOptimizer(PerformanceTuner):
                 continue
             self.scheduler.save_result(
                 fitness=_fitness,
-                stop_service=self.manage_simulator_lifecycle and not self._should_keep_service_for_pd_mixed_fine_tune(),
+                stop_service=self.manage_simulator_lifecycle
+                and not (fine_tune_enabled and self._should_keep_service_for_pd_mixed_fine_tune()),
             )
             _record_params.append(params)
             _record_res.append(_res)
