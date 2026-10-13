@@ -780,7 +780,7 @@ class TestRefineOptimizationCandidates:
         return opt
 
     def test_refine_runs_scheduler(self):
-        opt = self._create_optimizer()
+        opt = self._create_optimizer(fine_tune=MagicMock(fine_tune_mode="pd_mixed"))
         perf = PerformanceIndex(
             generate_speed=4000,
             time_to_first_token=0.2,
@@ -822,22 +822,47 @@ class TestRefineOptimizationCandidates:
 
         opt.scheduler.run.assert_called()
         opt.scheduler.disable_early_exit.assert_called_once()
+        opt.scheduler.save_result.assert_called_once_with(fitness=pytest.approx(fitness_list[1]), stop_service=False)
+        opt.scheduler.stop_target_server.assert_called_once()
 
-    def test_refine_skips_fine_tune_when_pso_top_k_is_zero(self):
-        opt = self._create_optimizer()
+    @pytest.mark.parametrize("fine_tune_mode", ["pd_mixed", "pd_disaggregation"])
+    @pytest.mark.parametrize("manage_simulator_lifecycle", [True, False])
+    def test_refine_skips_fine_tune_when_pso_top_k_is_zero(self, fine_tune_mode, manage_simulator_lifecycle):
+        from optix.optimizer.scheduler import Scheduler
+
+        opt = self._create_optimizer(
+            fine_tune=MagicMock(fine_tune_mode=fine_tune_mode),
+            manage_simulator_lifecycle=manage_simulator_lifecycle,
+        )
         opt.scheduler.data_storage.config.pso_top_k = 0
+        opt.scheduler.run_start_timestamp = None
+        opt.scheduler.simulate_run_info = ()
+        opt.scheduler.bak_path = None
+        opt.scheduler.del_log = False
+        opt.scheduler.save_result.side_effect = lambda **kwargs: Scheduler.save_result(opt.scheduler, **kwargs)
         opt.scheduler.run.return_value = PerformanceIndex(
             generate_speed=4000,
             time_to_first_token=0.2,
             time_per_output_token=0.03,
             success_rate=1.0,
         )
+        opt.scheduler.rerun_benchmark_only.return_value = opt.scheduler.run.return_value
         best_results = pd.DataFrame([{"CONCURRENCY": 60, "REQUESTRATE": 15.0}])
 
         fitness_list, _, _ = opt.refine_optimization_candidates(best_results)
 
         assert len(fitness_list) == 2
-        opt.scheduler.run.assert_called_once()
+        if manage_simulator_lifecycle:
+            opt.scheduler.run.assert_called_once()
+            opt.scheduler.stop_target_server.assert_called_once_with(False)
+        else:
+            opt.scheduler.run.assert_not_called()
+            opt.scheduler.rerun_benchmark_only.assert_called_once()
+            opt.scheduler.stop_target_server.assert_not_called()
+        opt.scheduler.save_result.assert_called_once_with(
+            fitness=pytest.approx(fitness_list[1]),
+            stop_service=manage_simulator_lifecycle,
+        )
         assert opt.fine_tune.method_calls == []
 
     def test_refine_handles_runtime_exception(self):
