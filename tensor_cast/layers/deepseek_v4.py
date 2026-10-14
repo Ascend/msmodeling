@@ -1006,12 +1006,35 @@ class HyperConnectedMultiTokenPredictorLayer(MultiTokenPredictorLayer):
 
     def __init__(self, hf_config, mtp_block: torch.nn.Module):
         super().__init__(hf_config, mtp_block)
-        self.hc_mult = int(getattr(mtp_block, "hc_mult", 1) or 1)
+        self.hc_mult = int(getattr(mtp_block, "hc_mult", None) or getattr(hf_config, "hc_mult", 1) or 1)
         self.hc_eps = float(getattr(mtp_block, "hc_eps", 1e-6))
         hc_dim = self.hc_mult * hf_config.hidden_size
         self.hc_head_fn = torch.nn.Parameter(torch.empty(self.hc_mult, hc_dim, dtype=torch.float32))
         self.hc_head_base = torch.nn.Parameter(torch.empty(self.hc_mult, dtype=torch.float32))
         self.hc_head_scale = torch.nn.Parameter(torch.empty(1, dtype=torch.float32))
+
+    def _run_mtp_block(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        position_embeddings: Optional[torch.Tensor],
+        mtp_input_ids: Optional[torch.Tensor],
+        **kwargs,
+    ) -> torch.Tensor:
+        """Normalize decoder output to the hidden stream consumed by the HC head."""
+        output = self.mtp_block(
+            hidden_states,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+            input_ids=mtp_input_ids,
+            **kwargs,
+        )
+        if isinstance(output, tuple):
+            # GLM5NextTextDecoderLayer returns (hidden_states, topk_indices).
+            # Its MTP sparse layers use full indexers, so the predictor only
+            # consumes the hidden stream; the auxiliary indices are unused here.
+            return output[0]
+        return output
 
     def forward(
         self,
@@ -1032,11 +1055,11 @@ class HyperConnectedMultiTokenPredictorLayer(MultiTokenPredictorLayer):
         # DeepseekV4Model.forward).
         hidden_states = hidden_states.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
 
-        hidden_states = self.mtp_block(
+        hidden_states = self._run_mtp_block(
             hidden_states,
             position_ids=position_ids,
             position_embeddings=position_embeddings,
-            input_ids=mtp_input_ids,
+            mtp_input_ids=mtp_input_ids,
             **kwargs,
         )
 

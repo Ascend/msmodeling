@@ -72,6 +72,21 @@ def test_glm5_next_nope_embeddings_keep_sequence_and_zero_rotary_dimension():
     assert cos.dtype == sin.dtype == hidden_states.dtype
 
 
+def test_glm5_next_zero_rotary_dimension_has_no_modeled_rope_cost():
+    from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+
+    q = torch.empty((1, 7, 4, 8), dtype=torch.bfloat16, device="meta")
+    cos, sin = glm5_next_nope_position_embeddings(q)
+    rope = OpInvokeInfo(torch.ops.tensor_cast.apply_rope_inplace.default, (q, cos, sin, True, False, 0), {}, q)
+    properties = rope.get_perf_properties()
+
+    assert not properties.compute_ops
+    assert properties.memory_read_bytes == 0
+    assert properties.memory_write_bytes == 0
+    assert properties.memory_readwrite_bytes == 0
+    assert properties.extra_static_cost_count == 0
+
+
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_glm5_next_kda_patch_uses_local_tp_heads(tp_size):
     modeling_glm5_next = pytest.importorskip("transformers.models.glm5_next.modeling_glm5_next")
@@ -318,6 +333,73 @@ def test_glm5_next_model_compiled_semantic_coverage(tiny_glm5_next_path, tp, que
     assert "tensor_cast.linear_attention.default" not in event_names
     assert not any(name.startswith("aten.clamp") for name in event_names)
     assert "aten.mean.dim" not in event_names
+
+
+@pytest.mark.parametrize("num_mtp_tokens,tp,fp8", [(1, 1, False), (3, 2, True)])
+def test_glm5_next_mtp_compiled_nope_path(tiny_glm5_next_path, num_mtp_tokens, tp, fp8):
+    from tensor_cast.core.model_runner import ModelRunner
+    from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
+    from tensor_cast.core.user_config import UserInputConfig
+    from tensor_cast.device import TEST_DEVICE
+
+    user = UserInputConfig(
+        model_id=tiny_glm5_next_path,
+        device=TEST_DEVICE.name,
+        do_compile=True,
+        num_mtp_tokens=num_mtp_tokens,
+        world_size=tp,
+        tp_size=tp,
+        quantize_linear_action=QuantizeLinearAction.FP8 if fp8 else QuantizeLinearAction.W8A8_DYNAMIC,
+        quantize_attention_action=QuantizeAttentionAction.FP8 if fp8 else QuantizeAttentionAction.DISABLED,
+        num_queries=1,
+        query_len=1,
+        context_length=32,
+    )
+    runner = ModelRunner(user)
+    assert runner.model._inner.rotary_emb is None
+    result = runner.run_inference()
+    indexer_event = next(
+        event for event in result.runtime_event_list if event["name"] == "tensor_cast.glm5_next_kpool_indexer.default"
+    )
+    assert indexer_event["call_times"] == num_mtp_tokens + 1
+
+
+@pytest.mark.parametrize("returns_tuple", [False, True])
+def test_glm5_next_hc_mtp_normalizes_decoder_output(returns_tuple):
+    from tensor_cast.layers.deepseek_v4 import HyperConnectedMultiTokenPredictorLayer
+
+    class DecoderBlock(torch.nn.Module):
+        def forward(self, hidden_states, *, position_ids, position_embeddings, input_ids, **kwargs):
+            self.received = (hidden_states.shape, position_ids, position_embeddings, input_ids, kwargs)
+            if returns_tuple:
+                return hidden_states, torch.tensor([0])
+            return hidden_states
+
+    config = SimpleNamespace(hidden_size=4, rms_norm_eps=1e-5, hc_mult=2)
+    decoder = DecoderBlock()
+    predictor = HyperConnectedMultiTokenPredictorLayer(config, decoder)
+    embeds = torch.randn(1, 2, 4)
+    previous = torch.randn(1, 2, 4)
+    position_ids = torch.arange(2).unsqueeze(0)
+    mtp_input_ids = torch.ones(1, 2, dtype=torch.long)
+
+    output = predictor(
+        embeds,
+        position_ids,
+        previous,
+        position_embeddings=None,
+        mtp_input_ids=mtp_input_ids,
+        attention_meta="decode",
+    )
+
+    assert predictor.hc_mult == 2
+    assert output.shape == embeds.shape
+    shape, received_positions, received_embeddings, received_ids, received_kwargs = decoder.received
+    assert shape == (1, 2, 2, 4)
+    assert received_positions is position_ids
+    assert received_embeddings is None
+    assert received_ids is mtp_input_ids
+    assert received_kwargs == {"attention_meta": "decode"}
 
 
 def test_glm5_next_visual_tp_compile(tiny_glm5_next_path):

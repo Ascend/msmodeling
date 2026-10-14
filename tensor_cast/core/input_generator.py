@@ -1058,7 +1058,9 @@ def _get_kv_cache_info(
         if (
             not is_draft_layer
             and getattr(model.text_config, "model_type", None) == "glm5_next_text"
-            and model.text_config.layer_types[i] == "linear_attention"
+            # MTP appends decoder layers using the final target layer type,
+            # while model.text_config still describes only the target layers.
+            and model.text_config.layer_types[min(i, len(model.text_config.layer_types) - 1)] == "linear_attention"
         ):
             kv_cache_by_layers[i] = torch.empty(
                 glm5_next_kda_state_shape(

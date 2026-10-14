@@ -252,9 +252,15 @@ class MtpWrapper(ModelWrapperBase):
         )
         self.sampler = Sampler()
         self.rotary_emb = self.get_rotary_emb()
-        if self.rotary_emb is None:
+        # GLM5Next text attention uses NoPE; its patched decoder supplies the
+        # zero-width position tensors needed by TensorCast's MLA path.
+        uses_nope = (
+            getattr(hf_config, "model_type", None) == "glm5_next_text"
+            and getattr(hf_config, "qk_rope_head_dim", None) == 0
+        )
+        if self.rotary_emb is None and not uses_nope:
             raise ValueError(f"Unable to find rotary embedding module from {model}")
-        self._rotary_emb_accepts_dtype = _rotary_emb_accepts_dtype(self.rotary_emb)
+        self._rotary_emb_accepts_dtype = self.rotary_emb is not None and _rotary_emb_accepts_dtype(self.rotary_emb)
 
     def get_mtp_block_cls(self):
         for _, module in self._inner.named_modules():
@@ -292,12 +298,14 @@ class MtpWrapper(ModelWrapperBase):
             device=next_tokens.device,
         )
         output[:, 0] = next_tokens[:, -1]
-        position_embeddings = _build_position_embeddings(
-            self.rotary_emb,
-            self._rotary_emb_accepts_dtype,
-            hidden_states,
-            position_ids,
-        )
+        position_embeddings = None
+        if self.rotary_emb is not None:
+            position_embeddings = _build_position_embeddings(
+                self.rotary_emb,
+                self._rotary_emb_accepts_dtype,
+                hidden_states,
+                position_ids,
+            )
         for i in range(self.mtp_config.num_mtp_layers):
             if input_ids is not None:
                 input_ids = torch.ops.tensor_cast.shift_and_update_input_ids(
