@@ -48,7 +48,7 @@ echo 2 > /proc/sys/kernel/randomize_va_space
 
 ## 漏洞安全声明
 
-- 华为公司对产品漏洞管理的规定以“漏洞处理流程”为准，详细内容请参见[漏洞处理流程](https://www.huawei.com/cn/psirt/vul-response-process)。
+- 华为技术有限公司对产品漏洞管理的规定以“漏洞处理流程”为准，详细内容请参见[漏洞处理流程](https://www.huawei.com/cn/psirt/vul-response-process)。
 - 如企业客户须获取漏洞信息，请查看[安全通知](https://securitybulletin.huawei.com/enterprise/cn/security-advisory)。
 - 安装依赖时，请注意使用满足条件的较新版本软件包，关注并修补存在的漏洞，尤其是已公开的CVSS打分大于7分的高危漏洞。
 
