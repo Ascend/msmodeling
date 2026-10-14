@@ -26,6 +26,7 @@ from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.layers.internal import CopyLayerWrapper, RegionMarkerWrapper
+from tensor_cast.layers.mtp import MtpWrapper
 from tensor_cast.layers.sampler import SamplingMetadata
 from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
@@ -61,6 +62,35 @@ def test_copy_region_v2_uses_current_input_and_representative_output_template():
     assert copied_output.shape == representative_output.shape
     assert copied_output.shape != (1, 6, 8)
     assert "_region_output_template" not in representative.state_dict()
+
+
+@pytest.mark.parametrize("is_compile_enabled", [False, True])
+def test_compiled_mtp_layers_do_not_use_region_replay(monkeypatch, is_compile_enabled):
+    class FakeMtpWrapper(MtpWrapper):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+            self._inner = torch.nn.Identity()
+            self.hf_config = SimpleNamespace(model_type="test")
+            self.mtp = torch.nn.Module()
+            self.mtp.layers = torch.nn.ModuleList([torch.nn.Linear(4, 4) for _ in range(3)])
+
+    mtp_wrapper = FakeMtpWrapper()
+    monkeypatch.setattr("tensor_cast.transformers.transformations.get_visual_layers", lambda _model: None)
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(enable_repetition=True, is_compile_enabled=is_compile_enabled),
+        is_vl_model=False,
+        _inner=mtp_wrapper,
+        unwrap=lambda: SimpleNamespace(),
+    )
+
+    maybe_reuse_layers(model)
+
+    mtp_layers = model._inner.mtp.layers
+    if is_compile_enabled:
+        assert all(isinstance(layer, torch.nn.Linear) for layer in mtp_layers)
+    else:
+        assert isinstance(mtp_layers[0], RegionMarkerWrapper)
+        assert all(isinstance(layer, CopyLayerWrapper) for layer in mtp_layers[1:])
 
 
 def test_glm5_indexer_flow_layers_are_not_reused(monkeypatch):

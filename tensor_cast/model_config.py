@@ -628,6 +628,9 @@ class ModelConfig:
     """Transformer models have repetitive patterns. This configuration flag tells TensorCast
     whether to automatically detect and leverage the repetition patterns to reduce the
     performance estimation cost. This is especially helpful for large models."""
+    is_compile_enabled: bool = False
+    """Whether the model will be compiled after construction. Compiled MTP layers
+    must run directly because region replay can lose its begin marker."""
 
     def __post_init__(self):
         # TODO: Use Pydantic to add data validation.

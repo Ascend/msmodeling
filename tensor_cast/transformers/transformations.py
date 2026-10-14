@@ -386,7 +386,10 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
             )
     from tensor_cast.layers.mtp import MtpWrapper
 
-    if isinstance(model._inner, MtpWrapper):
+    # Compiled MTP graphs can discard the region-begin marker while retaining
+    # region-end, so replay fails when Runtime pairs the recorded markers.
+    # MTP depth is small; execute its layers directly in compiled models.
+    if isinstance(model._inner, MtpWrapper) and not model.model_config.is_compile_enabled:
         reuse_layers(model._inner.mtp.layers)
     # DFlash/DSpark draft: do NOT wrap with RegionMarker/CopyLayer.
     # Under torch.compile, draft mark_region_begin / copy_region are frequently DCE'd

@@ -165,7 +165,9 @@ class _FakeResolver:
         self.user_input = user_input
 
     def resolve(self) -> ModelConfig:
-        return copy.deepcopy(type(self).model_config)
+        model_config = copy.deepcopy(type(self).model_config)
+        model_config.is_compile_enabled = self.user_input.do_compile
+        return model_config
 
 
 def _make_model_config(num_layers: int = 5, *, pp_size: int = 2, world_size: int = 4) -> ModelConfig:
@@ -348,6 +350,20 @@ def test_build_model_keeps_single_model_path_when_pp_size_is_one(monkeypatch):
     assert not isinstance(model, PipelineModel)
     assert len(builds) == 1
     assert builds[0].parallel_config.pipeline_parallel_size == 1
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_build_model_passes_compile_mode_to_pipeline_stages(monkeypatch, pp_size):
+    _install_fake_builder(monkeypatch, _make_model_config(num_layers=4, pp_size=pp_size, world_size=4))
+    monkeypatch.setattr(torch, "compile", lambda model, **_kwargs: model)
+    monkeypatch.setattr(model_builder, "get_backend", lambda **_kwargs: "eager")
+    user_input = UserInputConfig(model_id="fake/model", world_size=4, tp_size=4 // pp_size, pp_size=pp_size)
+    user_input.do_compile = True
+
+    model = model_builder.build_model(user_input)
+
+    stages = model.stages if isinstance(model, PipelineModel) else [SimpleNamespace(model=model)]
+    assert all(stage.model.model_config.is_compile_enabled for stage in stages)
 
 
 def test_build_model_returns_real_split_pipeline_model_for_pp_size(monkeypatch):

@@ -155,6 +155,7 @@ class ConfigResolver:
         )
         self.model_config.hf_config = self.hf_config
         self.model_config.trust_remote_code = not auto_loader.is_transformers_natively_supported
+        self.model_config.is_compile_enabled = bool(user_input and user_input.do_compile)
 
     def resolve(self) -> ModelConfig:
         """

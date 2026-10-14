@@ -171,9 +171,12 @@ class ModelDtypeResolutionTestCase(unittest.TestCase):
         user_input.get_quant_config.return_value = MagicMock()
         user_input.get_parallel_config.return_value = MagicMock()
 
-        resolver = ConfigResolver(user_input=user_input)
-
-        self.assertIs(resolver.model_config.dtype, torch.bfloat16)
+        for do_compile in (False, True):
+            with self.subTest(do_compile=do_compile):
+                user_input.do_compile = do_compile
+                resolver = ConfigResolver(user_input=user_input)
+                self.assertIs(resolver.model_config.dtype, torch.bfloat16)
+                self.assertIs(resolver.model_config.is_compile_enabled, do_compile)
 
 
 class DsaCpStructureTestCase(unittest.TestCase):
