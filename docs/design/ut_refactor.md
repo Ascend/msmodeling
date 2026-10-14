@@ -57,6 +57,19 @@ Every test function or class marked `@pytest.mark.nightly` should have one or mo
 
 When adding a new `@pytest.mark.nightly` case, a smoke counterpart should be added or extended in the same change; non-obvious mappings should be documented in the smoke module docstring.
 
+**Responsibility Layers L1 / L2 / L3**
+
+`smoke` / `regression` / `benchmark` remain the physical CI homes. L1 / L2 / L3 describe what a case constructs and proves.
+
+| Layer | Typical home | What it proves | Must not do |
+|------|------|------|------|
+| L1 model-level | `tests/benchmark/models/`, `tests/regression/model_diagnostics/e2e/`, `tests/regression/<component>/model/` | Numeric, structural, and capability assertions over a real model identity/build | Duplicate the same family/scenario build across files when one build can carry all assertions |
+| L2 no-model integration | `tests/regression/<component>/module/` | Mechanism invariants over one canonical synthetic artifact | Use a real `model_id`, `ModelRunner`, model builder, registered `TransformerModel`, or repeat an L1 result |
+| L3 unit | next to the symbol under test | Parser, validation, default, exception, or exit-code contracts | Build a model or a synthetic integration artifact |
+| Smoke guard | `tests/smoke/` | Cheap reachability for a nightly or L2 path | Become a second copy of L1/L2/L3 assertions |
+
+Model identity belongs to L1. One L1 scenario should carry numeric, structural, and capability assertions together when they activate the same graph and workload; that path is `tests/helpers/l1_scenario.py`. L2 never repeats an L1 output. L3 checks a smaller pure contract.
+
 **Subsequent Maintenance**
 
 1. New cases are placed by directory first. Model guardianship goes to `tests/benchmark/models/`; operator guardianship goes to `tests/benchmark/ops/`. High-duration regression paths receive `@pytest.mark.nightly` and a smoke guard. NPU dependencies receive `@pytest.mark.npu`.
@@ -184,7 +197,13 @@ Change classification covers configuration files, added or removed tests, added 
 
 `scripts/lib/common.sh` sets Hub-related defaults before pytest starts: `MSMODELING_HF_TRUST_REMOTE_CODE_TIMEOUT=0` and `MSMODELING_MODELSCOPE_CONFIG_ONLY=1`.
 
-Session-level model reuse is centralized in `tests/helpers/model_cache.py` through module-level `_HF_CONFIG_CACHE` and `_BUILT_MODEL_CACHE`, shared across unittest and pytest entry points. `tests/regression/tensor_cast/conftest.py` re-exports `get_session_model()` and `get_session_hf_config()` over that cache. A built model is reused once per pytest session for each combination of build-determining inputs (including `model_id` and `do_compile`).
+Session-level model reuse helpers live in `tests/helpers/model_cache.py` through module-level `_HF_CONFIG_CACHE` and `_BUILT_MODEL_CACHE`. `tests/regression/tensor_cast/conftest.py` re-exports `get_session_model()` and `get_session_hf_config()` over that cache. Reuse applies only to tests that call these helpers; `ModelRunner.__init__` calls `build_model` directly and does not use `_BUILT_MODEL_CACHE`. The current cache key also does not cover every graph-affecting input (`context_length`, `dynamic_shapes`, `acceptance_length`, `dspark_markov_rank` reach the build path but are absent from the key).
+
+Model-level (L1) tests that would otherwise construct `ModelRunner` once per assertion group should go through `tests/helpers/l1_scenario.py`. `L1ScenarioExecutor` builds each distinct graph once and runs each distinct workload once, then hands the same `L1RunArtifact` to numeric, structural, and diagnostics assertions. The session fixture is `l1_executor` in `tests/conftest.py`, so every component can use it. The build signature is derived by exclusion: every `UserInputConfig` field is a build field unless it is named in `RUN_FIELDS` or `OBSERVABILITY_FIELDS`. A reused runner is rebound to the current workload, because `run_inference` reads `num_queries`, `query_len`, and `block_size` off `runner.user_input`. The only counted forward entry is `run()`. `runner()` returns the built runner and does not record a forward; a second forward, including an equivalence check, uses its own executor. `forwards_by_build` is keyed by the full `L1BuildSignature`; `describe()` is only the `model_id@device` label. `apply_compilation_config` is process-global, so the executor reapplies each scenario's compilation config before build and before forward. This supports multiple configs in one executor and repairs drift from tests that mutate the global config directly. Demoting a field into `RUN_FIELDS` is checked structurally (module inventory and weight size), not by operator sequence or runtime events. Diagnostics evidence is taken from the completed `Runtime` after `Runtime.__exit__` via `RuntimeArtifactCapture.snapshot`; a second forward is a failed design, not an allowed fallback. Later L1 numeric assertions should read `tests/benchmark/models/cases/*.json`; Python assertions should keep structure and capability.
+
+Before the first L1 migration PR, approve a family × numeric/structural/capability assertion matrix and add a manifest check that proves the assertion set is conserved across migration. This is a migration gate, not an optional later enhancement.
+
+The session fixture uses unbounded runner and artifact caches and is intended only when the number of model signatures in one worker is controlled. Model-dense suites must construct a module- or function-local `L1ScenarioExecutor` and call `reset()` at the end of that shorter reuse window.
 
 ### Step 5: Repository Execution Scripts
 
@@ -248,7 +267,7 @@ Build tasks call scripts from the repository root. Pipeline orchestration, trigg
 
 ### Step 8: Shared Test Helpers and Config Prefetch
 
-`tests/helpers/` provides reusable assertion and builder utilities: `assert_utils.py`, `config_factory.py`, `model_builder.py`, `op_registry.py`, and `fake_subprocess.py`. Self-tests live under `tests/helpers/tests/`.
+`tests/helpers/` provides reusable assertion and builder utilities: `assert_utils.py`, `config_factory.py`, `model_builder.py`, `op_registry.py`, `fake_subprocess.py`, and `l1_scenario.py` for model-level one-build-one-run reuse. Self-tests live under `tests/helpers/tests/`.
 
 `scripts/prefetch_model_configs.py` scans test sources and prefetches required model configuration files into `tests/assets/cache` for offline or CI preparation.
 
