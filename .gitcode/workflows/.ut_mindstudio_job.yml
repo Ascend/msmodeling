@@ -21,12 +21,20 @@ on:
       runs_on_arch:
         required: true
         type: string
+      MSMODELING_TEST_WEIGHTS_PRUNE:
+        required: false
+        type: string
+        default: '1'
+      MSMODELING_TEST_MAP_PATH:
+        required: false
+        type: string
+        default: '/test_map.json'
 
 jobs:
   JOB_UT_mindstudio:
     name: JOB_UT_mindstudio
     select: selected_by_default
-    runs-on: [ dedicate-hosted, "${{ inputs.runs_on_arch }}", large ]
+    runs-on: [ self-hosted, default, "${{ inputs.runs_on_arch }}", cpu=32 ]
     container:
       image: swr.cn-north-4.myhuaweicloud.com/mindstudio-image/${{ inputs.IMAGE_FLAG }}
       options: --user root
@@ -48,4 +56,7 @@ jobs:
           export REMOTE_URL=${{ inputs.REMOTE_URL }}
           export TARGET_BRANCH=${{ inputs.TARGET_BRANCH }}
           export COMMIT_ID=${{ atomgit.event.pull_request.head.sha }}
+          export MSMODELING_TEST_WEIGHTS_PRUNE=${{ inputs.MSMODELING_TEST_WEIGHTS_PRUNE }}
+          export MSMODELING_TEST_MAP_PATH=${{ inputs.MSMODELING_TEST_MAP_PATH }}
+          export MSMODELING_TEST_BASE_BRANCH=${{ inputs.TARGET_BRANCH }}
           cd MindStudio-CI && bash build.sh msmodeling
