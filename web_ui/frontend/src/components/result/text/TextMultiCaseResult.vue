@@ -93,45 +93,74 @@ const tpsCompareOption = computed(() => {
   }
 })
 
+// Aggregate op_breakdown entries by operator name.
+//
+// When `dump-input-shapes` is on, the backend emits one row per (op_name,
+// input_shapes) tuple — the same operator name can appear multiple times
+// with different shapes, each carrying its own `total_s` / `avg_s` / `calls`.
+// The comparison table must NOT pick the first shape (`.find(x=>x.name===n)`)
+// — it has to project onto the operator name by summing totals and computing
+// a calls-weighted average. Otherwise the "analytic total" misses shapes and
+// "analytic avg" reflects one shape, silently changing the ranking.
+//
+// Legacy payloads (perf_total / perf_avg, no `calls`) fall back to a simple
+// sum of totals / simple average of avgs, since per-shape call counts are
+// unavailable there. New-format rows whose `calls` are all zero across every
+// shape for the same op name get the same simple-average treatment, since
+// there are no call counts to weight by.
+function aggregateByName(items: any[]): Map<string, { totalS: number; calls: number; avgS: number; isNew: boolean; hasCalls: boolean; count: number }> {
+  const agg = new Map<string, { totalS: number; calls: number; avgS: number; isNew: boolean; hasCalls: boolean; count: number }>()
+  for (const it of items) {
+    const name = it.name as string
+    const isNew = 'total_s' in it || 'calls' in it
+    const totalS = isNew ? (Number(it['total_s']) || 0) : (Number(it['perf_total']) || 0)
+    const calls = Number(it['calls']) || 0
+    const avgS = isNew ? (Number(it['avg_s']) || 0) : (Number(it['perf_avg']) || 0)
+    const cur = agg.get(name)
+    if (!cur) {
+      agg.set(name, { totalS, calls, avgS, isNew, hasCalls: calls > 0, count: 1 })
+    } else {
+      cur.totalS += totalS
+      cur.calls += calls
+      cur.avgS += avgS // accumulate; resolved to weighted or simple avg below
+      cur.hasCalls = cur.hasCalls || calls > 0
+      cur.count += 1
+    }
+  }
+  // Derive the correct avg for each aggregated entry.
+  // - New-format with recorded calls: calls-weighted avg = totalS / calls.
+  // - Otherwise (legacy without calls, new-format with calls=0 across all
+  //   shape rows, or a single-record name): use the simple average of
+  //   per-row avgs when count > 1, else keep the recorded avgS as-is.
+  for (const v of agg.values()) {
+    if (v.isNew && v.hasCalls && v.calls > 0) {
+      v.avgS = v.totalS / v.calls
+    } else if (v.count > 1) {
+      v.avgS = v.avgS / v.count
+    }
+  }
+  return agg
+}
+
 // Union of op names across cases, each row = { name, values: [per-case number] }.
 // Sorted by the max value across cases (top first), capped for readability.
 const opComparisonRows = computed(() => {
-  const nameMax = new Map<string, number>()
-  const perCase: Map<string, number[]> = new Map()
-  const n = cases.value.length
-  cases.value.forEach((c: any) => {
-    const items: any[] = c["op_breakdown"] || []
-    items.forEach((it) => {
-      const name = it.name
-      // New format uses total_s/avg_s; legacy uses perf_total/perf_avg
-      const isNewFormat = 'total_s' in it || 'calls' in it
-      const val = compareMetric.value === 'total'
-        ? (isNewFormat ? (Number(it["total_s"]) || 0) : (Number(it["perf_total"]) || 0))
-        : (isNewFormat ? (Number(it["avg_s"]) || 0) : (Number(it["perf_avg"]) || 0))
-      const arr = perCase.get(name) || new Array(n).fill(null)
-      arr[selectedIdx.value === 0 ? cases.value.indexOf(c) : cases.value.indexOf(c)] = val
-      perCase.set(name, arr)
-      nameMax.set(name, Math.max(nameMax.get(name) ?? 0, val))
-    })
-  })
-  // build full per-case arrays (fill nulls)
-  const rows = [...perCase.entries()].map(([name]) => {
-    // rebuild a clean per-case array (perCase was built naively/sparse):
-    const vals = cases.value.map((c: any) => {
-      const it = (c["op_breakdown"] || []).find((x: any) => x.name === name)
-      if (!it) return null
-      const isNewFormat = 'total_s' in it || 'calls' in it
-      // Number(x) ?? null is a no-op fallback (NaN isn't nullish) and would let
-      // NaN leak into cells ("NaN ms/us") and into Math.max, breaking the sort.
-      // Coerce then keep only finite numbers; otherwise null so downstream
-      // null-filters and sorts only ever see valid numbers.
-      const raw = compareMetric.value === 'total'
-        ? (isNewFormat ? it["total_s"] : it["perf_total"])
-        : (isNewFormat ? it["avg_s"] : it["perf_avg"])
-      const v = Number(raw)
+  // Per-case aggregates: collapse same-name shape groups into one row per case.
+  const perCaseAgg = cases.value.map((c: any) => aggregateByName(c['op_breakdown'] || []))
+
+  // Collect the union of op names across all cases.
+  const nameSet = new Set<string>()
+  for (const agg of perCaseAgg) for (const k of agg.keys()) nameSet.add(k)
+
+  const rows = [...nameSet].map((name) => {
+    const vals = cases.value.map((_: any, i: number) => {
+      const a = perCaseAgg[i].get(name)
+      if (!a) return null
+      const v = compareMetric.value === 'total' ? a.totalS : a.avgS
       return Number.isFinite(v) ? v : null
     })
-    return { name, values: vals, max: Math.max(...vals.filter((v: any) => v !== null).map(Number), 0) }
+    const finite = vals.filter((v: any) => v !== null).map(Number)
+    return { name, values: vals, max: finite.length ? Math.max(...finite, 0) : 0 }
   })
   rows.sort((a, b) => b.max - a.max)
   return rows.slice(0, 15)
