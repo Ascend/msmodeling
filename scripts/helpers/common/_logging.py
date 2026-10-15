@@ -53,6 +53,7 @@ def log_env_audit(cfg: Config, logger: logging.Logger) -> None:
     _log_env_var(logger, "MSMODELING_TEST_MAP_PATH", cfg.test_map_path)
     _log_env_var(logger, "MSMODELING_TEST_BASE_BRANCH", cfg.base_branch)
     _log_env_var(logger, "MSMODELING_TEST_LINE_THRESHOLD", cfg.line_threshold)
+    _log_env_var(logger, "MSMODELING_TEST_DIFF_LINE_THRESHOLD", cfg.diff_line_threshold)
     _log_env_var(logger, "MSMODELING_TEST_BRANCH_THRESHOLD", cfg.branch_threshold)
     _log_env_var(logger, "MSMODELING_BENCHMARK_PARALLEL", cfg.benchmark_parallel)
     _log_env_var(

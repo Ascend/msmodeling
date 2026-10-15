@@ -47,7 +47,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_from_env_all_optional_vars_use_fallbacks() -> None:
     cfg = Config.from_env()
     assert cfg.base_branch == "master"
-    assert cfg.line_threshold == 60.0
+    assert cfg.line_threshold == 80.0
+    assert cfg.diff_line_threshold == 80.0
     assert cfg.branch_threshold == 40.0
     assert cfg.benchmark_parallel is False
     assert cfg.feishu_webhook_url == ""
@@ -88,6 +89,7 @@ def test_from_env_all_values_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MSMODELING_TEST_MAP_PATH", "/tmp/map.json")
     monkeypatch.setenv("MSMODELING_TEST_BASE_BRANCH", "develop")
     monkeypatch.setenv("MSMODELING_TEST_LINE_THRESHOLD", "85.5")
+    monkeypatch.setenv("MSMODELING_TEST_DIFF_LINE_THRESHOLD", "82.5")
     monkeypatch.setenv("MSMODELING_TEST_BRANCH_THRESHOLD", "60.0")
     monkeypatch.setenv("MSMODELING_BENCHMARK_PARALLEL", "1")
     monkeypatch.setenv("FEISHU_WEBHOOK_URL", "https://example.com/hook")
@@ -98,6 +100,7 @@ def test_from_env_all_values_set(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.test_map_path == "/tmp/map.json"
     assert cfg.base_branch == "develop"
     assert cfg.line_threshold == 85.5
+    assert cfg.diff_line_threshold == 82.5
     assert cfg.branch_threshold == 60.0
     assert cfg.benchmark_parallel is True
     assert cfg.feishu_webhook_url == "https://example.com/hook"
@@ -142,6 +145,14 @@ def test_from_env_line_threshold_over_100_raises_config_error(
 ) -> None:
     monkeypatch.setenv("MSMODELING_TEST_LINE_THRESHOLD", "101")
     with pytest.raises(ConfigError, match="MSMODELING_TEST_LINE_THRESHOLD: must be in"):
+        Config.from_env()
+
+
+def test_from_env_diff_line_threshold_out_of_range_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MSMODELING_TEST_DIFF_LINE_THRESHOLD", "101")
+    with pytest.raises(ConfigError, match="MSMODELING_TEST_DIFF_LINE_THRESHOLD: must be in"):
         Config.from_env()
 
 
@@ -217,7 +228,14 @@ def test_from_env_bool_empty_string_raises_config_error(
         Config.from_env()
 
 
-@pytest.mark.parametrize("env_key", ["MSMODELING_TEST_LINE_THRESHOLD", "MSMODELING_TEST_BRANCH_THRESHOLD"])
+@pytest.mark.parametrize(
+    "env_key",
+    [
+        "MSMODELING_TEST_LINE_THRESHOLD",
+        "MSMODELING_TEST_DIFF_LINE_THRESHOLD",
+        "MSMODELING_TEST_BRANCH_THRESHOLD",
+    ],
+)
 def test_from_env_float_empty_string_raises_config_error(
     env_key: str,
     monkeypatch: pytest.MonkeyPatch,

@@ -30,6 +30,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from scripts.helpers._errors import ConfigError, format_expected_got
 from scripts.helpers.defaults import DEFAULT_BASE_BRANCH, DEFAULT_MSMODELING_CACHE
 
+DEFAULT_LINE_THRESHOLD: Final = 80.0
+DEFAULT_DIFF_LINE_THRESHOLD: Final = 80.0
 _THRESHOLD_MAX: Final = 100.0
 _BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
 _BOOL_FALSE = frozenset({"0", "false", "no", "off"})
@@ -41,6 +43,7 @@ _FIELD_ENV_KEYS: Final = {
     "test_map_path": "MSMODELING_TEST_MAP_PATH",
     "base_branch": "MSMODELING_TEST_BASE_BRANCH",
     "line_threshold": "MSMODELING_TEST_LINE_THRESHOLD",
+    "diff_line_threshold": "MSMODELING_TEST_DIFF_LINE_THRESHOLD",
     "branch_threshold": "MSMODELING_TEST_BRANCH_THRESHOLD",
     "benchmark_parallel": "MSMODELING_BENCHMARK_PARALLEL",
     "feishu_webhook_url": "FEISHU_WEBHOOK_URL",
@@ -106,7 +109,11 @@ class Config(BaseSettings):
 
     test_map_path: str | None = Field(default=None, validation_alias="MSMODELING_TEST_MAP_PATH")
     base_branch: str = Field(default=DEFAULT_BASE_BRANCH, validation_alias="MSMODELING_TEST_BASE_BRANCH")
-    line_threshold: float = Field(default=60.0, validation_alias="MSMODELING_TEST_LINE_THRESHOLD")
+    line_threshold: float = Field(default=DEFAULT_LINE_THRESHOLD, validation_alias="MSMODELING_TEST_LINE_THRESHOLD")
+    diff_line_threshold: float = Field(
+        default=DEFAULT_DIFF_LINE_THRESHOLD,
+        validation_alias="MSMODELING_TEST_DIFF_LINE_THRESHOLD",
+    )
     branch_threshold: float = Field(default=40.0, validation_alias="MSMODELING_TEST_BRANCH_THRESHOLD")
     benchmark_parallel: bool = Field(default=False, validation_alias="MSMODELING_BENCHMARK_PARALLEL")
     feishu_webhook_url: str = Field(default="", validation_alias="FEISHU_WEBHOOK_URL")
@@ -163,7 +170,13 @@ class Config(BaseSettings):
     @classmethod
     def _parse_line_threshold(cls, value: object, info: ValidationInfo) -> float:
         field_name = info.field_name or "line_threshold"
-        return _parse_float_env(value, default=60.0, field=_FIELD_ENV_KEYS[field_name])
+        return _parse_float_env(value, default=DEFAULT_LINE_THRESHOLD, field=_FIELD_ENV_KEYS[field_name])
+
+    @field_validator("diff_line_threshold", mode="before")
+    @classmethod
+    def _parse_diff_line_threshold(cls, value: object, info: ValidationInfo) -> float:
+        field_name = info.field_name or "diff_line_threshold"
+        return _parse_float_env(value, default=DEFAULT_DIFF_LINE_THRESHOLD, field=_FIELD_ENV_KEYS[field_name])
 
     @field_validator("branch_threshold", mode="before")
     @classmethod
@@ -183,7 +196,7 @@ class Config(BaseSettings):
         field_name = info.field_name or "weights_prune"
         return _parse_bool_env(value, default=False, field=_FIELD_ENV_KEYS[field_name])
 
-    @field_validator("line_threshold", "branch_threshold")
+    @field_validator("line_threshold", "diff_line_threshold", "branch_threshold")
     @classmethod
     def _validate_threshold(cls, value: float, info: ValidationInfo) -> float:
         if not (0 <= value <= _THRESHOLD_MAX):

@@ -31,10 +31,12 @@ from scripts.helpers._config import Config, ConfigError
 from scripts.helpers.ci_gate.diff import GitDiffResult
 from scripts.helpers.ci_gate.gate_policy import TestExemption
 from scripts.helpers.ci_gate.main import (
+    _incremental_coverage_exit_code,
     _log_blocking_errors,
     _log_execution_plan,
     main,
 )
+from scripts.helpers.ci_gate.incremental_coverage import IncrementalCoverage
 from scripts.helpers.ci_gate.models import (
     Baseline,
     ChangeSet,
@@ -49,6 +51,47 @@ from tests.regression.scripts.helpers.conftest import default_ci_gate_policy
 
 def _empty_diff() -> GitDiffResult:
     return GitDiffResult(line_map={}, entries=())
+
+
+@pytest.mark.parametrize(
+    ("covered", "total", "expected_code"),
+    [(4, 5, 0), (3, 5, 1)],
+)
+def test_incremental_coverage_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    baseline: Baseline,
+    covered: int,
+    total: int,
+    expected_code: int,
+) -> None:
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_coverage_data", lambda *_args: object())
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.measure_incremental_coverage",
+        lambda *_args, **_kwargs: IncrementalCoverage(
+            covered=covered,
+            total=total,
+            missing=("cli/main.py:5",),
+        ),
+    )
+
+    code, message = _incremental_coverage_exit_code(
+        ChangeSet.build(modified_source={"cli/main.py": frozenset({1, 2, 3, 4, 5})}),
+        baseline,
+        threshold=80.0,
+        logger=logging.getLogger("ci_gate"),
+    )
+
+    assert code == expected_code
+    if expected_code:
+        assert message is not None
+        assert "60.0% (3/5) < 80.0%" in message
+        assert "cli/main.py:5" in message
+        assert "Next steps:" in message
+        assert "cover enough lines" in message
+        assert "reach the 80.0% threshold" in message
+        assert "exemptions.sources entry in tests/.ci/gate_policy.yaml" in message
+    else:
+        assert message is None
 
 
 @pytest.fixture

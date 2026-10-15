@@ -161,7 +161,8 @@ Defaults below come from [`scripts/defaults.env`](defaults.env) (not shipped in 
 | `MSMODELING_TEST_MAP_TARGET_BRANCH` | Optional | `MSMODELING_TEST_BASE_BRANCH` | sync | Sync target (e.g. `develop`) |
 | `MSMODELING_TEST_MAP_SYNC_INTERVAL` | Optional | `60` | sync `--watch` | Poll interval (seconds) |
 | `MSMODELING_TEST_BASE_BRANCH` | Optional | `master` | ci_gate, sync, download URL | Merge-base branch; OBS path segment + cache subdirectory for test_map |
-| `MSMODELING_TEST_LINE_THRESHOLD` | Optional | `60` | nightly | Line coverage report threshold (%) |
+| `MSMODELING_TEST_LINE_THRESHOLD` | Optional | `80` | nightly | Whole-repository line coverage threshold (%) |
+| `MSMODELING_TEST_DIFF_LINE_THRESHOLD` | Optional | `80` | ci_gate | Added/modified executable function-body coverage threshold (%); `except` branches are included |
 | `MSMODELING_TEST_BRANCH_THRESHOLD` | Optional | `40` | nightly | Branch coverage threshold (%) |
 | `MSMODELING_TEST_WEIGHTS_PRUNE` | Optional | `0` | all `run_*.sh` | Prune Hub weights after session |
 | `MSMODELING_BENCHMARK_PARALLEL` | Optional | `0` | benchmark, nightly | `1` → pytest xdist |

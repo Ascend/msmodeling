@@ -6,7 +6,7 @@ In the current `msmodeling` testing system, the responsibilities of UT and ST ar
 
 1. A unified three-layer directory specification is established. Layers are expressed by directory placement under `tests/smoke/`, `tests/regression/`, and `tests/benchmark/` rather than by pytest layer markers. Pytest markers are reserved for three cross-cutting constraints only: `nightly` for long-running compile paths, `npu` for hardware-dependent cases, and `network` for cases requiring live model Hub access. Model-level precision guardianship lives under `tests/benchmark/models/`; operator-level guardianship lives under `tests/benchmark/ops/perf_database/`. Incremental CI feedback covers smoke and regression cases that match `not npu and not nightly and not network`; benchmark directories never enter the incremental path.
 2. A split execution model is established. Five shell entry points are provided: `run_smoke.sh`, `run_regression.sh`, `run_benchmark.sh`, `run_nightly.sh`, and `run_ci_gate.sh`. Local developers always run full smoke and full regression. CI PR incremental selection is isolated in `run_ci_gate.sh`, which reads an external `test_map` file maintained by the nightly job. Benchmark and nightly scripts always run full suites.
-3. A coverage and guardianship mechanism is established. Nightly phase 1 collects coverage while refreshing `test_map` and reports line and branch totals against 60% / 40% thresholds. CI incremental gate (`run_ci_gate.sh`) enforces `test_map` policy and pytest pass/fail. Pass rate, duration drift, and slow-case counts are tracked through nightly JUnit XML reports and Feishu notifications.
+3. A coverage and guardianship mechanism is established. Nightly collects whole-repository coverage and enforces line 80% / branch 60%. CI incremental gate (`run_ci_gate.sh`) enforces `test_map` policy, pytest pass/fail, and at least 80% coverage of added or modified executable product lines. Pass rate, duration drift, and slow-case counts are tracked through nightly JUnit XML reports and Feishu notifications.
 4. Slow cases and redundancy are governed through `pytest -n auto` parallelism, session- and module-level fixtures, parametrization, and case merging. Duration is compared against nightly `duration_sec` and pytest `--durations=20` output. Full regression is not rerun solely to collect baselines.
 5. Weights and Hub access are controlled centrally. Local runs allow Hub access when `MSMODELING_OFFLINE` is unset. CI sets `MSMODELING_OFFLINE=1` to forbid implicit downloads. Cache directories are confined to `.msmodeling_cache` at the repository root. Weight shards can be pruned after each session when `MSMODELING_TEST_WEIGHTS_PRUNE=1`.
 6. Quantifiable targets are defined. The mixed baseline total duration is 960 seconds, line coverage is 74%, branch coverage is 61.8%, and 15 test cases exceed 300 seconds. After rectification: incremental CI gate target is approximately 180 seconds, a single full regression run should not exceed 300 seconds, full nightly should not exceed 480 seconds, full-run speed improvement over baseline should be no less than 50%, and test cases exceeding 300 seconds should be no more than 3.
@@ -213,9 +213,9 @@ Shell scripts are the unified entry point for CodeArts build tasks and local deb
 |------|------|------|
 | `run_smoke.sh` | Full `tests/smoke/`; `-o addopts=`; marker `not npu and not network`; collect-then-xdist; `-vv` | — |
 | `run_regression.sh` | Full `tests/regression/`; same as smoke | — |
-| `run_ci_gate.sh` | Incremental smoke and regression via external `test_map` | Plan-first: pre-run policy, deduplicated pytest waves; no `--cov` |
+| `run_ci_gate.sh` | Incremental smoke and regression via external `test_map` | Plan-first: pre-run policy, deduplicated pytest waves; changed executable-line coverage ≥ 80% |
 | `run_benchmark.sh` | Full `tests/benchmark/`, marker `not npu and not network`, optional `-n auto` when `MSMODELING_BENCHMARK_PARALLEL=1` | — |
-| `run_nightly.sh` | Four-phase nightly pipeline via `scripts/helpers/nightly/main.py` | Phase 1: `--cov`; 60/40 thresholds in report |
+| `run_nightly.sh` | Four-phase nightly pipeline via `scripts/helpers/nightly/main.py` | Phase 1: `--cov`; line 80 / branch 60 thresholds in report |
 
 Local developers run `run_smoke.sh` and `run_regression.sh` directly. CI PR incremental runs use `run_ci_gate.sh` with `MSMODELING_TEST_MAP_PATH` pointing to the runner-maintained JSON file.
 
@@ -432,7 +432,8 @@ The complete environment variable list lives in `tests/README.md`. The design do
 |------|----------|------|
 | `MSMODELING_TEST_MAP_PATH` | Required for ci_gate and nightly | Absolute path to external `test_map` JSON file; must exist for ci_gate; created by nightly phase 1 on success |
 | `MSMODELING_TEST_BASE_BRANCH` | Optional | Default `master`; used for `git merge-base HEAD $MSMODELING_TEST_BASE_BRANCH` |
-| `MSMODELING_TEST_LINE_THRESHOLD` / `MSMODELING_TEST_BRANCH_THRESHOLD` | Optional | Default **60** / **40**; nightly coverage report |
+| `MSMODELING_TEST_LINE_THRESHOLD` / `MSMODELING_TEST_BRANCH_THRESHOLD` | Optional | Whole-repository nightly thresholds. Helper default **80** / **40**; `run_nightly.sh` exports **80** / **60** |
+| `MSMODELING_TEST_DIFF_LINE_THRESHOLD` | Optional | PR incremental threshold, default **80**. Applies to added or modified executable function/method body lines collected by `run_ci_gate.sh`; import-time module/class lines, definition headers, decorators, comments, docstrings, and type-only lines are excluded; `except` branches stay in the denominator |
 | `MSMODELING_BENCHMARK_PARALLEL` | Optional | Default `0`; set `1` for benchmark `-n auto` |
 | `MSMODELING_OFFLINE` | CI recommends `1` | Enables Hub offline triplet through `tests/conftest.py` |
 | `MSMODELING_TEST_WEIGHTS_PRUNE` | Optional | Default `0`; prunes weight shards after session |
@@ -516,7 +517,7 @@ Build jobs depend on Python 3.9 or higher, pytest, and coverage packages from pr
 | Incremental CI gate duration | — | ≤ 180 s | Duration of `run_ci_gate.sh` on typical PR diffs |
 | Single full regression duration | — | ≤ 300 s | Duration of `run_regression.sh` |
 | Number of >300 s test cases | 15 | ≤ 3 | pytest `--durations=20` |
-| UT line coverage | 74% | ≥ 60% reported, 80% aspirational for new code | nightly phase 1 report |
+| UT line coverage | 74% | ≥ 80% | nightly phase 1 report |
 | UT branch coverage | 61.8% | ≥ 40% reported | nightly phase 1 report |
 
 Parallelism uses `pytest -n auto` for all UT entry scripts; benchmark stays sequential unless `MSMODELING_BENCHMARK_PARALLEL=1`.

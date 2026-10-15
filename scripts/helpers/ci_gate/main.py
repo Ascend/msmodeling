@@ -42,6 +42,7 @@ from scripts.helpers.ci_gate.errors import (
     format_blocking_errors,
     format_pytest_failure_hint,
 )
+from scripts.helpers.ci_gate.incremental_coverage import measure_incremental_coverage
 from scripts.helpers.ci_gate.models import (
     Baseline,
     ChangeSet,
@@ -92,6 +93,7 @@ _REGRESSION_MARKER = "not npu and not nightly and not network"
 _FULL_SUITE_MARKER = _REGRESSION_MARKER
 _COVERAGE_DATA_PATH = REPO_ROOT / ".coverage"
 _SAMPLE_NODE_LIMIT = 3
+_MISSING_LINE_LIMIT = 20
 
 _REASON_CONFIG = "dependency or test configuration changed"
 _REASON_CHANGED_TEST = "new or changed test file"
@@ -371,7 +373,12 @@ def _run_pytest(
         extra_args=extra_args,
     )
     logger.info("Running pytest: %s", shlex.join(cmd))
-    return subprocess.run(cmd, cwd=REPO_ROOT, check=False).returncode
+    return _execute_pytest(cmd).returncode
+
+
+def _execute_pytest(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """Execute one planned pytest command without exposing shared subprocess state to tests."""
+    return subprocess.run(cmd, cwd=REPO_ROOT, check=False, text=True)
 
 
 def _sample_nodes(nodes: tuple[str, ...], limit: int = _SAMPLE_NODE_LIMIT) -> str:
@@ -566,6 +573,61 @@ def _soft_mapping_exit_code(
     return 1, format_blocking_errors(soft_errors, pytest_ran=True)
 
 
+def _incremental_coverage_exit_code(
+    changes: ChangeSet,
+    baseline: Baseline,
+    *,
+    threshold: float,
+    logger: logging.Logger,
+) -> tuple[int, str | None]:
+    """Enforce changed executable-line coverage after selected tests pass."""
+    if not (_product_paths(changes.new_source, baseline.roots) or changes.modified_source):
+        return 0, None
+    coverage_data = load_coverage_data(_COVERAGE_DATA_PATH)
+    summary = measure_incremental_coverage(
+        REPO_ROOT,
+        changes,
+        baseline.roots,
+        baseline.exemptions,
+        coverage_data,
+    )
+    if summary.total == 0:
+        logger.info("Incremental line coverage: no changed executable product lines")
+        return 0, None
+    logger.info(
+        "Incremental line coverage: %.1f%% (%d/%d), threshold %.1f%%",
+        summary.percent,
+        summary.covered,
+        summary.total,
+        threshold,
+    )
+    if summary.percent >= threshold:
+        return 0, None
+    shown = "\n".join(f"  - {item}" for item in summary.missing[:_MISSING_LINE_LIMIT])
+    remaining = len(summary.missing) - _MISSING_LINE_LIMIT
+    suffix = f"\n  ... and {remaining} more" if remaining > 0 else ""
+    return (
+        1,
+        "\n".join(
+            [
+                (
+                    f"CI gate failed: incremental line coverage {summary.percent:.1f}% "
+                    f"({summary.covered}/{summary.total}) < {threshold:.1f}%."
+                ),
+                f"Uncovered changed executable lines:\n{shown}{suffix}",
+                "",
+                "Next steps:",
+                "  1. Add or update a relevant pytest test in this PR, and cover enough lines",
+                f"     listed above to reach the {threshold:.1f}% threshold.",
+                "  2. If this PR changes product code only, ensure an existing mapped test",
+                "     exercises the changed symbol.",
+                "  3. Only when a symbol cannot run in CI, request an approved, time-bounded",
+                "     exemptions.sources entry in tests/.ci/gate_policy.yaml.",
+            ]
+        ),
+    )
+
+
 def _prepare_gate_inputs(
     cfg: Config,
     logger: logging.Logger,
@@ -674,6 +736,7 @@ def _run_gate_finalize(
     *,
     modified_source_step: GateStepResult | None = None,
     use_cov: bool,
+    diff_line_threshold: float,
     base_branch: str,
     logger: logging.Logger,
 ) -> int:
@@ -700,6 +763,17 @@ def _run_gate_finalize(
         if mapping_message is not None:
             print(mapping_message)
         return mapping_code
+
+    coverage_code, coverage_message = _incremental_coverage_exit_code(
+        changes,
+        baseline,
+        threshold=diff_line_threshold,
+        logger=logger,
+    )
+    if coverage_code != 0:
+        if coverage_message is not None:
+            print(coverage_message)
+        return coverage_code
 
     if execution.has_work:
         print(_success_user_message(execution, changes))
@@ -762,6 +836,7 @@ def main() -> int:
         execution,
         modified_source_step=modified_source_step,
         use_cov=use_cov,
+        diff_line_threshold=cfg.diff_line_threshold,
         base_branch=cfg.base_branch,
         logger=logger,
     )

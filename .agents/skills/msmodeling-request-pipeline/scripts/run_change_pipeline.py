@@ -16,10 +16,10 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
-"""Run CI + nightly-related pytest waves for the current msmodeling diff.
+"""Run CI, nightly-related, and precision-guardianship pytest waves.
 
-Passing both waves means this change should not fail (and thus not interrupt)
-the matching subset of a full nightly. It is not a full nightly.
+Passing all three means this change should not fail the matching nightly
+subset or the model/operator precision net. It is not a full nightly.
 """
 
 from __future__ import annotations
@@ -44,6 +44,13 @@ PRODUCT_ROOTS = (
 
 CI_MARKER = "not npu and not nightly and not network"
 NIGHTLY_RELATED_MARKER = "not npu and (nightly or benchmark or network)"
+# These cases are unmarked on purpose. Pytest has no ``benchmark`` marker, so
+# the nightly-related marker above never selects the precision net.
+PRECISION_MARKER = "not npu and not network"
+PRECISION_TARGETS = (
+    "tests/benchmark/models/test_model_regression.py",
+    "tests/benchmark/ops/perf_database",
+)
 CANONICAL_OWNER = "Ascend"
 CANONICAL_REPO = "Ascend/msmodeling"
 
@@ -249,6 +256,14 @@ def _pytest_python(repo: Path, explicit: str | None) -> str:
     raise SystemExit("no repo virtualenv at .venv/bin/python; run uv sync or pass --python <venv python>")
 
 
+def _diff_needs_precision(changed: list[str]) -> bool:
+    """Product or test diffs can move precision numbers. Docs and skill-only diffs do not."""
+    for path in changed:
+        if _is_product(path) or _is_test_py(path) or path.startswith("tests/benchmark/"):
+            return True
+    return False
+
+
 def _related_dirs(paths: list[str]) -> list[str]:
     dirs: set[str] = set()
     for path in paths:
@@ -417,7 +432,7 @@ def _maybe_comment_result(
     body = (
         f"本地流水结果：{status}\n"
         f"HEAD `{sha[:12]}` · base `{base_ref}` · 改动文件 {changed} · 选测 {selected} 条"
-        f"（CI + nightly/benchmark/network 子集，不是整场 nightly）。\n"
+        f"（CI + nightly 相关子集 + 精度防护网，不是整场 nightly）。\n"
         f"{extra}"
     )
     _post_result_comment(repo, pr=pr, canonical=canonical, body=body)
@@ -428,6 +443,12 @@ def _filter_wave(repo: Path, python: str, nodes: list[str], marker: str) -> list
     if not nodes:
         return []
     return _collect(repo, python, nodes, marker=marker)
+
+
+def _exclude_precision_nodes(nodes: list[str], precision_nodes: list[str]) -> list[str]:
+    """Keep the dedicated precision wave disjoint from the first two waves."""
+    precision = frozenset(precision_nodes)
+    return [node for node in nodes if node not in precision]
 
 
 def _run_wave(repo: Path, python: str, nodes: list[str], *, name: str, marker: str) -> int:
@@ -508,6 +529,10 @@ def main() -> int:
     related_dirs = _related_dirs(test_files + mapped_files)
     dir_nightly = set(_collect(repo, python, related_dirs, marker="not npu and (nightly or benchmark or network)"))
     selected = sorted(collected | mapped | file_recollect | dir_nightly)
+    precision_nodes: list[str] = []
+    if _diff_needs_precision(changed):
+        precision_targets = [path for path in PRECISION_TARGETS if (repo / path).exists()]
+        precision_nodes = _collect(repo, python, precision_targets, marker=PRECISION_MARKER)
 
     print(f"repo={repo}")
     print(f"base={base_ref}")
@@ -518,7 +543,8 @@ def main() -> int:
     print(f"from_test_map={len(mapped)}")
     print(f"from_file_recollect={len(file_recollect)}")
     print(f"from_related_dirs={len(dir_nightly)}")
-    print("contract=both waves green => this diff should not fail/interrupt the matching nightly subset")
+    print(f"precision_nodes={len(precision_nodes)}")
+    print("contract=three waves green => this diff should not fail the matching nightly subset or the precision net")
     if product_files and test_map is None:
         print("warning=product files changed but test_map is missing")
     if not changed:
@@ -527,12 +553,15 @@ def main() -> int:
             "Check out the PR head (or the change under test) before syncing."
         )
 
+    reported = len(set(selected) | set(precision_nodes))
     if args.dry_run and not args.run:
         for node in selected:
             print(node)
+        for node in precision_nodes:
+            print(f"precision {node}")
         return 0
 
-    if not selected:
+    if not selected and not precision_nodes:
         print("no tests selected")
         _maybe_comment_result(
             repo,
@@ -542,50 +571,57 @@ def main() -> int:
             selected=0,
             changed=len(changed),
             base_ref=base_ref,
-            extra="相对主仓没有 tests/ 或产品文件，未执行 pytest。",
+            extra="相对主仓没有 tests/ 或产品文件，未执行 pytest，也未跑精度防护网。",
         )
         return 0
 
-    ci_nodes = _filter_wave(repo, python, selected, CI_MARKER)
-    nightly_nodes = _filter_wave(repo, python, selected, NIGHTLY_RELATED_MARKER)
+    ci_nodes = _exclude_precision_nodes(_filter_wave(repo, python, selected, CI_MARKER), precision_nodes)
+    nightly_nodes = _exclude_precision_nodes(
+        _filter_wave(repo, python, selected, NIGHTLY_RELATED_MARKER),
+        precision_nodes,
+    )
     print(f"wave_ci_nodes={len(ci_nodes)}")
     print(f"wave_nightly_nodes={len(nightly_nodes)}")
+    print(f"wave_precision_nodes={len(precision_nodes)}")
     ci_exit = _run_wave(repo, python, ci_nodes, name="ci", marker=CI_MARKER)
     nightly_exit = _run_wave(repo, python, nightly_nodes, name="nightly_related", marker=NIGHTLY_RELATED_MARKER)
+    precision_exit = _run_wave(repo, python, precision_nodes, name="precision", marker=PRECISION_MARKER)
     empty_note = []
     if not ci_nodes:
         empty_note.append("ci 波 0 条")
     if not nightly_nodes:
         empty_note.append("nightly_related 波 0 条")
+    if not precision_nodes:
+        empty_note.append("precision 波 0 条")
     empty_text = (" " + "；".join(empty_note) + "，记为该波通过。") if empty_note else ""
-    if ci_exit == 0 and nightly_exit == 0:
-        print("result=PASS both waves; this change should not interrupt nightly on the selected subset")
+    if ci_exit == 0 and nightly_exit == 0 and precision_exit == 0:
+        print("result=PASS three waves; this change should not interrupt nightly or the precision net")
         _maybe_comment_result(
             repo,
             enabled=args.comment,
             pr_arg=args.pr,
             status="通过",
-            selected=len(selected),
+            selected=reported,
             changed=len(changed),
             base_ref=base_ref,
-            extra=f"ci + nightly_related 两波均绿。{empty_text}".rstrip(),
+            extra=f"ci + nightly_related + precision 三波均绿。{empty_text}".rstrip(),
         )
         return 0
-    print("result=FAIL; nightly can still be interrupted by this diff")
+    print("result=FAIL; nightly or the precision net can still be interrupted by this diff")
     _maybe_comment_result(
         repo,
         enabled=args.comment,
         pr_arg=args.pr,
         status="失败",
-        selected=len(selected),
+        selected=reported,
         changed=len(changed),
         base_ref=base_ref,
         extra=(
-            f"ci exit={ci_exit} · nightly_related exit={nightly_exit}。"
-            f"{empty_text}这次 diff 仍可能打断 nightly 对应子集。"
+            f"ci exit={ci_exit} · nightly_related exit={nightly_exit} · precision exit={precision_exit}。"
+            f"{empty_text}这次 diff 仍可能打断 nightly 对应子集或精度防护网。"
         ),
     )
-    return ci_exit or nightly_exit
+    return ci_exit or nightly_exit or precision_exit
 
 
 if __name__ == "__main__":

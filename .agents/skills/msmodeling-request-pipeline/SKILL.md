@@ -1,25 +1,25 @@
 ---
 name: msmodeling-request-pipeline
 description: >-
-  按指定 PR 或当前 diff 跑本地两波流水：先同步最新主仓，再跑 CI + nightly/benchmark/network 相关用例。
-  在用户说请求流水、请求流水 PR887、跑流水 887、跑一下流水、本地流水、change pipeline 时使用。
+  按指定 PR 或当前 diff 跑本地三波流水：先同步最新主仓，再跑 CI、nightly 相关用例和精度防护网。
+  在用户说请求流水、请求流水 PR887、跑流水 887、跑一下流水、本地流水、change pipeline、精度防护网时使用。
   不是 GitCode compile，也不是整场 nightly。
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   source: local
 ---
 
 # msmodeling 请求流水
 
-用户说「请求流水」时：**先同步最新主仓，再按改动选测并跑两波**。
+用户说「请求流水」时：**先同步最新主仓，再按改动选测并跑三波**。精度防护网是第三波，不靠 pytest 的 `benchmark` 标记。
 
 写了 **PR 号**（例如「请求流水 PR887」「请求流水 887」）时，对的是 **那条 PR 的 head**，不是随便一个 nightly 工作树：
 
 1. `gitcode pr view <N> -R Ascend/msmodeling --json`，记下 head 分支和 base（`master` / `26.2.0`）
 2. 检出该 head（已有 worktree 就用；没有就 `git fetch` fork/head 并 `worktree add`，不要搅乱正在跑 nightly 的树）
 3. 在该树上 `fetch` + merge 最新主仓 `<base>`（远端必须指向 `Ascend/msmodeling`，优先 `upstream`，否则 `origin`）
-4. 跑脚本 `--run --repo <该树> --pr <N>`：选测范围是 **这条 PR 相对最新主仓的 diff**，不是整场 nightly
-5. 两波都绿才在 **这个 PR** 上留「本地流水已经通过」
+4. 跑脚本 `--run --repo <该树> --pr <N>`：选测范围是 **这条 PR 相对最新主仓的 diff**，再加上精度防护网。不是整场 nightly
+5. 三波都绿才在 **这个 PR** 上留「本地流水已经通过」
 
 只说「请求流水」、没写 PR 号：用当前仓库当前分支，同样先 sync 再跑。
 
@@ -44,7 +44,7 @@ skill-only 的 PR（例如 887 只加 `.agents/skills`）选测可以为 0，这
 
 ## 保证（以及保证不了什么）
 
-- **能保证**：两波都绿 ⇒ 本次 diff 命中子集（映射用例 + 同文件/同目录的 nightly、benchmark、network 用例）在整场 nightly 中应当通过；若仍失败，优先按 flaky / 跨模块间接影响归因。
+- **能保证**：三波都绿 ⇒ 本次 diff 命中子集（映射用例 + 同文件/同目录的 nightly、network 用例）加上精度防护网应当通过；若仍失败，优先按 flaky / 跨模块间接影响归因。
 - **保证不了**：别人合入的代码、flaky、未映射的产品路径、跨目录间接影响、整场 8000+ 里和本次 diff 无关的失败。那不是本 skill，去跑 `scripts/run_nightly.sh`。
 
 ## 不要做的事
@@ -70,12 +70,14 @@ $PY "$SCRIPT" --run --repo "$REPO" --pr "<N>"
 
 没写 PR 号就去掉 `--pr`。已说「请求流水」则直接 `--run`（会先 fetch/merge 主仓）。选出 >200 个 node 时先报数量再跑。
 
-## 两波流水
+## 三波流水
 
 1. **ci**：先从选出的 node 里按 `not npu and not nightly and not network` 拆出子集再跑（和门禁/test_map 同一波）。0 条，或 pytest 退出码 5，记为该波通过。
-2. **nightly_related**：从同一批里按 `not npu and (nightly or benchmark or network)` 拆出子集再跑（nightly Wave A 里的 `@nightly` + Wave B）。0 条或退出码 5 同样记为通过。
+2. **nightly_related**：从同一批里按 `not npu and (nightly or benchmark or network)` 拆出子集再跑（`@nightly` 与 `@network`）。仓库没有 `benchmark` 标记，这一波选不中精度防护网。0 条或退出码 5 同样记为通过。
+3. **precision**：模型精度防护网 `tests/benchmark/models/test_model_regression.py`，算子精度防护网 `tests/benchmark/ops/perf_database/`。按目录收集，marker 是 `not npu and not network`。不要跑 `auto_baseline.py`。diff 含产品 `.py`、`tests/` 或 `tests/benchmark/` 时才跑；只改文档或 `.agents/` 时不跑。0 条或退出码 5 记为通过。
 
-选测：改过的测试文件全量 collect；产品文件走 `test_map`；映射文件再 collect 以补 `@nightly` 兄弟；这些文件所在目录再 collect `nightly or benchmark or network`。
+选测：改过的测试文件全量 collect；产品文件走 `test_map`；映射文件再 collect 以补 `@nightly` 兄弟；这些文件所在目录再 collect `nightly or benchmark or network`。精度防护网另按上面两个路径收集，不从 `test_map` 推断。
+若精度节点也被改动测试或 `test_map` 选中，从前两波移除，只在 precision 波执行一次；评论里的选测数量同样按 node 去重。
 
 `test_map`：`MSMODELING_TEST_MAP_PATH` → `.msmodeling_cache/test_map/<base>/test_map.json`。产品改动没有 map 必须写明，不能声称 nightly 不会被打断。
 
@@ -93,5 +95,5 @@ PR 号：`--pr`、`GITCODE_PR_NUMBER`，或当前分支。没有 `--no-comment-o
 ## 跑完怎么回
 
 - 主仓 sync：fetch 的 base、ahead/behind、是否 merge
-- base、两波 node 数、各自 exit
+- base、三波 node 数、各自 exit
 - 评论区链接；未要求不 commit / push

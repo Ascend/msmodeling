@@ -112,3 +112,23 @@ def symbol_lines_covered_in_data(
         if not require_test_context or any(_is_pytest_test_context(ctx) for ctx in ctxmap[line_no]):
             return True
     return False
+
+
+def covered_test_context_lines_in_data(
+    repo_root: Path,
+    source_rel_path: str,
+    lines: set[int] | frozenset[int],
+    coverage_data: CoverageDataReader,
+) -> frozenset[int]:
+    """Return candidate lines executed by a pytest test context."""
+    if not lines:
+        return frozenset()
+    measured = _measured_path_for_source(coverage_data, repo_root, source_rel_path)
+    if measured is None:
+        return frozenset()
+    ctxmap = coverage_data.contexts_by_lineno(measured)
+    return frozenset(
+        line_no
+        for line_no in lines
+        if line_no in ctxmap and any(_is_pytest_test_context(ctx) for ctx in ctxmap[line_no])
+    )

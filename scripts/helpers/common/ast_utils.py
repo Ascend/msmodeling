@@ -658,6 +658,40 @@ def filter_executable_lines(path: Path, changed_lines: set[int] | frozenset[int]
     return _filter_executable_source_lines(path, source_lines, changed_lines)
 
 
+def filter_test_context_executable_lines(path: Path, changed_lines: set[int] | frozenset[int]) -> set[int]:
+    """Return changed lines that can be attributed to a pytest test context.
+
+    Module and class bodies run while pytest imports the source, before a test
+    node context exists. Definition headers and decorators have the same
+    problem. Keep executable function and method body lines, including
+    ``except`` branches, then map continuation lines to the statement starts
+    recorded by Coverage.py.
+    """
+    executable = filter_executable_lines(path, changed_lines)
+    if not executable:
+        return set()
+    try:
+        tree = _get_cached_tree(path)
+    except (OSError, SyntaxError):
+        return coverage_measurable_lines(path, executable)
+
+    function_body_lines: set[int] = set()
+    declaration_lines: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if node.body:
+            first_body_line = node.body[0].lineno
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                function_body_lines.update(range(first_body_line, _end_line(node) + 1))
+            declaration_lines.update(range(node.lineno, first_body_line))
+        for decorator in node.decorator_list:
+            declaration_lines.update(range(decorator.lineno, _end_line(decorator) + 1))
+
+    attributable = (executable & function_body_lines) - declaration_lines
+    return coverage_measurable_lines(path, attributable)
+
+
 def _node_span(node: ast.AST) -> tuple[int, int, int] | None:
     """Return (start, end, cov_line) for a node with a valid lineno, else None."""
     start = getattr(node, "lineno", None)
