@@ -590,6 +590,15 @@ Decode 阶段设置 `--decode`（此时不能再设置 `--prefill`，二者互�
 
 `Memory available < 0` 表示目标设备显存无法容纳当前配置，需要调整模型、并行策略、`--num-queries`、`--image-batch-size` 或序列长度。
 
+##### 为什么 PP trace 中后续 Stage 的轨道看起来是空的？
+
+启用流水线并行（`--pp-size > 1`）导出 Chrome Trace 时，各 Stage 按单请求串行执行顺序排列在时间轴上：Stage 0 的事件位于时间轴起点，后续 Stage 依次排在其后。查看器初始视窗只覆盖时间轴前段时，后续 Stage 的轨道虽然存在，但其事件都在视窗右侧，看起来像空轨道。这是正常的展示现象，不代表 Stage 未执行或导出缺失，可通过以下方式确认：
+
+- trace 中的 `PP Overview` 轨道提供覆盖完整流水线时间范围的 `PP Pipeline Total` 切片，并以嵌套切片展示各 Stage 与 Stage 间通信的实际时间范围；
+- 各轨道名称带时间范围后缀，例如 `PP Stage 1 [22.221-42.063 ms]`；
+- 导出完成时会在输出中打印各 Stage 的时间范围布局摘要；
+- 在查看器中执行 Fit all / 缩小视图，使时间范围覆盖完整流水线。
+
 ### 4.2 视频生成
 
 我们提供 `video_generate.py` 命令行接口来仿真 diffusion transformer 模型的前向传播与性能。该脚本支持仿真视频生成模型（例如类 Stable Video Diffusion 架构）的推理过程，可配置输入维度、采样步数及并行设置。默认提供详细的算子性能分解表格汇总。也可选择将性能时间线导出为 Chrome Trace 文件。

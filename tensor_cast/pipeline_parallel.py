@@ -871,6 +871,12 @@ def _slice_layer_cache(
 logger = logging.getLogger(__name__)
 
 _PP_COMM_TID_OFFSET = 10_000
+# Dedicated pseudo-thread for the pipeline-level overview track. Chrome Trace
+# viewers render one track per (pid, tid); a fixed tid far above the comm
+# offset keeps the overview separate from stage (tid == stage_id) and comm
+# (tid == _PP_COMM_TID_OFFSET + stage_id) tracks.
+_PP_OVERVIEW_TID = 20_000
+_MS_PER_US = 1e-3
 
 
 @dataclass
@@ -1277,7 +1283,55 @@ class PipelineRunner:
     @staticmethod
     def export_chrome_trace(path: str, trace_events: list[dict]) -> None:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"traceEvents": trace_events}, f)
+            json.dump({"displayTimeUnit": "ms", "traceEvents": trace_events}, f)
+        summary = _pipeline_trace_layout_summary(trace_events)
+        if summary:
+            print(summary)
+
+
+def _pipeline_trace_layout_summary(trace_events: list[dict]) -> str:
+    """Describe where each PP track sits on the shifted global timeline.
+
+    PP stages run sequentially, so slices of stages after the first only show
+    up in the later part of the timeline. Point users at the full range and
+    the overview track so a partially zoomed viewer does not read later stage
+    tracks as empty.
+    """
+    ranges_us_by_tid: dict[int, list[int]] = {}
+    names_by_tid = _collect_track_names(trace_events)
+    for trace_event in trace_events:
+        if trace_event.get("ph") != "X" or trace_event.get("tid") is None:
+            continue
+        _record_trace_range(
+            ranges_us_by_tid,
+            int(trace_event["tid"]),
+            int(trace_event.get("ts", 0)),
+            int(trace_event.get("ts", 0)) + int(trace_event.get("dur", 0)),
+        )
+    stage_tids = sorted(tid for tid in ranges_us_by_tid if tid < _PP_COMM_TID_OFFSET and tid != _PP_OVERVIEW_TID)
+    if not stage_tids:
+        return ""
+    segments = []
+    for tid in sorted(ranges_us_by_tid, key=lambda tid: ranges_us_by_tid[tid][0]):
+        # The overview track spans every other track by construction and is
+        # already described by the trailing full-pipeline-range sentence, so
+        # listing it again would only repeat the same range.
+        if tid == _PP_OVERVIEW_TID:
+            continue
+        name = names_by_tid.get(tid, f"PP track {tid}")
+        # Thread names already carry the range suffix in exported events.
+        if "[" not in name:
+            name = f"{name} [{_format_trace_range_us(*ranges_us_by_tid[tid])}]"
+        segments.append(name)
+    overview_start_us = min(bounds[0] for bounds in ranges_us_by_tid.values())
+    overview_end_us = max(bounds[1] for bounds in ranges_us_by_tid.values())
+    return (
+        "PP chrome trace layout (sequential single-request timeline): "
+        + " -> ".join(segments)
+        + f"; full pipeline range {_format_trace_range_us(overview_start_us, overview_end_us)}"
+        + " on the 'PP Overview' track. Later stages are placed after earlier ones on the timeline: "
+        + "if a later stage track looks empty, use the viewer's 'Fit all'/zoom-out to cover the full range."
+    )
 
 
 def _stage_outgoing_comm_times(
@@ -1624,6 +1678,9 @@ def _pipeline_global_trace_events(stage_results: list[Any], transfer_results: li
     transfer_by_source_stage = {result.stats.source_stage_id: result for result in transfer_results}
     offsets_s_by_model: dict[str, float] = {}
     trace_events: list[dict] = []
+    # Shifted X-event time bounds per tid, used to describe each track's
+    # visibility window and to build the pipeline overview track.
+    ranges_us_by_tid: dict[int, list[int]] = {}
 
     def append_events(runtime_result: Any, duration_s_by_model: dict[str, float]) -> None:
         for trace_event in runtime_result.trace_events:
@@ -1634,6 +1691,13 @@ def _pipeline_global_trace_events(stage_results: list[Any], transfer_results: li
                 shifted_event["ts"] = int(shifted_event.get("ts", 0)) + int(round(offset_s * 1e6))
                 shifted_event["args"] = dict(shifted_event.get("args", {}))
                 shifted_event["args"]["pipeline_global_offset_us"] = int(round(offset_s * 1e6))
+                if shifted_event.get("tid") is not None:
+                    _record_trace_range(
+                        ranges_us_by_tid,
+                        int(shifted_event["tid"]),
+                        shifted_event["ts"],
+                        shifted_event["ts"] + int(shifted_event.get("dur", 0)),
+                    )
             trace_events.append(shifted_event)
 
         for model_name, duration_s in duration_s_by_model.items():
@@ -1654,7 +1718,122 @@ def _pipeline_global_trace_events(stage_results: list[Any], transfer_results: li
         }
         append_events(transfer_result, transfer_durations)
 
+    if ranges_us_by_tid:
+        num_stages = max(result.stage_spec.stage_id for result in stage_results) + 1
+        _append_pipeline_overview_events(trace_events, ranges_us_by_tid, num_stages)
+        _suffix_track_names_with_ranges(trace_events, ranges_us_by_tid)
+
     return trace_events
+
+
+def _record_trace_range(ranges_us_by_tid: dict[int, list[int]], tid: int, start_us: int, end_us: int) -> None:
+    """Grow the shifted [min start, max end] bounds recorded for one track tid."""
+    bounds = ranges_us_by_tid.setdefault(int(tid), [start_us, end_us])
+    bounds[0] = min(bounds[0], start_us)
+    bounds[1] = max(bounds[1], end_us)
+
+
+def _format_trace_range_us(start_us: int, end_us: int) -> str:
+    return f"{start_us * _MS_PER_US:.3f}-{end_us * _MS_PER_US:.3f} ms"
+
+
+def _append_pipeline_overview_events(
+    trace_events: list[dict],
+    ranges_us_by_tid: dict[int, list[int]],
+    num_stages: int,
+) -> None:
+    """Add a PP Overview track exposing the whole pipeline time range.
+
+    PP stages run sequentially, so slices of stages after the first sit in the
+    later part of the timeline. Viewers that open on a partial time window can
+    make those later stage tracks look empty. A full-range total slice with
+    per-stage/comm slices nested on a dedicated overview track makes the
+    pipeline extent visible at any zoom level without changing the serial
+    single-request time semantics.
+    """
+    overview_start_us = min(bounds[0] for bounds in ranges_us_by_tid.values())
+    overview_end_us = max(bounds[1] for bounds in ranges_us_by_tid.values())
+    if overview_end_us < overview_start_us:
+        return
+    overview_events: list[dict] = [
+        {
+            "name": "thread_name",
+            "ph": "M",
+            "pid": 0,
+            "tid": _PP_OVERVIEW_TID,
+            "args": {"name": f"PP Overview ({_format_trace_range_us(overview_start_us, overview_end_us)})"},
+        },
+        {
+            "name": "thread_sort_index",
+            "ph": "M",
+            "pid": 0,
+            "tid": _PP_OVERVIEW_TID,
+            "args": {"sort_index": -100},
+        },
+    ]
+    track_names_by_tid = _collect_track_names(trace_events)
+    # Total slice first so per-stage/comm slices nest inside it as children.
+    overview_events.append(
+        {
+            "name": f"PP Pipeline Total ({num_stages} stages)",
+            "cat": "pipeline_overview",
+            "ph": "X",
+            "ts": overview_start_us,
+            "dur": overview_end_us - overview_start_us,
+            "pid": 0,
+            "tid": _PP_OVERVIEW_TID,
+            "args": {
+                "pipeline_stage_count": num_stages,
+                "trace_start_ms": round(overview_start_us * _MS_PER_US, 3),
+                "trace_end_ms": round(overview_end_us * _MS_PER_US, 3),
+            },
+        }
+    )
+    for tid in sorted(ranges_us_by_tid):
+        if tid == _PP_OVERVIEW_TID:
+            continue
+        start_us, end_us = ranges_us_by_tid[tid]
+        overview_events.append(
+            {
+                "name": track_names_by_tid.get(tid, f"PP track {tid}"),
+                "cat": "pipeline_overview",
+                "ph": "X",
+                "ts": start_us,
+                "dur": end_us - start_us,
+                "pid": 0,
+                "tid": _PP_OVERVIEW_TID,
+                "args": {
+                    "trace_start_ms": round(start_us * _MS_PER_US, 3),
+                    "trace_end_ms": round(end_us * _MS_PER_US, 3),
+                },
+            }
+        )
+    trace_events.extend(overview_events)
+
+
+def _collect_track_names(trace_events: list[dict]) -> dict[int, str]:
+    """Map tid -> track display name from thread_name metadata events."""
+    names: dict[int, str] = {}
+    for trace_event in trace_events:
+        if trace_event.get("ph") == "M" and trace_event.get("name") == "thread_name":
+            names[int(trace_event["tid"])] = str(trace_event.get("args", {}).get("name", ""))
+    return names
+
+
+def _suffix_track_names_with_ranges(trace_events: list[dict], ranges_us_by_tid: dict[int, list[int]]) -> None:
+    """Append each track's shifted time range to its thread_name metadata."""
+    for trace_event in trace_events:
+        if trace_event.get("ph") != "M" or trace_event.get("name") != "thread_name":
+            continue
+        tid = trace_event.get("tid")
+        bounds = ranges_us_by_tid.get(tid)
+        if bounds is None:
+            continue
+        name = str(trace_event.get("args", {}).get("name", ""))
+        if not name or "[" in name:
+            continue
+        trace_event["args"] = dict(trace_event.get("args", {}))
+        trace_event["args"]["name"] = f"{name} [{_format_trace_range_us(bounds[0], bounds[1])}]"
 
 
 def _tag_trace_events(

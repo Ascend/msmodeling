@@ -22,6 +22,7 @@ import copy
 import contextlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -73,6 +74,7 @@ from tensor_cast.pipeline_parallel import (
     _stage_latency_breakdown_entries,
     _stage_outgoing_comm_times,
     _stage_boundary_ranks,
+    _PP_OVERVIEW_TID,
 )
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.utils import get_attention_quant_config
@@ -1513,7 +1515,102 @@ def test_pipeline_runner_exports_pp_trace_with_global_timeline_and_tracks():
         for event in result.trace_events
         if event.get("ph") == "M" and event.get("name") == "thread_name"
     }
-    assert {"PP Stage 0", "PP Stage 1", "PP Comm 0->1"}.issubset(thread_names)
+    # Track names carry a "[start-end ms]" range suffix appended by the global
+    # timeline builder; compare on the base names.
+    base_track_names = {name.split(" [")[0] for name in thread_names}
+    assert {"PP Stage 0", "PP Stage 1", "PP Comm 0->1"}.issubset(base_track_names)
+
+
+def test_pipeline_runner_pp_trace_exposes_overview_track_and_track_ranges():
+    model = _make_pipeline_model(num_layers=4, pp_size=2, world_size=4)
+    runner = PipelineRunner(
+        model=model,
+        perf_models=[_ConstantPerformanceModel()],
+        device_profile=DeviceProfile.all_device_profiles["TEST_DEVICE"],
+    )
+
+    result = runner.run(_make_pipeline_input_kwargs(num_layers=4))
+    complete_events = [event for event in result.trace_events if event.get("ph") == "X"]
+    op_events = [event for event in complete_events if event.get("cat") != "pipeline_overview"]
+
+    overview_events = [event for event in complete_events if event.get("tid") == _PP_OVERVIEW_TID]
+    overview_slices = [event for event in overview_events if event.get("ph") == "X"]
+    assert {event["name"] for event in overview_slices} == {
+        "PP Pipeline Total (2 stages)",
+        "PP Stage 0",
+        "PP Stage 1",
+        "PP Comm 0->1",
+    }
+    total_slices = [event for event in overview_slices if event["name"] == "PP Pipeline Total (2 stages)"]
+    assert len(total_slices) == 1
+    total = total_slices[0]
+    assert total["args"]["pipeline_stage_count"] == 2
+
+    # The total slice must cover every shifted op event so the full pipeline
+    # extent is visible no matter which time window the viewer opens on.
+    op_start_us = min(event["ts"] for event in op_events)
+    op_end_us = max(event["ts"] + event["dur"] for event in op_events)
+    assert total["ts"] <= op_start_us
+    assert total["ts"] + total["dur"] >= op_end_us
+
+    # Per-stage/comm overview slices nest inside the total slice.
+    for event in overview_slices:
+        if event is total:
+            continue
+        assert event["ts"] >= total["ts"]
+        assert event["ts"] + event["dur"] <= total["ts"] + total["dur"]
+    stage1_overview = next(event for event in overview_slices if event["name"] == "PP Stage 1")
+    assert stage1_overview["args"]["trace_start_ms"] > 0
+
+    # Track names carry the shifted time range so a partial initial view can
+    # still reveal where each stage's events live.
+    range_pattern = re.compile(r"^PP (Stage \d+|Comm \d+->\d+) \[(\d+\.\d+)-(\d+\.\d+) ms\]$")
+    all_track_names = [
+        str(event.get("args", {}).get("name", ""))
+        for event in result.trace_events
+        if event.get("ph") == "M" and event.get("name") == "thread_name"
+    ]
+    ranged_names = {name for name in all_track_names if range_pattern.match(name)}
+    assert len(ranged_names) == 3
+    ranges_by_prefix = {}
+    for name in ranged_names:
+        match = range_pattern.match(name)
+        ranges_by_prefix[match.group(1)] = (float(match.group(2)), float(match.group(3)))
+    assert ranges_by_prefix["Stage 1"][0] >= ranges_by_prefix["Stage 0"][1]
+    assert any(name.startswith("PP Overview (") for name in all_track_names)
+
+
+def test_pipeline_runner_chrome_trace_export_writes_display_time_unit_and_layout_summary(tmp_path, capsys):
+    model = _make_pipeline_model(num_layers=4, pp_size=2, world_size=4)
+    runner = PipelineRunner(
+        model=model,
+        perf_models=[_ConstantPerformanceModel()],
+        device_profile=DeviceProfile.all_device_profiles["TEST_DEVICE"],
+    )
+    result = runner.run(_make_pipeline_input_kwargs(num_layers=4))
+
+    trace_path = tmp_path / "pp_trace.json"
+    PipelineRunner.export_chrome_trace(str(trace_path), result.trace_events)
+
+    with open(trace_path, encoding="utf-8") as f:
+        exported = json.load(f)
+    assert exported["displayTimeUnit"] == "ms"
+    assert exported["traceEvents"]
+    assert any(event.get("tid") == _PP_OVERVIEW_TID for event in exported["traceEvents"])
+
+    captured = capsys.readouterr().out
+    assert "PP chrome trace layout" in captured
+    assert "PP Stage 0 [" in captured
+    assert "PP Stage 1 [" in captured
+    assert "Fit all" in captured
+    # Each segment carries exactly one range suffix (no doubled "[..] [..]").
+    assert "ms] [" not in captured
+    assert "] -> " in captured
+    # The overview track is covered by the trailing full-pipeline-range sentence,
+    # so it must not also appear as a layout segment with a repeated range.
+    segments = captured.split("timeline): ", 1)[1].split("; full pipeline range", 1)[0]
+    assert "PP Overview" not in segments
+    assert "'PP Overview'" in captured
 
 
 def test_pipeline_runner_uses_stage_consistent_memory_accounting():
@@ -1808,6 +1905,7 @@ def test_pipeline_parallel_single_module_has_coverage_visible_entrypoints(tmp_pa
     trace_path = tmp_path / "pipeline_trace.json"
     PipelineRunner.export_chrome_trace(str(trace_path), [{"name": "pipeline-stage"}])
     assert json.loads(trace_path.read_text(encoding="utf-8")) == {
+        "displayTimeUnit": "ms",
         "traceEvents": [{"name": "pipeline-stage"}],
     }
 

@@ -519,6 +519,15 @@ For Decode, set `--decode` (and do not also set `--prefill` — the two are mutu
 
 `Memory available < 0` means that the target device cannot hold the current configuration. Adjust the model, parallel strategy, `--num-queries`, `--image-batch-size`, or sequence length.
 
+##### Why do later PP stage tracks in the Chrome trace look empty?
+
+When pipeline parallelism (`--pp-size > 1`) is enabled, Chrome trace stages are laid out on the timeline in the serial single-request execution order: Stage 0 events start at the beginning of the timeline, and later stages follow one after another. If the viewer opens on a partial time window covering only the first part of the timeline, later stage tracks exist but their events sit to the right of the window, so the tracks look empty. This is a presentation effect, not a failed stage or a missing export. To confirm:
+
+- The `PP Overview` track in the trace provides a `PP Pipeline Total` slice covering the full pipeline time range, with nested slices showing the actual time range of each stage and inter-stage communication;
+- Each track name carries a time range suffix, for example `PP Stage 1 [22.221-42.063 ms]`;
+- The layout summary with per-stage time ranges is printed when the trace is exported;
+- Use Fit all / zoom-out in the viewer so the time window covers the full pipeline.
+
 ### 4.2 Video Generation
 
 We provide the `video_generate.py` CLI to simulate the forward pass and performance of diffusion transformer models. This script supports simulating the inference of video generation models (for example, Stable Video Diffusion-like architectures) with configurable input dimensions, sampling steps, and parallelism settings. A detailed table summary of the operator performance breakdown is provided by default. You can also choose to export the performance timeline as a Chrome Trace file.
