@@ -510,3 +510,21 @@ class TestValidateCaseForModule:
         error, fields = validate_case_for_module("text_generate", params, {"num-speculative-tokens"})
         assert error is not None
         assert "speculative-method" in error
+
+    def test_issue_496_single_token_with_hit_rate_passes(self):
+        """Issue #496 regression: single-token queries with a prefix cache hit
+        rate pass L2 validation in both phases (decode ignores the rate).
+        """
+        base = {
+            "model-id": "test-model",
+            "num-devices": 1,
+            "num-queries": 1,
+            "query-length": 1,
+            "prefix-cache-hit-rate": 0.5,
+        }
+        error, _ = validate_case_for_module("text_generate", dict(base), set())
+        assert error is None
+
+        decode_case = dict(base, decode=True)
+        error, _ = validate_case_for_module("text_generate", decode_case, {"decode"})
+        assert error is None

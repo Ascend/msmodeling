@@ -21,6 +21,7 @@ Return None on success, str (error message) on failure.
 """
 
 import logging
+import math
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -152,7 +153,11 @@ def per_layer_product_eq_num_devices(params: dict[str, Any]) -> str | None:
 
 
 def effective_len_ge1(params: dict[str, Any]) -> str | None:
-    """floor(len × (1 - prefix_cache_hit_rate)) ≥ 1.
+    """length - floor(length × prefix_cache_hit_rate) ≥ 1.
+
+    Mirrors UserInputConfig.get_request_info: the cached prefix is floored
+    first, then subtracted from the full length. Decode phase ignores the
+    hit rate (get_effective_prefix_cache_hit_rate returns 0.0 for decode).
 
     Args:
         params: Dict keyed by kebab-case param names.
@@ -171,7 +176,9 @@ def effective_len_ge1(params: dict[str, Any]) -> str | None:
     rate = params.get("prefix-cache-hit-rate")
     if rate is None:
         rate = 0
-    effective = int(length * (1 - rate))
+    if params.get("decode") is True:
+        rate = 0
+    effective = length - math.floor(length * rate)
 
     if effective >= 1:
         return None
@@ -340,7 +347,11 @@ def valid_parallel_combo(params: dict[str, Any]) -> str | None:
 
 
 def effective_len_ge1_to(params: dict[str, Any]) -> str | None:
-    """floor(input_length × (1 - prefix_cache_hit_rate)) ≥ 1 (throughput variant).
+    """input_length - floor(input_length × prefix_cache_hit_rate) ≥ 1 (throughput variant).
+
+    Mirrors OptimizerData.get_effective_input_length: floor the cached prefix
+    first, then subtract. input_length is the prefill-side length, so the hit
+    rate always applies (no decode phase flag in throughput_optimizer).
 
     Args:
         params: Dict keyed by kebab-case param names.
@@ -356,7 +367,10 @@ def effective_len_ge1_to(params: dict[str, Any]) -> str | None:
     if rate is None:
         rate = 0
     try:
-        effective = int(int(length) * (1 - float(rate)))
+        # input-length may be a YAML distribution path (string); int() raises
+        # and the check is skipped for that case.
+        length_int = int(length)
+        effective = length_int - math.floor(length_int * float(rate))
     except (ValueError, TypeError):
         return None
     if effective >= 1:

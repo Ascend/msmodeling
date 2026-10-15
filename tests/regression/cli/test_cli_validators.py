@@ -28,6 +28,7 @@ from unittest.mock import patch
 
 import pytest
 
+from cli.registry import validators as V
 from cli.registry.argparse_adapter import build_argparser, parse_module_args
 from cli.registry.modules import get_spec
 from tests.helpers.cli_runner import run_cli_main
@@ -205,6 +206,141 @@ class TestValidatorIntegration:
             ],
         )
         assert ns.model_id == "test-model"
+
+
+# ── effective_len_ge1 rounding parity (issue #496) ───────────────────
+
+
+class TestEffectiveLenGe1:
+    """effective_len_ge1 matches UserInputConfig.get_request_info rounding.
+
+    Formula: length - floor(length × rate) ≥ 1 — the cached prefix is floored
+    first, then subtracted; decode phase ignores the hit rate (mirrors
+    get_effective_prefix_cache_hit_rate). Regression for issue #496: the old
+    int(length × (1 - rate)) truncated the remaining fraction and wrongly
+    rejected single-token queries at hit rate 0.5.
+    """
+
+    _ISSUE_BASE_ARGS = [
+        "--model-id",
+        "tests/assets/model_config/qwen3_dense_0_6b",
+        "--device",
+        "TEST_DEVICE",
+        "--num-devices",
+        "1",
+        "--num-queries",
+        "1",
+        "--query-length",
+        "1",
+        "--context-length",
+        "128",
+    ]
+
+    def _parse(self, module_id: str, argv: list[str]):
+        """Run parse_module_args with given argv, capture SystemExit."""
+        spec = get_spec(module_id)
+        parser = build_argparser(spec)
+        with patch.object(sys, "argv", ["prog", *argv]):
+            return parse_module_args(spec, parser)
+
+    # -- unit level: effective_len_ge1 (text_generate) --
+
+    @pytest.mark.parametrize(
+        ("length", "rate"),
+        [
+            (1, 0.0),
+            (1, 0.5),  # issue #496: int(1 × 0.5) == 0 rejected this before
+            (1, 0.9),
+            (2, 0.6),
+            (10, 0.91),  # issue #496: high hit rate on a short length
+            (128, 0.99),
+        ],
+    )
+    def test_prefill_boundaries_pass(self, length, rate):
+        """length - floor(length × rate) ≥ 1 holds for any rate < 1."""
+        params = {"query-length": length, "prefix-cache-hit-rate": rate}
+        assert V.effective_len_ge1(params) is None
+
+    @pytest.mark.parametrize("length", [1, 2, 128])
+    def test_prefill_rate_one_rejected(self, length):
+        """Rate 1 caches every token → effective length 0 → rejected."""
+        params = {"query-length": length, "prefix-cache-hit-rate": 1.0}
+        msg = V.effective_len_ge1(params)
+        assert msg is not None
+        assert "effective length must be ≥ 1" in msg
+
+    @pytest.mark.parametrize("rate", [0.5, 1.0])
+    def test_decode_ignores_rate(self, rate):
+        """Decode phase ignores the hit rate entirely."""
+        params = {"query-length": 1, "prefix-cache-hit-rate": rate, "decode": True}
+        assert V.effective_len_ge1(params) is None
+
+    @pytest.mark.parametrize("decode", [None, False])
+    def test_prefill_phase_still_applies_rate(self, decode):
+        """Without an explicit decode flag the rate applies (default prefill)."""
+        params = {"query-length": 1, "prefix-cache-hit-rate": 1.0, "decode": decode}
+        assert V.effective_len_ge1(params) is not None
+
+    def test_missing_or_zero_length_skipped(self):
+        """No/zero length (throughput-less context) skips the check."""
+        assert V.effective_len_ge1({"prefix-cache-hit-rate": 0.5}) is None
+        assert V.effective_len_ge1({"query-length": 0, "prefix-cache-hit-rate": 0.5}) is None
+
+    def test_missing_rate_defaults_to_zero(self):
+        assert V.effective_len_ge1({"query-length": 1}) is None
+
+    # -- unit level: effective_len_ge1_to (throughput) --
+
+    @pytest.mark.parametrize(
+        ("length", "rate"),
+        [
+            (1, 0.5),
+            (2, 0.6),
+            (10, 0.91),
+        ],
+    )
+    def test_throughput_boundaries_pass(self, length, rate):
+        """Same rounding as OptimizerData.get_effective_input_length."""
+        params = {"input-length": length, "prefix-cache-hit-rate": rate}
+        assert V.effective_len_ge1_to(params) is None
+
+    def test_throughput_rate_one_rejected(self):
+        params = {"input-length": 1, "prefix-cache-hit-rate": 1.0}
+        msg = V.effective_len_ge1_to(params)
+        assert msg is not None
+        assert "effective input length must be ≥ 1" in msg
+
+    def test_throughput_yaml_path_skipped(self):
+        """input-length may be a YAML distribution path; the check is skipped."""
+        params = {"input-length": "length_dist.yaml", "prefix-cache-hit-rate": 0.5}
+        assert V.effective_len_ge1_to(params) is None
+
+    # -- CLI level: the four issue #496 commands parse successfully --
+
+    @pytest.mark.parametrize("rate", ["0", "0.5"])
+    @pytest.mark.parametrize("phase_flag", ["--prefill", "--decode"])
+    def test_issue_496_commands_parse(self, phase_flag, rate):
+        """Issue #496 repro matrix: query-length 1 × both phases × rate {0, 0.5}."""
+        ns = self._parse(
+            "text_generate",
+            [
+                *self._ISSUE_BASE_ARGS,
+                phase_flag,
+                "--prefix-cache-hit-rate",
+                rate,
+            ],
+        )
+        assert ns.query_length == 1
+
+    def test_issue_496_rate_one_still_rejected(self, capsys):
+        """Rate 1 stays invalid: the param declares exclusive_max=1."""
+        with pytest.raises(SystemExit) as exc_info:
+            self._parse(
+                "text_generate",
+                [*self._ISSUE_BASE_ARGS, "--prefill", "--prefix-cache-hit-rate", "1"],
+            )
+        assert exc_info.value.code == 2
+        assert "must be < 1" in capsys.readouterr().err
 
 
 # ── Validator contract ───────────────────────────────────────────────
