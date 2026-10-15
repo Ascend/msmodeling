@@ -425,6 +425,8 @@ You can configure the number of seeds and iterations based on the estimated time
 |service|Yes|Marks whether the node is the primary node or the secondary node in multi-node startup. In multi-node scenarios, set the secondary node to `slave`. The options are as follows:<br>&#8226;`master`: primary node<br/>&#8226;`slave`: secondary node,<br/>The default value is `master`.|
 |sample_size|No|Sampling size of the original dataset. Using the sampled data for tuning can improve optimization efficiency. Value range: an integer from 1000 to 10000. You are advised to set it to 1/3 of the requests in the original dataset.|
 
+When `ttft_penalty > 0` and `tpot_penalty = 0`, final selection chooses the highest output token throughput among verified candidates whose TTFT is strictly below `ttft_slo`. If none qualify, it chooses the candidate with the smallest TTFT deviation from the limit. TPOT does not filter candidates in this mode. The strict SLO boundary matches the existing TPOT-only and dual-constraint selectors.
+
 `use_request_rate_calibration` determines how the two special fields `CONCURRENCY` and `REQUESTRATE` participate in PSO:
 
 |Value|Description|CONCURRENCY|REQUESTRATE|

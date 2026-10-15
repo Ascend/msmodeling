@@ -165,6 +165,8 @@ Agent 模式下，工具不在内部运行 PSO，而是从 `[agent_optimizer].ru
 |`optimizer_strategy`|可选| 寻优模式，取值 `pso`（默认）或 `agent`，详见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。|
 |`use_request_rate_calibration`|可选| 是否对 `REQUESTRATE` 做实测校准，默认 `true`。详见下方说明。                                                                  |
 
+当 `ttft_penalty > 0` 且 `tpot_penalty = 0` 时，最终选择器会从 TTFT 严格低于 `ttft_slo` 的已验证候选中选择输出 token 吞吐最高的一组；若没有这样的候选，则选择 TTFT 最接近上限的一组。此模式不按 TPOT 筛选候选，SLO 边界规则与现有 TPOT-only 和双约束选择器一致。
+
 **`use_request_rate_calibration` 两种模式**：该开关决定 `CONCURRENCY` 与 `REQUESTRATE` 两个特殊字段在 PSO 中的行为。
 
 |取值| 说明                            |CONCURRENCY|REQUESTRATE|

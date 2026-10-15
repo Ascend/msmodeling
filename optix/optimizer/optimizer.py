@@ -662,6 +662,21 @@ class PSOOptimizer(PerformanceTuner):
                 params_list[_best_index],
                 performance_index_list[_best_index],
             )
+        if self.ttft_penalty != 0 and self.tpot_penalty == 0:
+            _ttft_threshold = self.fine_tune.ttft_upper_bound
+            if _ttft_threshold == 0:
+                return fitnese_list[0], params_list[0], performance_index_list[0]
+            _ttft_diff = [(p.time_to_first_token - _ttft_threshold) / _ttft_threshold for p in performance_index_list]
+            _ttft_lt_slo_index = [i for i, v in enumerate(_ttft_diff) if v < 0]
+            if _ttft_lt_slo_index:
+                _best_index = self.get_max_generate_speed_index(performance_index_list, _ttft_lt_slo_index)
+            else:
+                _best_index = _ttft_diff.index(min(_ttft_diff))
+            return (
+                fitnese_list[_best_index],
+                params_list[_best_index],
+                performance_index_list[_best_index],
+            )
         if self.ttft_penalty == 0 and self.tpot_penalty != 0:
             _tpot_threshold = self.fine_tune.tpot_upper_bound
             if _tpot_threshold == 0:
