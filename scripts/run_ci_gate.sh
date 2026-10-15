@@ -42,6 +42,8 @@
 # Config full-suite triggers: requirements.txt, uv.lock, tests/**/conftest.py, pyproject.toml, etc.
 #   (see tests/.ci/gate_policy.yaml configs). gate_policy.yaml / scripts/helpers product edits
 #   do NOT trigger full suite — helpers under roots are incremental product source.
+# Skill unit tests: .agents/skills/optix-assistant/scripts/ is outside gate_policy.yaml
+#   roots and pytest testpaths, so its test_*.py run here unconditionally after the gate.
 set -euo pipefail
 
 if [[ -z "${MSMODELING_TEST_MAP_PATH:-}" ]]; then
@@ -57,4 +59,16 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
-run_py "${HELPERS_DIR}/ci_gate/main.py"
+ci_gate_status=0
+run_py "${HELPERS_DIR}/ci_gate/main.py" || ci_gate_status=$?
+
+skill_tests_status=0
+run_pytest "${PROJECT_DIR}/.agents/skills/optix-assistant/scripts/" \
+  -q \
+  --tb=short \
+  || skill_tests_status=$?
+
+if [[ ${ci_gate_status} -ne 0 || ${skill_tests_status} -ne 0 ]]; then
+  echo "Error: ci_gate exit=${ci_gate_status}, skill tests exit=${skill_tests_status}" >&2
+  exit 1
+fi

@@ -53,6 +53,8 @@ JSON_SUBKEY_MAP = {
 #: --request-rate in `vllm bench serve`). They are NOT vLLM serve flags and must
 #: never render into the serve command. Kept in ONE place so the serve-side
 #: rendering and the benchmark-side env handling never drift.
+#: Env-position fields never reach here: scheduler.update_data_field() forwards
+#: run-position fields only; env fields go to process env (_prepare_run_params).
 BENCHMARK_ONLY_FIELDS = {"CONCURRENCY", "REQUESTRATE"}
 
 #: vLLM serve capacity fields that were historically hardcoded. Rendering is

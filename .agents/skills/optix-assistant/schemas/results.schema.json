@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/optix-assistant/results.schema.json",
+  "title": "Optix Assistant Results",
+  "description": "某一轮已执行候选的规范化实测结果，由 optix（agentic strategies._write_results）直接写入，是已完成 trial 结果的权威来源。",
+  "type": "object",
+  "required": [
+    "round",
+    "trials"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "round": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "本文件对应的轮次编号，与文件名中的 N 一致。"
+    },
+    "validation": {
+      "type": "object",
+      "description": "optix 候选校验汇总（valid_count/invalid_count/candidates[]），可选。",
+      "additionalProperties": true
+    },
+    "trials": {
+      "type": "array",
+      "description": "每个候选对应一条规范化 trial 结果，失败的执行也必须包含在内。字段与 optix TrialResult.to_dict() 对齐。",
+      "items": {
+        "type": "object",
+        "required": [
+          "candidate_id",
+          "fitness"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "description": "必须与 candidates.round-N.json 中的 candidate_id 对应。"
+          },
+          "params": {
+            "type": "object",
+            "description": "该 trial 实际生效的参数快照。",
+            "additionalProperties": true
+          },
+          "fitness": {
+            "description": "optix 软约束加权适应度，越小越优；执行失败时为 Infinity。硬约束场景不得作为第一排序键。"
+          },
+          "performance": {
+            "type": ["object", "null"],
+            "description": "实测性能：generate_speed（输出吞吐 tok/s）、time_to_first_token、time_per_output_token、success_rate、throughput（req/s）。失败 trial 字段可为 null。",
+            "additionalProperties": true
+          },
+          "error": {
+            "type": ["string", "null"],
+            "description": "失败时的错误摘要（含命令与日志尾巴），成功时为 null。"
+          },
+          "source": {
+            "type": "string"
+          },
+          "elapsed_seconds": {
+            "type": "number"
+          },
+          "early_exit": {
+            "type": "boolean",
+            "description": "是否提前退出；early_exit 的 trial 不参与判优。"
+          },
+          "would_early_exit": {
+            "type": "boolean"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "slo_violated": {
+            "type": ["boolean", "null"],
+            "description": "是否违反任一硬约束（TPOT/TTFT SLO）。判优第一排序键：false 的候选池优先。"
+          },
+          "failure": {
+            "type": ["object", "null"],
+            "description": "结构化失败分类（optix 正则表确定性分类）：category/sub_category/message/evidence_line/offending_params/suggested_action/suggested_bounds。执行成功时缺省或为 null。",
+            "additionalProperties": true
+          },
+          "metrics": {
+            "type": "object",
+            "description": "benchmark 特定的扩展实测指标；指标名和取值均可扩展。",
+            "additionalProperties": true
+          },
+          "constraint_checks": {
+            "type": "array",
+            "description": "逐条约束的评估结果（分析侧扩展字段）。每个条目至少含 metric、statistic、actual、threshold、op、margin、passed。判定只依据该条目声明的 statistic。"
+          },
+          "feasibility": {
+            "type": "object",
+            "description": "汇总后的可接受性判定（分析侧扩展字段）。max_violation_ratio 定义为 max(0, (actual-threshold)/threshold)（上限约束；下限约束对称），无违反时为 0。硬约束可行性优先于 fitness。",
+            "additionalProperties": true
+          },
+          "objective_values": {
+            "type": "object",
+            "description": "用于对可行候选排序的目标取值（分析侧扩展字段）。",
+            "additionalProperties": true
+          },
+          "evidence_ref": {
+            "type": "string",
+            "description": "指向外部 trial 日志或证据的引用，不是日志内容本身。"
+          }
+        }
+      }
+    }
+  }
+}

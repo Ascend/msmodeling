@@ -66,7 +66,7 @@ GitCode 配置：
 | `throughput-optimizer-executor` | "搜索最佳 TP/EP"、"硬件对比"、"PD 配比优化" | 生成并执行 `python -m cli.inference.throughput_optimizer` 吞吐规划命令 |
 | `throughput-optimizer-explainer` | "结果是否合理"、"为什么硬件不同"、"Cube/Vec/Comm/Mem 瓶颈" | 解释 optimizer 结果，并将 best row 映射到 `text_generate` 验证命令 |
 | `optix-deploy` | "部署 optix"、"安装服务化自动寻优工具" | 安装并验证 msmodeling optix 服务化自动寻优工具 |
-| `optix-assistant` | "optix 寻优"、"optix 调参"、"跑一轮参数优化"、"optix agent 模式"、配置 config.toml、推荐 optix 参数 | OptiX 服务化实测参数自动寻优完整闭环（PSO/agent 双模式）：config 预检、上下文采集、经验注入、候选生成、执行、收敛、判优、最佳配置导出。**入口先读 `SKILL.md` + `workflows/agent.md`**（执行流程）+ **`references/agent-mode.md`**（行为契约；agent 模式两文件均须完整阅读），含 `use_request_rate_calibration=false` 等 agent 模式专属约定，避免重新理解项目。旧 `optix-config`/`optix-param-recommend` 已删除并归并至此 |
+| `optix-assistant` | "optix 寻优"、"optix 调参"、"跑一轮参数优化"、"optix agent 模式"、配置 config.toml、推荐 optix 参数 | OptiX 服务化实测参数自动寻优完整闭环（config/PSO/agent 三模式）：config 预检、上下文采集、方法卡参数选择、候选生成、执行、收敛、判优、最佳配置导出。**入口先读 `SKILL.md`**（路由与共享前置）；PSO 模式接 `references/pso-mode.md`；agent 模式接 `workflows/agent.md`（阶段细节随 `workflows/` 下 environment-preparation/execution-validation/data-analysis 阅读），含 `use_request_rate_calibration=false` 等 agent 模式专属约定，避免重新理解项目。agent 模式的候选生成与失败恢复结合 `knowledge/` 知识库。旧 `optix-config`/`optix-param-recommend` 已删除并归并至此 |
 | `sig-review` | "请求检视"、"启动合入"、"检视PR {number}"、"review PR {number}"、"分析PR {number}的检视意见" | 评论 /merge 启动合入流程（后台 MergeTrack 工具跟踪后续状态）、代码检视、检视意见分析，不指派 assignee，支持 cursor/claude code/opencode/codex 等各类 agent |
 
 完整工作流负责组合能力；Issue、PR、Pipeline 和领域 Skills 仍可被独立触发。

@@ -121,18 +121,17 @@ Agent 模式下，工具不在内部运行 PSO，而是从 `[agent_optimizer].ru
 |`run_id`|`"default"`|寻优运行标识，候选与结果文件按该标识组织于运行目录中。|
 |`run_dir`|空|运行目录，留空时自动解析为 `.agent_optimizer/runs/{run_id}`。|
 |`max_rounds`|`32`|最大寻优轮数，达到后自然终止。|
-|`candidates_per_round`|`0`|单轮候选数量，`0` 表示由 agent 根据上一轮结果动态决定，大于 0 时按固定数量执行。|
 |`max_trials`|`12`|单轮执行的 trial 数量上限，超出部分不执行。|
 |`time_limit_minutes`|`1440`|单轮执行 trial 的时长上限（分钟），默认 1440；全局预算由 agent 跨轮累计。|
 |`convergence_rounds`|`6`|触发收敛检测所需的连续无显著改善轮数。|
 |`min_rounds`|`4`|收敛前至少完成的寻优轮数。|
-|`min_trials`|`12`|收敛前至少完成的 trial 数。|
+|`min_trials`|`4`|收敛前至少完成的 trial 数。Agent 模式每轮 1 个 trial，与 `min_rounds` 等价，取较大者生效。|
 
-推荐通过 **`optix-assistant` 寻优 skill** 使用 Agent 模式。该 skill 提供配置预检（config_preflight）、上下文采集（collect_context）、经验注入（experience_injector）与最优配置导出（export_best_config）等配套脚本，并对候选生成、失败分析与判优规则遵循统一的行为契约。典型使用流程：
+推荐通过 **`optix-assistant` 寻优 skill** 使用 Agent 模式。该 skill 提供配置预检（config_preflight）、上下文采集（collect_context）、配置参数检查（check_search_space）与最优配置导出（export_best_config）等配套脚本，并对候选生成、失败分析与判优规则遵循统一的行为契约。典型使用流程：
 
 1. 按[环境准备与安装](#4-环境准备与安装)完成安装，并确认部署栈可用；
 2. 通过 `optix-assistant` skill 进入 Agent 模式，按提示选择全自动或交互式执行方式；
-3. 完成配置预检后，由 agent 逐轮生成候选、执行实测并汇总结果，收敛后导出最优配置与最终报告。
+3. 完成配置预检与上下文采集后，agent 按目标路由读取方法卡；基础配置通过 `config_writer` 登记到 TOML，每轮更新 `context.search_space`，候选 `params` 只写取值。校验后执行实测；每轮进程退出后，将 context.json 复制为 context.round-N.json，再准备下一轮。收敛后按最佳结果所属轮次的 context 归档导出配置，归档缺失或损坏时拒绝导出。
 
 ## 7. 配置文件说明
 

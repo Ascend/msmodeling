@@ -18,23 +18,25 @@
 
 """Ownership: lib. Shared model/hardware estimation primitives (single implementation).
 
-experience_injector.py 与 recommend_params.py 曾各自实现同一物理量的估算（KV cache
-每 token 占用、模型权重总量、dtype→字节、TP 整除候选），公式存在漂移：如 injector
-支持 MLA/paged 膨胀而 recommend 不支持、weight 兜底公式与单位口径不一、KV dtype
-口径一方按硬件一方按模型。二者在 PSO 会话中先后运行，会对同一模型给出不同的
-safe_batch / max_num_seqs 估值。本模块把这些**物理量公式**收口为单一宿主。
+统一 dtype 字节数、每 token KV 占用、权重总量、KV 预算与 TP 整除候选的计算，
+避免调用方各自维护公式而产生口径漂移。
 
-边界（勿越界）：本模块只算"物理量"，不算"策略"。策略系数——paged 膨胀、block
-粒度并发上界、GMU/reserve/overhead 取值、per_node 上限、TP/PP/DP 工程决策与显存
-裕量判据——仍由各脚本持有（估算一致性的收益来自物理量同源，策略差异是口径声明的
-问题，不该用"策略统一"掩盖）。
+边界（勿越界）：物理量计算与调优策略分开。paged 膨胀是否叠加、block 粒度并发
+上界、GMU/reserve/overhead 取值、per_node 上限、TP/PP/DP 工程决策与显存裕量
+判据由调用方按场景确定。估算一致性来自物理量同源，不应以统一公式为由统一策略。
 
-被依赖：experience_injector.py / recommend_params.py。运行方式为
-``python <scripts>/<name>.py``（sys.path[0]=scripts），同目录模块可直接 import。
+本模块另提供 paged_kv_overhead_ratio、derive_max_model_len、derive_mnbt_candidates、
+derive_gmu_tiers 和 min_tp_by_hbm 等经验辅助函数。其系数、阈值和默认值是经验口径，
+不是物理常数；可配置项由调用方显式传参覆盖，是否采用其结果由调用方决定。
+这些估算不直接生成或裁剪 Agent 的候选搜索空间。
+
+公式与经验口径见 knowledge/modeling-knowledge/methods/common/estimation.md。
+当前由 recommend_params.py 使用；作为同目录库导入，无独立命令行入口。
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List
 
 
@@ -71,6 +73,7 @@ def per_token_kv_bytes(
     model: Dict[str, Any],
     kv_dtype_bytes: float = 2.0,
     tp_size: int = 1,
+    extra_layers: int = 0,
 ) -> Dict[str, Any]:
     """每 token KV cache 占用（物理量，**不含 paged 膨胀**——膨胀是策略系数，
     需要保守口径的调用方经 :func:`paged_kv_overhead_ratio` 自行叠加）。
@@ -83,9 +86,13 @@ def per_token_kv_bytes(
 
     head_dim 解析链：显式 ``head_dim`` / ``kv_head_dim`` → ``hidden_size // n_heads``
     反推 → 128 兜底。kv_heads 缺失时按 MHA（= n_heads）兜底。
-    MLA（``kv_lora_rank`` 或 kv_heads == 1）：latent + rope，每卡复制。
+    MLA（``kv_lora_rank``）：latent + rope，每卡复制——
+    ``per_token_total = (kv_lora_rank + qk_rope_head_dim) × layers × kv_dtype_bytes``
+    （与 knowledge/modeling-knowledge/methods/common/estimation.md §3 一致；``qk_rope_head_dim`` 缺失
+    按 0 计，缺失应由调用方检查，不在此静默兜底）。
+    ``extra_layers``：MTP/投机附加层（``num_next_predicted_layers`` 等），计入层数。
     """
-    layers = model.get("num_hidden_layers", 0) or model.get("num_layers", 0)
+    layers = int((model.get("num_hidden_layers", 0) or model.get("num_layers", 0))) + int(max(0, extra_layers))
     kv_heads = model.get("num_key_value_heads", 0) or model.get("kv_heads", 0)
     head_dim = model.get("head_dim", 0) or model.get("kv_head_dim", 0)
     hidden_size = model.get("hidden_size", 0)
@@ -102,17 +109,14 @@ def per_token_kv_bytes(
     if kv_heads <= 0:
         kv_heads = max(1, n_heads)
 
-    # MLA 检测：有 kv_lora_rank 或 kv_heads == 1（DeepSeek 系 MLA latent 压缩）
-    is_mla = bool(model.get("kv_lora_rank")) or kv_heads == 1
+    # MLA 检测：有 kv_lora_rank（DeepSeek 系 MLA latent 压缩）
+    is_mla = bool(model.get("kv_lora_rank"))
     kv_lora_rank = model.get("kv_lora_rank") or 0
     qk_rope_head_dim = model.get("qk_rope_head_dim") or 0
-    v_head_dim = kv_lora_rank * 2 if kv_lora_rank and is_mla else 0
 
     if is_mla and kv_lora_rank > 0:
-        # DeepSeek MLA：KV cache = kv_lora_rank × layers × (latent + rope)
-        latent_dim = kv_lora_rank * v_head_dim if v_head_dim else kv_lora_rank * 16
-        rope_part = qk_rope_head_dim * 2 if qk_rope_head_dim > 0 else 128
-        per_token_total = (latent_dim + rope_part) * layers
+        # DeepSeek MLA：KV cache = layers × (latent kv_lora_rank + rope) × dtype_bytes
+        per_token_total = (kv_lora_rank + qk_rope_head_dim) * layers * kv_dtype_bytes
         per_token_per_card = per_token_total  # MLA：每卡全量复制
         mechanism = "mla"
     else:
@@ -138,7 +142,7 @@ def paged_kv_overhead_ratio(per_token_total_bytes: int) -> float:
     """vLLM paged KV cache 相对连续分配的经验膨胀系数（按 per-token 规模分档）。
 
     这是"策略系数"但数值与 per-token 规模耦合，随物理量提供便于口径一致；
-    仅需要保守上界的一方（experience_injector 报告）使用，recommend 的
+    仅供需要保守上界的调用方使用，recommend 的
     block 粒度上界自带保守性，不重复叠加。
     """
     if per_token_total_bytes > 90000:
@@ -156,14 +160,17 @@ def estimate_weight_gb(
 
     优先级：
       1. ``num_parameters_billion`` / ``num_parameters``（显式参数，含 MoE 总参）；
-      2. 结构粗算（decoder-only 假设，与 recommend_params 旧兜底同公式）::
+      2. ``estimated_params``（兼容别名，<1e6 视为十亿单位 ×1e9）；
+      3. 结构粗算（decoder-only 假设，与 recommend_params 旧兜底同公式）::
 
-         params = 2×vocab×hidden
-                  + layers×(3×hidden² + 2×hidden×kv_width + 3×hidden×intermediate)
-         kv_width = hidden × kv_heads / heads
+          params = 2×vocab×hidden
+                   + layers×(2×hidden² + 2×hidden×kv_width + 3×hidden×intermediate)
+          kv_width = hidden × kv_heads / heads
+          + MoE：layers × num_experts × 3 × hidden × moe_intermediate
 
-         含 vocab/GQA 拆分，不含 MoE 专家权重（专家层数为路由层×激活专家，
-         需显式参数才准确），估算偏小时调用方应知悉。
+          attn 项与 knowledge/modeling-knowledge/methods/common/estimation.md §3 文档公式一致
+          （Q/O=2h²，K/V=2h·kv_width）；含 vocab/GQA 拆分；MoE 专家项与
+          权重估算公式一致（layers×E×3h×moe_f）。估算偏小时调用方应知悉。
 
     每卡口径由调用方除以 TP（``estimate_weight_gb(model) / tp``）。
     """
@@ -172,6 +179,11 @@ def estimate_weight_gb(
         params = billion * 1e9
     else:
         params = _to_num(model.get("num_parameters"))
+
+    if params <= 0:
+        est = _to_num(model.get("estimated_params"))
+        if est > 0:
+            params = est * (1e9 if est < 1e6 else 1.0)
 
     if params <= 0:
         hidden = _to_num(model.get("hidden_size"))
@@ -184,6 +196,9 @@ def estimate_weight_gb(
         attn_params = hidden * hidden + 2 * hidden * kv_width + hidden * hidden
         mlp_params = 3 * hidden * intermediate
         params = float(vocab * hidden + layers * (attn_params + mlp_params) + vocab * hidden)
+        if _to_num(model.get("num_experts")) > 0:
+            moe_f = _to_num(model.get("moe_intermediate_size")) or max(1.0, intermediate * 0.1)
+            params += layers * _to_num(model.get("num_experts")) * 3 * hidden * moe_f
 
     if params <= 0:
         return 0.0
@@ -198,8 +213,7 @@ def kv_budget_gb(
 ) -> float:
     """每卡可用于 KV cache 的 HBM 预算：``hbm × gmu − weight_per_card − overhead``。
 
-    overhead（非权重/非 KV 的驻留开销）取多少是策略：experience_injector 固定
-    2.0 GB，recommend 用 ``min(8, mem×0.12)`` reserve——各自作为参数传入。
+    overhead 包含非权重、非 KV 的驻留开销，由调用方传入。
     """
     return max(0.0, hbm_gb * gmu - weight_per_card_gb - overhead_gb)
 
@@ -208,12 +222,13 @@ def tp_candidates(
     world_size: int,
     n_heads: int = 0,
     kv_heads: int = 0,
+    allow_copy: bool = False,
 ) -> List[int]:
     """TP 物理整除候选（升序）：world_size 的因数 ∧ ``n_heads % tp == 0`` ∧
-    ``kv_heads % tp == 0``（>0 时检查）。
+    KV 约束——``kv_heads % tp == 0``（按 KV head 切分）或 ``tp % kv_heads == 0``
+    （GQA KV 复制模式，``allow_copy=True`` 时放宽）。
 
-    不含策略过滤（per_node 上限、每卡显存裕量判据），由调用方叠加——
-    experience_injector 再筛"每卡权重放得下"，recommend 再筛 ≤ per_node。
+    per_node 上限、每卡显存裕量等策略过滤由调用方叠加。
     """
     candidates = []
     for tp in range(1, max(1, world_size) + 1):
@@ -221,7 +236,113 @@ def tp_candidates(
             continue
         if n_heads > 0 and n_heads % tp != 0:
             continue
-        if kv_heads > 0 and kv_heads % tp != 0:
+        if kv_heads > 0 and not (kv_heads % tp == 0 or (allow_copy and tp % kv_heads == 0)):
             continue
         candidates.append(tp)
     return candidates
+
+
+def derive_max_model_len(
+    biz_len: int,
+    model_upper: int = 0,
+    hbm_ceiling_tokens: int = 0,
+    growth: float = 1.3,
+    lower_ratio: float = 1.025,
+) -> Dict[str, Any]:
+    """max_model_len 派生（knowledge/modeling-knowledge/methods/common/estimation.md §5 口径）。
+
+    - ``default ≡ biz_len × growth``（30% 经验缓冲）
+    - ``lower ≡ biz_len × lower_ratio``
+    - ``upper ≡ model_upper（max_position_embeddings）``；模型无上限时用
+      ``hbm_ceiling_tokens``（HBM 能容纳的 KV token 上界）钳制；两者皆无 → upper=default
+    - 各值钳入 [biz_len, upper]；返回 tier 档位（lower→upper 最多 8 档，含端点）
+    """
+    biz = max(1, int(biz_len))
+    default = max(biz, int(biz * growth))
+    lower = max(biz, int(biz * lower_ratio))
+    if model_upper > 0:
+        upper = int(model_upper)
+    elif hbm_ceiling_tokens > 0:
+        upper = int(hbm_ceiling_tokens)
+    else:
+        upper = default
+    upper = max(upper, biz)
+    default = min(default, upper)
+    lower = min(lower, default)
+    span = max(1, upper - lower)
+    tiers = sorted({lower + round(span * i / 7) for i in range(8)} | {default})
+    return {"lower": lower, "default": default, "upper": upper, "tiers": tiers}
+
+
+def derive_mnbt_candidates(
+    mml: int,
+    mns_max: int,
+    hw_mnbt_cap: int = 65536,
+    align: int = 128,
+    align_base: int = 1,
+    max_count: int = 12,
+    chunked_prefill: bool = False,
+) -> List[int]:
+    """max_num_batched_tokens 候选枚举（vLLM 硬约束 + 128 对齐，knowledge/modeling-knowledge/methods/common/estimation.md §7 口径）。
+
+    CP 关闭（默认）：调度器必须一步装下整条请求，区间
+    ``[align(mml, align_base), min(hw_mnbt_cap, max(下界, mns_max × mml))]``；
+    CP 开启（chunked prefill，async-scheduling 隐含）：请求可切块，下界放宽为
+    decode 预留（每步所有在跑序列各 1 token，即 MNBT ≥ MNS 硬约束）——
+    区间 ``[align(mns_max, align_base), 同上 upper]``。
+    区间内按 ×2 几何步进取 128 对齐档，末尾补 upper 对齐档（含 ``max_count`` 截断）。
+    """
+    mml = max(1, int(mml))
+    mns_max = max(1, int(mns_max))
+
+    def _align(x: int, a: int) -> int:
+        return int(math.ceil(x / max(1, a)) * a)
+
+    if chunked_prefill:
+        lower = _align(mns_max, max(1, align_base))
+    else:
+        lower = _align(mml, max(1, align_base))
+    upper = min(max(1, int(hw_mnbt_cap)), max(lower, mns_max * mml))
+    vals: List[int] = []
+    x = lower
+    while x <= upper and len(vals) < max(1, max_count):
+        vals.append(_align(x, align))
+        x *= 2
+    if upper not in vals:
+        vals.append(_align(upper, align))
+    return sorted(set(vals))
+
+
+def derive_gmu_tiers(
+    arch: str = "dense",
+    quant_bpp: float = 2.0,
+    user_gmu: float = 0.0,
+) -> Dict[str, Any]:
+    """gpu_memory_utilization 档位（knowledge/modeling-knowledge/methods/common/estimation.md §6 口径）。
+
+    Dense 围绕 0.9 四档 ``[0.88, 0.90, 0.92, 0.94]``；MoE 权重占比大 → 整体下移
+    0.02（``[0.86, 0.88, 0.90, 0.92]``）；量化 ≤1 字节（FP8/INT8/INT4）权重驻留
+    小 → 上移 0.02（上限 0.96）。``user_gmu∈(0,1]`` 时仅作 default，不缩档。
+    """
+    base = [0.86, 0.88, 0.90, 0.92] if "moe" in str(arch).lower() else [0.88, 0.90, 0.92, 0.94]
+    if quant_bpp > 0 and quant_bpp <= 1.0:
+        base = [round(min(0.96, x + 0.02), 2) for x in base]
+    gdefault = user_gmu if 0 < user_gmu <= 1 else base[1]
+    return {"range": base, "default": gdefault}
+
+
+def min_tp_by_hbm(
+    weight_bytes: float,
+    hbm_gb: float,
+    gmu: float = 0.90,
+    reserve_ratio: float = 0.6,
+) -> int:
+    """显存下界最小 TP（多机部署口径）。
+
+    ``min_tp = ceil(weight_bytes / (hbm × gmu × reserve_ratio))``——
+    ``reserve_ratio=0.6`` 为可分配给权重的预算比例；PP 分 stage 后调用方传
+    每 stage 权重（总权重 / pp）。返回 ≥1；不可行（权重溢出单卡）返回大值，
+    由调用方判定。
+    """
+    budget = max(1.0, float(hbm_gb) * gmu * reserve_ratio)
+    return max(1, int(math.ceil(float(weight_bytes) / (budget * 1e9))))

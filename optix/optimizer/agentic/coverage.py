@@ -16,22 +16,32 @@
 
 """Search-space coverage checks for agent-mode convergence.
 
-Issue 1.3 / requirement 1: convergence must not fire on result trend alone —
-an engine-level blind spot (e.g. preset ``enforce_eager=true`` disabling CUDA
-Graph) can keep every candidate on a fake plateau. Convergence is only allowed
-when BOTH the trend condition (no improvement for N rounds) and the coverage
-condition hold:
+Convergence must not fire on result trend alone — it is only allowed when BOTH
+the trend condition (no improvement for N rounds) and the coverage condition
+hold:
 
-- at least ``min_rounds`` rounds executed and ``min_trials`` trials completed;
-- every ``flip_required`` engine fixed param has been verified (the flipped
-  value was actually tested by some candidate).
+- at least ``min_rounds`` rounds executed and ``min_trials`` trials completed.
+
+Agent mode runs exactly one candidate per round (rounds ≡ trials), so the two
+gates are equivalent and the larger one effectively wins. Only successful
+trials (``error is None`` and finite ``fitness``) count, matching
+``AgentOptimizer._scan_completed_rounds``.
 
 This module is intentionally stdlib-only so it can be unit-tested hermetically.
 """
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List
+
+
+def _is_successful_trial(trial: Dict[str, Any]) -> bool:
+    """与 orchestrator._scan_completed_rounds 同口径：无 error 且 fitness 为有限数值。"""
+    if trial.get("error") is not None:
+        return False
+    fitness = trial.get("fitness")
+    return isinstance(fitness, (int, float)) and math.isfinite(fitness)
 
 
 def _load_trials(run_dir: Path) -> List[Dict[str, Any]]:
@@ -42,44 +52,19 @@ def _load_trials(run_dir: Path) -> List[Dict[str, Any]]:
             data = json.loads(results_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        trials.extend(data.get("trials", []))
+        trials.extend(t for t in data.get("trials", []) if _is_successful_trial(t))
     return trials
-
-
-def engine_fixed_param_verification(run_dir: Path, context: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Return per-param verification status for flip_required engine fixed params.
-
-    A param is verified when any completed trial carried a value different from
-    the preset default (e.g. ``enforce_eager=false`` vs preset ``true``).
-    """
-    fixed = context.get("engine_fixed_params") or []
-    trials = _load_trials(run_dir)
-    tested_values: Dict[str, set] = {}
-    for trial in trials:
-        for name, value in (trial.get("params") or {}).items():
-            tested_values.setdefault(name, set()).add(value)
-
-    results: List[Dict[str, Any]] = []
-    for entry in fixed:
-        if not entry.get("flip_required"):
-            continue
-        search_name = entry.get("search_name")
-        default = entry.get("value")
-        verified = False
-        if search_name:
-            tested = tested_values.get(search_name, set())
-            verified = any(str(value) != str(default) for value in tested)
-        results.append({**entry, "verified": verified})
-    return results
 
 
 def search_space_coverage(
     run_dir: Path,
-    context: Dict[str, Any],
-    min_rounds: int = 3,
-    min_trials: int = 12,
+    min_rounds: int = 4,
+    min_trials: int = 4,
 ) -> Dict[str, Any]:
     """Evaluate the coverage condition for convergence.
+
+    Agent 模式每轮固定 1 个 trial，min_rounds 与 min_trials 两个门等价，
+    取较大者生效。
 
     Returns ``{"ok": bool, "rounds_done": int, "trials_done": int, "reasons": [...]}``.
     ``ok`` is True only when all gates pass; ``reasons`` lists every unmet gate.
@@ -92,13 +77,6 @@ def search_space_coverage(
         reasons.append(f"已执行 {rounds_done} 轮 < min_rounds={min_rounds}")
     if len(trials) < min_trials:
         reasons.append(f"已完成 {len(trials)} 个 trial < min_trials={min_trials}")
-
-    for entry in engine_fixed_param_verification(run_dir, context):
-        if not entry["verified"]:
-            reasons.append(
-                f"引擎级固定参数 {entry.get('path')}={entry.get('value')!r} 未做反转验证"
-                f"（需要 {entry.get('search_name')} 取相反值）"
-            )
 
     return {
         "ok": not reasons,

@@ -211,18 +211,17 @@ Fields of the `[agent_optimizer]` configuration section (all optional):
 |`run_id`|`"default"`|Run identifier. Candidates and results are organized under this identifier in the run directory.|
 |`run_dir`|Empty|Run directory. If left empty, it is automatically resolved to `.agent_optimizer/runs/{run_id}`.|
 |`max_rounds`|`32`|Maximum number of optimization rounds. The run terminates naturally when the limit is reached.|
-|`candidates_per_round`|`0`|Number of candidates per round. `0` means the agent decides the count dynamically based on the previous round. A value greater than 0 enforces a fixed count.|
 |`max_trials`|`12`|Maximum number of trials executed per round. The excess candidates are not executed.|
 |`time_limit_minutes`|`1440`|Time limit for executing trials within a single round, in minutes. The default value is 1440. The global budget is accumulated across rounds by the agent.|
 |`convergence_rounds`|`6`|Number of consecutive rounds without significant improvement required to trigger convergence detection.|
 |`min_rounds`|`4`|Minimum number of rounds that must be completed before convergence.|
-|`min_trials`|`12`|Minimum number of trials that must be completed before convergence.|
+|`min_trials`|`4`|Minimum number of trials that must be completed before convergence. Agent mode runs one trial per round, so this gate is equivalent to `min_rounds` and the larger one wins.|
 
-It is recommended to use Agent mode through the **`optix-assistant` skill**. The skill provides supporting scripts such as configuration preflight (`config_preflight`), context collection (`collect_context`), experience injection (`experience_injector`), and best-configuration export (`export_best_config`), and follows a unified behavioral contract for candidate generation, failure analysis, and adjudication. The typical workflow is as follows:
+It is recommended to use Agent mode through the **`optix-assistant` skill**. The skill provides supporting scripts such as configuration preflight (`config_preflight`), context collection (`collect_context`), parameter configuration checks (`check_search_space`), and best-configuration export (`export_best_config`), and follows a unified behavioral contract for candidate generation, failure analysis, and adjudication. The typical workflow is as follows:
 
 1. Complete the installation described in [Preparations](#4-preparations) and [Tool Installation](#5-tool-installation), and confirm that the deployment stack is available.
 2. Enter Agent mode through the `optix-assistant` skill and choose fully automatic or interactive execution as prompted.
-3. After the configuration preflight, the agent generates candidates, executes trials, and summarizes results round by round. After convergence, the best configuration and the final report are exported.
+3. After preflight and context collection, the agent follows goal routing to read method cards. Base settings are registered in TOML through `config_writer`; the agent updates `context.search_space` before each round and writes only values in candidate `params`. Validate candidates before execution. After each OptiX process exits, copy `context.json` to `context.round-N.json` before preparing the next round. Export reads the winning round's archived context and fails if it is missing or invalid.
 
 ## 10. Command Parameters
 

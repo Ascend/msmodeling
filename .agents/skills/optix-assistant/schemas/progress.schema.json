@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/optix-assistant/progress.schema.json",
+  "title": "Optix Assistant Progress",
+  "description": "OptiX 写入的轮次进度与累计 trial 耗时。Agent 按轮汇总耗时以管理预算；最终性能指标以 results 为准。",
+  "type": "object",
+  "required": [
+    "round",
+    "status",
+    "stage",
+    "completed",
+    "total",
+    "trials",
+    "cumulative_elapsed_s"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "cumulative_elapsed_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "本轮历次执行中已完成 trial 的累计秒数，包含成功、失败及重试；同轮重新启动保留此值。该值不包含 baseline、分析、等待及未完成 trial 的耗时。"
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "enum": [
+        "starting",
+        "running",
+        "completed"
+      ]
+    },
+    "stage": {
+      "type": "string",
+      "description": "阶段：preparing（初始化）/ trial_cold_start（冷启动：权重加载→图编译→KV 初始化，大模型单阶段可达 5-10 分钟）/ trial_completed / round_done。"
+    },
+    "completed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trials": {
+      "type": "array",
+      "description": "逐 trial 进度。已完成条目含 candidate_id、status=done、fitness、elapsed_s、slo_violated 和 performance（可为部分结果）；进行中/等待中条目只有 candidate_id 和 status（running/pending）。",
+      "items": {
+        "type": "object",
+        "required": ["candidate_id", "status"],
+        "additionalProperties": true,
+        "properties": {
+          "candidate_id": {"type": "string"},
+          "status": {
+            "type": "string",
+            "description": "done / running / pending。"
+          },
+          "fitness": {},
+          "elapsed_s": {"type": "number"},
+          "slo_violated": {"type": ["boolean", "null"]},
+          "performance": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,26 +1,21 @@
 # PSO 分支流程
 
-> 状态：骨架。本分支由 `optix-param-recommend`（推荐）+ `optix-config`（写入）合并而来，
-> 并吸收 agent 模式沉淀的经验资产（presets / experience_injector / known_patterns）。
-
 ## 目标
 
 为 optix 内置 PSO 寻优（`PSOOptimizer`，基于 pyswarms）提供知识增强的初始配置：
 推荐哪些参数、范围怎么定、benchmark 怎么配，写入 config.toml 后启动。
 
-与旧 param-recommend 的核心差别：**推荐依据不再是孤立启发式，而是共享知识层**——
-experience_report（Roofline/KV 预算/TP 安全范围）+ vendor preset 官方值 + known_patterns，
-自身启发式仅兜底。
+推荐由模型、硬件和负载信息生成；结合方法卡及匹配案例核对后写入配置。
 
 ## 流程
 
 ### 1. 前置（已由 SKILL.md「共享前置流程」完成）
 
-- 共享骨架：0a benchmark 确认 → config 就绪复检 → collect_context → experience_report.md
-  生成并阅读，见 `../SKILL.md`「共享前置流程」，本文件不重复。PSO / config 模式复检配置用
+- 共享骨架：0a benchmark 确认 → config 就绪复检 → collect_context → 配置参数检查
+  （读取 checklist_report.md），见 `../SKILL.md`「共享前置流程」，本文件不重复。PSO / config 模式复检配置用
   `config_writer.py --check-only`（`config_preflight.py` 是 agent 模式门禁，勿跑）
 - 用户只想"要推荐不要执行"时走**最小前置**（不启动 optix）：0a 确认 benchmark + 收集
-  硬件/模型/负载信息 → collect_context 生成 context → experience_injector + recommend_params，
+  硬件/模型/负载信息 → 整理为第 2 步的输入 JSON → recommend_params，
   到第 2 步输出即止；跳过 preflight 完整回填与 config_writer 写入。
 
 ### 2. 生成推荐
@@ -29,21 +24,20 @@ experience_report（Roofline/KV 预算/TP 安全范围）+ vendor preset 官方�
 python <SKILL_ROOT>/scripts/recommend_params.py --context <context.json>
 ```
 
-context.json 兼容旧 `optix-param-recommend` 的输入格式（engine / hardware / model /
-workload / target / discovery），也可直接消费 collect_context 的 context.json（实现期打通）。
+推荐输入为 engine / hardware / model / workload / target / discovery；也可消费已有配置对应的 collect_context 产物。
 
 输出必须包含：
 
 - 输入摘要与假设（未确认的假设明确标注）
-- 推荐参数表：参数名、范围、默认值、是否参与搜索、**推荐理由（引用 experience_report 或 preset 出处）**
+- 推荐参数表：参数名、范围、默认值、是否参与搜索、**推荐理由（引用方法卡或案例出处）**
 - `toml_snippet`：config.toml 片段（人工审阅用）
-- `config_skill_handoff` → 更名语义为 `assistant_handoff`：`consumer_skill` 填 `optix-assistant`（旧值为 `optix-config`，本 skill 为唯一消费者）
+- `config_skill_handoff`：提供给配置写入步骤的参数定义
 - `apply_commands`：给 `config_writer.py` 的命令清单（`--target-field` 写搜索参数/范围/固定参数）
 - `DP * TP * PP == world_size` 约束解释
 
 > **推荐校准规则**：
 > - vendor preset 命中的参数：默认值取官方推荐值，范围围绕官方值展开（±1档）
-> - experience_report 给出安全边界的参数：范围不得越过硬约束（KV 预算、显存上限）
+> - 配置及方法卡约束涉及的参数：范围不得越过硬约束（KV 预算、显存上限）
 > - `ENABLE_PREFIX_CACHING` / `ENABLE_CHUNKED_PREFILL` 等交给引擎默认值，不作为搜索维度
 > - benchmark 必须询问用户确认；无偏好时默认 `ais_bench`（选择准则与配置见 `benchmark.md`）
 
@@ -88,6 +82,11 @@ source <run-dir>/unset_env.sh
 
 ## 与 agent 分支的衔接
 
-本分支的推荐结果（assistant_handoff）可被 agent 分支的 `collect_context.py
---recommend-result` 消费，作为 agent 模式 Round 1 的初始搜索空间——用户可先 PSO 快速摸底，
+本分支的推荐结果可被 agent 分支的 `collect_context.py
+--recommend-result` 读取环境信息；推荐参数须经 config_writer 登记到 config.toml，作为 agent 模式 Round 1 的候选范围——用户可先 PSO 快速摸底，
 再切 agent 模式深挖。
+
+> **preset 分流（硬边界）**：PSO 继续用 `presets/ascend_vllm_presets.json` +
+> `apply_launch_config.py` + `launch_env.sh`。agent 模式 Round 0 preset **改走**
+> `knowledge/case-knowledge`（`search_cases.py` 读 `cases/official`），
+> 禁止混用本分支的 preset 管线。

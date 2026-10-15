@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/optix-assistant/context.schema.json",
+  "title": "Optix Assistant Run Context",
+  "description": "运行环境与已确认负载；Round 0 不生成搜索空间，agent 在优化阶段建立并维护 search_space。",
+  "type": "object",
+  "required": [
+    "run_id",
+    "engine",
+    "hardware",
+    "model",
+    "source"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "description": "运行标识，与 config.toml [agent_optimizer].run_id 及 run 目录名一致。"
+    },
+    "engine": {
+      "type": "string",
+      "description": "执行引擎，例如 vllm 或 mindie。"
+    },
+    "benchmark": {
+      "type": "string",
+      "description": "benchmark 工具，例如 vllm_benchmark 或 ais_bench。"
+    },
+    "hardware": {
+      "type": "object",
+      "description": "硬件拓扑与单卡显存。",
+      "required": ["world_size"],
+      "additionalProperties": true,
+      "properties": {
+        "world_size": {"type": "integer", "minimum": 1},
+        "num_nodes": {"type": "integer", "minimum": 1},
+        "num_per_node": {"type": "integer", "minimum": 1},
+        "single_card_memory_gb": {"type": "number"}
+      }
+    },
+    "model": {
+      "type": "object",
+      "description": "模型标识：name 为 served model name，path 为权重路径。",
+      "additionalProperties": true,
+      "properties": {
+        "name": {"type": "string"},
+        "path": {"type": "string"}
+      }
+    },
+    "model_info": {
+      "type": "object",
+      "description": "从模型配置读取的架构信息，供方法选择与候选分析使用。",
+      "additionalProperties": true
+    },
+    "workload": {
+      "type": "object",
+      "description": "负载画像（输入/输出长度、并发等）。",
+      "additionalProperties": true
+    },
+    "workload_confirmed": {
+      "type": "boolean",
+      "description": "负载是否经用户确认；未确认的负载不得作为结论依据。"
+    },
+    "benchmark_spec": {
+      "type": "object",
+      "description": "用户已确认的 benchmark 负载：输入/输出长度、请求数与固定并发或允许的并发范围；是 config_preflight 一致性门禁比对 config.toml 与 ais_bench 实际配置的唯一事实源。",
+      "additionalProperties": false,
+      "properties": {
+        "input_len_avg": {"type": ["integer", "null"], "minimum": 1},
+        "output_len_avg": {"type": ["integer", "null"], "minimum": 1},
+        "concurrency": {"type": ["integer", "null"], "minimum": 1},
+        "num_requests": {"type": ["integer", "null"], "minimum": 1},
+        "concurrency_range": {
+          "type": ["array", "null"],
+          "items": {"type": "integer", "minimum": 1},
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "benchmark_spec_confirmed": {
+      "type": "boolean",
+      "description": "benchmark_spec 四项是否齐备（用户确认/collect_context 四个负载旗标写入）；headless 模式任务消息给全参数时必须为 true，为 false 时门禁跳过一致性比对。"
+    },
+    "target": {
+      "type": "string",
+      "description": "优化目标标识。"
+    },
+    "search_space": {
+      "type": "object",
+      "description": "优化阶段的有效参数定义与默认值。Round 0 可缺省；首次候选执行前由 agent 建立，后续按方法卡和实测依据更新。",
+      "required": ["parameters", "constants"],
+      "properties": {
+        "parameters": {"type": "array", "items": {"$ref": "#/$defs/parameter"}},
+        "constants": {"type": "array", "items": {"$ref": "#/$defs/parameter"}}
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "description": "硬约束、软约束、固定参数和跨参数约束。每条约束必须指定 statistic（判定统计量，如 mean/median/p99），缺省视为 mean；软目标违反不阻塞，单独记录。",
+      "additionalProperties": true
+    },
+    "budgets": {
+      "type": "object",
+      "description": "轮次/trial/时间预算的信息记录；运行时终止以 config.toml [agent_optimizer] 为准。",
+      "additionalProperties": true
+    },
+    "source": {
+      "type": "object",
+      "required": ["config_toml"],
+      "properties": {
+        "config_toml": {"type": "string", "minLength": 1},
+        "config_toml_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "optimizer_strategy": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "parameter": {
+      "type": "object",
+      "required": ["name", "dtype", "config_position", "default", "min", "max"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "dtype": {"type": "string", "minLength": 1},
+        "config_position": {"type": "string", "minLength": 1},
+        "default": {"type": ["number", "boolean", "string", "array", "object"]},
+        "min": {"type": "number"},
+        "max": {"type": "number"},
+        "choices": {"type": "array", "minItems": 1},
+        "constant": {
+          "type": ["number", "boolean", "string"],
+          "description": "常量值。constants 分组的条目必须设此字段（或令 min==max）；设置后以该值为准，候选不得覆盖。"
+        }
+      },
+      "if": {"properties": {"dtype": {"const": "enum"}}},
+      "then": {"required": ["choices"]}
+    }
+  }
+}

@@ -1229,13 +1229,14 @@ class PsoStrategy(BaseModel):
 class AgentOptimizerConfig(BaseModel):
     run_id: str = "default"
     max_rounds: int = 32
-    candidates_per_round: int = 0  # 0 = dynamic; >0 = fixed
     max_trials: int = 12
     time_limit_minutes: int = 1440
     run_dir: str = ""
     convergence_rounds: int = 6  # consecutive no-improvement rounds before early stop
     min_rounds: int = 4  # minimum executed rounds before early stop
-    min_trials: int = 12  # minimum completed trials before early stop
+    # minimum completed trials before early stop; agent mode runs 1 trial per
+    # round, so this gate is equivalent to min_rounds and the larger one wins
+    min_trials: int = 4
 
 
 class BenchmarkEarlyExitConfig(BaseModel):

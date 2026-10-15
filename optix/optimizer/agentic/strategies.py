@@ -15,10 +15,12 @@
 # -------------------------------------------------------------------------
 
 import json
+import os
 import time
 from copy import deepcopy
-from math import inf
+from math import inf, isfinite
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from loguru import logger
 
@@ -80,6 +82,45 @@ def _trial_progress_entry(trial) -> dict:
     return entry
 
 
+def _load_elapsed_progress(path: Path, round_index: int) -> float:
+    """Restore accounted trial time without treating missing history as zero."""
+    if not path.exists():
+        if path.with_name(f"results.round-{round_index}.json").exists():
+            raise ValueError(f"Missing elapsed-time history: {path}")
+        return 0.0
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("round") != round_index:
+        raise ValueError(f"Invalid progress round: {path}")
+
+    def seconds(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or value < 0:
+            raise ValueError(f"Invalid elapsed time in {path}: {value!r}")
+        return value
+
+    # Legacy snapshots contain only the latest attempt. Keep their known time,
+    # but never claim that overwritten attempts have been recovered.
+    latest = sum(seconds(t["elapsed_s"]) for t in data["trials"] if t.get("status") == "done")
+    total = seconds(data.get("cumulative_elapsed_s", latest))
+    if total < latest:
+        raise ValueError(f"Cumulative elapsed time is smaller than trial time: {path}")
+    return total
+
+
+def _write_progress(path: Path, progress: dict) -> None:
+    """Replace the budget snapshot atomically; persistence failure stops execution."""
+    temporary = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(progress, stream, indent=2, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 class AgentCandidateStrategy:
     def __init__(self, run_dir, round_index=1, max_trials=None, time_limit_seconds=None, fitness_evaluator=None):
         self.run_dir = Path(run_dir)
@@ -101,8 +142,17 @@ class AgentCandidateStrategy:
         context = search_space_context or {}
         validations = [validate_candidate(context, c.to_dict() if hasattr(c, 'to_dict') else c) for c in candidates]
         valid = [v for v in validations if v["valid"]]
+        if validations and not valid:
+            reasons = "; ".join(f"{v.get('candidate_id')}: {'; '.join(v['errors'])}" for v in validations)
+            logger.warning(
+                "Round {} runs 0 trials: all {} candidate(s) rejected by validation — {}",
+                self.round_index,
+                len(validations),
+                reasons,
+            )
         trials = []
         progress_path = self.run_dir / f"progress.round-{self.round_index}.json"
+        previous_elapsed = _load_elapsed_progress(progress_path, self.round_index)
 
         def _now_iso():
             return time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -132,40 +182,31 @@ class AgentCandidateStrategy:
                 "running": running_count,
                 "failed": sum(1 for t in completed_trials if t is not None and t.fitness >= float("inf")),
                 "trials": all_trials,
+                # Base this on the snapshot loaded once per run, not the last
+                # update, so repeated progress writes cannot double-count time.
+                "cumulative_elapsed_s": previous_elapsed + sum(t.elapsed_seconds for t in completed_trials),
                 "timestamps": {"updated": _now_iso()},
             }
-            progress_path.write_text(json.dumps(progress, indent=2, ensure_ascii=False), encoding="utf-8")
+            _write_progress(progress_path, progress)
 
         deadline = None
         if self.time_limit_seconds and self.time_limit_seconds > 0:
             deadline = time.monotonic() + self.time_limit_seconds
 
         # 首 trial 前即写进度，避免冷启动期无任何信号（issue 2.1）
-        try:
-            _update_progress("starting", "preparing", [], valid[: self.max_trials])
-        except OSError as exc:
-            logger.debug("progress write failed: {}", exc)
+        _update_progress("starting", "preparing", [], valid[: self.max_trials])
 
         for validation in valid[: self.max_trials]:
             if deadline and time.monotonic() >= deadline:
                 logger.warning("Time limit reached, stopping round {}", self.round_index)
                 break
-            try:
-                _update_progress("running", "trial_cold_start", trials, valid[: self.max_trials])
-            except OSError as exc:
-                logger.debug("progress write failed: {}", exc)
+            _update_progress("running", "trial_cold_start", trials, valid[: self.max_trials])
             trial = self._run_trial(validation, scheduler, target_field, context)
             trials.append(trial)
-            try:
-                _update_progress("running", "trial_completed", trials, valid[: self.max_trials])
-            except OSError as exc:
-                logger.debug("progress write failed: {}", exc)
+            _update_progress("running", "trial_completed", trials, valid[: self.max_trials])
 
         # 保留最终状态（不再 unlink），Monitor 可据此区分"完成"与"卡死"
-        try:
-            _update_progress("completed", "round_done", trials, valid[: self.max_trials])
-        except OSError as exc:
-            logger.debug("progress final write failed: {}", exc)
+        _update_progress("completed", "round_done", trials, valid[: self.max_trials])
 
         # Write results with embedded validation
         self._write_results(trials, validations)
@@ -188,6 +229,11 @@ class AgentCandidateStrategy:
         if not self.candidates_path.exists():
             raise FileNotFoundError("Candidate file not found: {}".format(self.candidates_path))
         data = json.loads(self.candidates_path.read_text(encoding="utf-8"))
+        if data.get("round") != self.round_index:
+            raise ValueError(
+                "Candidate file {} declares round {} but this is round {} — regenerate the "
+                "candidate file for the current round".format(self.candidates_path, data.get("round"), self.round_index)
+            )
         return [Candidate.from_dict(item, i) for i, item in enumerate(data.get("candidates", []))]
 
     def _run_trial(self, validation: dict, scheduler, target_field: list, search_space_context: dict | None = None):
@@ -213,7 +259,10 @@ class AgentCandidateStrategy:
         position = field_to_param(tuple(resolved_field))
         start = time.monotonic()
         try:
-            perf = scheduler.run(position, tuple(resolved_field))
+            # Decision-grade data: disable early exit so every trial produces
+            # complete metrics (mirrors PSO _run_complete_evaluation).
+            with scheduler.disable_early_exit():
+                perf = scheduler.run(position, tuple(resolved_field))
             error_info = scheduler.error_info or "Eval failed"
             if scheduler.last_outcome and getattr(scheduler.last_outcome, "status", None) == "failed":
                 fitness, error = inf, error_info

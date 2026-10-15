@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 #: 估算物理量（dtype 字节 / per-token KV / 权重总量 / KV 预算 / TP 整除候选）单一宿主：
-#: estimation.py——与 experience_injector 共享，避免同一物理量双公式漂移
+#: estimation.py 提供统一的物理量估算。
 from estimation import (
     dtype_bytes,
     estimate_weight_gb,

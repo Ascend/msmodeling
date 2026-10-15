@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/optix-assistant/best-result.schema.json",
+  "title": "Optix Assistant Best Result",
+  "description": "已选定最佳结果的物化快照，由 export_best_config.py 写入。选择策略：先硬约束可行性（slo_violated=false 池），再按 fitness 排序；fitness 只作辅助，不能覆盖硬约束。",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "selection_policy",
+    "source_ref"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "candidate_id": {
+      "type": "string"
+    },
+    "params": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "fitness": {},
+    "performance": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "slo_violated": {
+      "type": ["boolean", "null"]
+    },
+    "slo_compliant": {
+      "type": "boolean",
+      "description": "本次运行是否存在任何 SLO 达标的 trial。"
+    },
+    "selection_policy": {
+      "type": "string",
+      "enum": [
+        "slo_compliant_best",
+        "fallback_fitness_best"
+      ],
+      "description": "slo_compliant_best = 达标池中取最优；fallback_fitness_best = 无达标候选时回退纯 fitness。"
+    },
+    "source_ref": {
+      "type": "string",
+      "description": "最优结果的来源引用，格式 results.round-N.json#trials[i]。"
+    },
+    "selected_at": {
+      "type": "string",
+      "description": "ISO 8601 选择时间戳。"
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "feasibility": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "objective_values": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

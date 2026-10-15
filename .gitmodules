@@ -1,0 +1,4 @@
+[submodule "optix-assistant-knowledge"]
+	path = .agents/skills/optix-assistant/knowledge
+	url = https://gitcode.com/Ascend/msmodeling.wiki.git
+	branch = main

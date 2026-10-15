@@ -55,6 +55,7 @@ agent 会话启动时，应：
 | Agent 可靠性 | 9 | 幻觉规避 |
 | 测试与 CI | 10-11 | 虚拟环境 / 本地门禁 |
 | OptiX | 12 | 配置字段与结果表兼容性 |
+| 知识库管理 | 13 | knowledge submodule gitlink 同步 |
 
 ---
 
@@ -183,9 +184,22 @@ CI 门禁会重跑这些检查，本地不通过直接推会浪费 CI 资源并�
 
 ---
 
+## 知识库管理
+
+### 13. **修改 optix-assistant 知识库后必须回主仓 bump submodule commit id**
+
+`.agents/skills/optix-assistant/knowledge/` 是 git submodule，内容承载于 `Ascend/msmodeling.wiki` 仓 main 分支。只在 wiki 仓推送知识库改动时，主仓 gitlink 仍钉在旧 commit id 上，其他人 clone/更新主仓拿到的还是旧知识库——改动不生效，且没有任何报错提示。
+
+- 触发场景：修改 `knowledge/` 下的案例、方法卡、诊断知识并推送到 wiki 仓后
+- 正确做法：回 msmodeling 主仓执行 `git add .agents/skills/optix-assistant/knowledge` 提交并推送 gitlink 更新；验证 `git submodule status` 输出的 hash 与 wiki 仓 main 的 HEAD 一致
+- 引用：`.agents/skills/optix-assistant/SKILL.md` 前置说明
+
+---
+
 ## 变更日志
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-10-13 | v0.3 | 新增知识库管理分类：knowledge submodule 修改后必须回主仓 bump gitlink commit id |
 | 2026-09-09 | v0.2 | 新增 OptiX 配置字段与结果 CSV schema 兼容经验 |
 | 2026-07-21 | v0.1 | 初始化，含 11 条教训（代码架构 4 + 新模型适配 1 + 文档与北向接口 1 + Skill 治理 2 + Agent 可靠性 1 + 测试与 CI 2） |

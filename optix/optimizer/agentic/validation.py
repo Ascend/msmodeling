@@ -22,7 +22,7 @@ import operator as op
 import re
 import subprocess
 import shutil
-from math import isclose
+from math import isclose, isfinite
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
@@ -340,6 +340,20 @@ def _is_constant_or_derived(item: Dict[str, Any]) -> bool:
         return False
 
 
+def _pinned_value(item: Dict[str, Any], fallback: Any = None) -> Any:
+    """Effective pinned value of a constant parameter: explicit ``constant`` wins,
+    then ``min`` when min==max pins the range; ``fallback`` is the last resort.
+    """
+    if item.get("constant") is not None:
+        return item["constant"]
+    try:
+        if isclose(float(item.get("min")), float(item.get("max")), rel_tol=1e-5):
+            return item.get("min")
+    except (TypeError, ValueError):
+        pass
+    return fallback
+
+
 # ---------------------------------------------------------------------------
 # Derived-parameter contract — mirrors the engine's DERIVED_FIELD_HANDLERS
 # (optix.config.config) only where a candidate-set value has meaning. The rule:
@@ -421,6 +435,9 @@ def _validate_ratio_param(
         numeric = float(value)
     except (TypeError, ValueError):
         errors.append(f"{name}={value!r} is not numeric")
+        return
+    if not isfinite(numeric):
+        errors.append(f"{name}={value!r} must be finite")
         return
     min_value = float(item.get("min", numeric))
     max_value = float(item.get("max", numeric))
@@ -613,6 +630,9 @@ def validate_candidate(context: Dict[str, Any], candidate: Dict[str, Any]) -> Di
     # 2. Resolve: defaults + candidate overrides + derived
     full_params = {name: item.get("default") for name, item in schema.items()}
     full_params.update(params)
+    for name, item in schema.items():
+        if _is_constant_or_derived(item) and item.get("dtype") not in {"factories", "times"}:
+            full_params[name] = _pinned_value(item, item.get("default"))
     _apply_derived_params(full_params, schema_items)
 
     # 3. Validate each candidate-specified parameter
@@ -657,9 +677,14 @@ def validate_candidate(context: Dict[str, Any], candidate: Dict[str, Any]) -> Di
             except (TypeError, ValueError):
                 errors.append(f"{name}={value!r} is not numeric")
                 continue
+            if not isfinite(numeric):
+                errors.append(f"{name}={value!r} must be finite")
+                continue
+            if dtype == "bool" and value not in (True, False, 0, 1):
+                errors.append(f"{name}={value!r} must be a boolean")
             if dtype == "int" and not numeric.is_integer():
                 errors.append(f"{name}={value!r} must be an integer")
-            elif dtype == "int":
+            elif dtype == "int" and not _is_constant_or_derived(item):
                 full_params[name] = int(numeric)
             if numeric < float(item.get("min", numeric)) or numeric > float(item.get("max", numeric)):
                 errors.append(f"{name}={value!r} is outside range [{item.get('min')}, {item.get('max')}]")
@@ -667,8 +692,12 @@ def validate_candidate(context: Dict[str, Any], candidate: Dict[str, Any]) -> Di
         # 4. Check constant/derived conflict
         if _is_constant_or_derived(item):
             warnings.append(f"Candidate explicitly sets constant parameter: {name}")
-            if not _values_equal(value, full_params.get(name)):
-                errors.append(f"{name}={value!r} conflicts with derived/constant value {full_params.get(name)!r}")
+            if item.get("dtype") in {"factories", "times"}:
+                expected = full_params.get(name)
+            else:
+                expected = _pinned_value(item, full_params.get(name))
+            if not _values_equal(value, expected):
+                errors.append(f"{name}={value!r} conflicts with derived/constant value {expected!r}")
 
     # 5. Evaluate constraint expressions
     constraints = context.get("constraints", {})

@@ -160,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     context = _load_json(ctx_path)
     vp = (context.get("knowledge") or {}).get("vendor_preset") or {}
     if not vp:
-        print("INFO: 无 vendor_preset（未命中 presets），跳过 additional_config 应用（--env 仍会写入）")
+        print("WARNING: 无 vendor_preset（未命中 presets），跳过 additional_config 应用（--env 仍会写入）")
 
     engine = (context.get("engine") or "vllm").lower()
     config_path = Path(args.config) if args.config else _find_config_toml()

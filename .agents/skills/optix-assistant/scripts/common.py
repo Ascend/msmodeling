@@ -22,23 +22,15 @@ import shlex
 import tomlkit
 from pathlib import Path
 from math import isclose
-from copy import deepcopy
 from typing import Any, Dict, List
 
 __all__ = [
     "read_json",
     "write_json",
     "load_context",
-    "search_space_from_target_fields",
-    "search_space_from_recommendation",
-    "normalize_search_space",
-    "search_space_item_from_target_field",
-    "is_searchable_target_field",
-    "enum_choices",
     "convert_numeric",
     "values_equal",
     "infer_model_family",
-    "match_known_patterns",
     # others / JSON-container helpers
     "COMMAND_SKELETON_KEYS",
     "CONTAINER_FLAGS",
@@ -64,102 +56,6 @@ def load_context(run_dir: Path) -> Dict[str, Any]:
     return read_json(run_dir / "context.json")
 
 
-def search_space_from_target_fields(target_fields: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    search_space = {"parameters": [], "constants": []}
-    for field in target_fields:
-        if not field.get("target_field", True):
-            continue
-        item = search_space_item_from_target_field(field)
-        if is_searchable_target_field(field):
-            search_space["parameters"].append(item)
-        else:
-            search_space["constants"].append(item)
-    return search_space
-
-
-def search_space_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
-    handoff = recommendation.get("agent_optimizer_handoff") or {}
-    if isinstance(handoff.get("search_space"), dict):
-        search_space = deepcopy(handoff["search_space"])
-        search_space.setdefault("parameters", [])
-        search_space.setdefault("constants", [])
-        return normalize_search_space(search_space)
-
-    config_handoff = recommendation.get("config_skill_handoff") or {}
-    return search_space_from_target_fields(config_handoff.get("target_fields", []))
-
-
-def normalize_search_space(search_space: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
-    normalized = {"parameters": [], "constants": list(search_space.get("constants", []))}
-    for item in search_space.get("parameters", []):
-        if is_searchable_target_field(item):
-            normalized["parameters"].append(item)
-        else:
-            normalized["constants"].append(item)
-    return normalized
-
-
-def search_space_item_from_target_field(field: Dict[str, Any]) -> Dict[str, Any]:
-    item = {
-        "name": field["name"],
-        "dtype": field.get("dtype", "str"),
-        "default": field.get("default", field.get("value")),
-        "source": "config",
-    }
-    for key in (
-        "section",
-        "config_position",
-        "min",
-        "max",
-        "constant",
-        "reason",
-        "source",
-        "optional",
-        "placeholder_hint",
-    ):
-        if key in field:
-            item[key] = field[key]
-
-    if item["dtype"] == "enum":
-        choices = field.get("choices", field.get("dtype_param", []))
-        item["choices"] = choices if isinstance(choices, list) else [choices]
-    elif "dtype_param" in field:
-        item["dtype_param"] = field["dtype_param"]
-    if "config_skill_cli_arg" in field:
-        item["config_skill_cli_arg"] = field["config_skill_cli_arg"]
-    return item
-
-
-def is_searchable_target_field(field: Dict[str, Any]) -> bool:
-    if not field.get("search", True):
-        return False
-    if field.get("searchable") is False:
-        return False
-    domain = field.get("domain")
-    if isinstance(domain, dict) and domain.get("type") in {"constant", "derived"}:
-        return False
-    if field.get("constant") is not None:
-        return False
-    if field.get("dtype") in {"factories", "times"}:
-        return False
-    if field.get("dtype") == "enum" and len(enum_choices(field)) <= 1:
-        return False
-    min_value = field.get("min")
-    max_value = field.get("max")
-    if min_value is None or max_value is None:
-        return True
-    return not values_equal(min_value, max_value)
-
-
-def enum_choices(field: Dict[str, Any]) -> List[Any]:
-    if isinstance(field.get("domain"), dict) and isinstance(field["domain"].get("choices"), list):
-        return list(field["domain"]["choices"])
-    choices = field.get("choices", field.get("dtype_param", []))
-    if isinstance(choices, list):
-        return choices
-    return [choices]
-
-
 def convert_numeric(value: float, dtype: str):
     if dtype == "int":
         return int(value)
@@ -176,7 +72,7 @@ def values_equal(left: Any, right: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Known-patterns matching  (human-curated rules from known_patterns.json)
+# Model family inference for recommendation matching
 # ---------------------------------------------------------------------------
 
 _CORE_FAMILIES = [
@@ -211,10 +107,9 @@ def infer_model_family(context: Dict[str, Any]) -> str:
     if explicit and str(explicit).strip():
         return str(explicit).strip().lower()
 
-    combined = ((model.get("name") or "") + " " + (model.get("path") or "")).lower()
-    if not combined:
-        return "unknown"
-
+    combined = (
+        (model.get("name") or "") + " " + (model.get("path") or "") + " " + (model.get("model_type") or "")
+    ).lower()
     for family in _CORE_FAMILIES:
         if family in combined:
             return family
@@ -227,67 +122,6 @@ def infer_model_family(context: Dict[str, Any]) -> str:
                 return family
 
     return "unknown"
-
-
-def match_known_patterns(patterns_data: Dict[str, Any], context: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Score patterns against the current run context.
-
-    Returns the union of matched ``hints`` across all sufficiently-scored patterns.
-    Empty list if nothing matches.
-    """
-    if not isinstance(patterns_data, dict):
-        return []
-    patterns = patterns_data.get("patterns") or []
-    if not patterns:
-        return []
-
-    engine = context.get("engine", "")
-    model_family = infer_model_family(context)
-    model_info = context.get("model_info") or {}
-    is_moe = bool(model_info.get("is_moe"))
-    architectures = model_info.get("architectures") or []
-
-    matched_hints: List[Dict[str, Any]] = []
-    for pattern in patterns:
-        matcher = pattern.get("matcher") or {}
-        matcher_family = matcher.get("model_family")
-
-        score = 0
-        # Engine (weight 3) — must match explicitly
-        if matcher.get("engine") == engine:
-            score += 3
-
-        # Model family (weight 3) — must match explicitly
-        if matcher_family and matcher_family == model_family:
-            score += 3
-
-        # is_moe (weight 2)
-        if "is_moe" in matcher:
-            if bool(matcher["is_moe"]) == is_moe:
-                score += 2
-
-        # Architectures overlap (weight 2)
-        match_archs = matcher.get("architectures") or []
-        if match_archs and architectures:
-            if any(ma.lower() in (a.lower() for a in architectures) for ma in match_archs):
-                score += 2
-
-        # A pattern constrained only by engine (no model_family / is_moe /
-        # architectures) is a universal engine-level rule — matches any model
-        # of that engine. Otherwise require a strong match (score >= 5).
-        has_constraints = bool(matcher.get("model_family") or ("is_moe" in matcher) or matcher.get("architectures"))
-        threshold = 3 if not has_constraints else 5
-        if score >= threshold:
-            hints = pattern.get("hints") or []
-            # Attach provenance so the caller can trace back
-            for hint in hints:
-                hint.setdefault("_matched_by", {})
-                hint["_matched_by"]["pattern_index"] = patterns.index(pattern)
-                hint["_matched_by"]["score"] = score
-                hint["_matched_by"]["model_family"] = model_family
-            matched_hints.extend(hints)
-
-    return matched_hints
 
 
 # ---------------------------------------------------------------------------

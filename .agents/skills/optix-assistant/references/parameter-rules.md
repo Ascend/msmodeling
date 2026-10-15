@@ -80,3 +80,14 @@ benchmark 类型会影响 benchmark 侧 target field 和性能指标解释，但
 `config_skill_handoff.apply_commands` 只生成当前 `config_writer.py`（optix-assistant `scripts/`）CLI 能表达的命令：每条写命令为
 `python <SKILL_ROOT>/scripts/config_writer.py --config <path> --target-field engine=<engine> name=<NAME> config_position=<Z> dtype=<D> [value=<V>] [min=<MIN>] [max=<MAX>] [dtype_param=<json>]`，
 且只对**引擎段**（mindie/vllm）生成（`--target-field` 的 `engine` 只接受引擎段）。vLLM 服务参数自 `#825` 起是 `run` 字段，由字段模型渲染成 `--kebab-case`（`Scheduler.update_data_field`），**不再需要** `--flag $NAME` 两步接线，写命令也不再带 `--cli-arg`，避免双写。`ais_bench` 相关字段（含 CONCURRENCY/REQUESTRATE 等 scheduler env）保留在 `target_fields` 和 `notes` 中，不写入 `toml_snippet` 的 target-field 块、也不生成写命令，因为当前 Settings loader 对 `ais_bench` target field 的处理存在兼容风险。
+
+## 运行中新增字段（agent 模式）
+
+`config.toml` 自 Round 0 装配完成后冻结，运行期间不得修改；`--target-field` 仅用于 Round 0 装配与 config 模式。`context.search_space` 是运行期参数定义的唯一事实源，执行器按它装配引擎参数与环境变量。
+
+- 新增字段（**env 类与 run 类一致**）：写回 `context.search_space.parameters`，定义必须完整（`name`/`config_position`/`dtype`/`default`，enum 附 `choices`，int/float 附 `min`/`max`）；run 类的 `name` 必须是引擎真实参数名（与 `--flag` 对应），校验器对照引擎 `--help` 核验。回填后先执行 `validate_candidates.py` 且退出 0，再生成候选。
+- 已有字段调整搜索范围：更新该条目的 `min`/`max`/`choices`/`default`，在 `candidates_analysis` 记录依据，校验退出 0 后生效；TOML 登记的初始范围不构成运行期边界。
+- TOML 中标记 `constant` 的参数保持钉死：context 条目必须维持 `constant`/`default`/`min`/`max`（enum 为 `choices`）等于该值，校验器拒绝任何解冻。
+- 终止当前 run 重新装配仅适用于 R0 级事实变更（benchmark 工具、负载形态、引擎或模型更换）；参数增删与范围调整一律走本节流程。
+
+完整维护规则见 `../workflows/data-analysis.md`「每轮搜索空间」。

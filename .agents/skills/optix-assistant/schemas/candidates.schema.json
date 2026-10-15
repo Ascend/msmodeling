@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/optix-assistant/candidates.schema.json",
+  "title": "Optix Assistant Candidates",
+  "description": "某一轮待执行候选配置的列表，必须包含本轮的分析方向及分析说明（directions）。本文件是执行阶段的输入（由 optix 读取），禁止写入实测的 trial 结果。params 仅保存参数值；定义和默认值来自 context.search_space；每轮执行后将完整 context 归档为 context.round-N.json。",
+  "type": "object",
+  "required": [
+    "round",
+    "directions",
+    "candidates",
+    "routing_review"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "routing_review": {
+      "type": "object",
+      "required": ["hypothesis", "l1_layers_matched", "layers_deferred"],
+      "additionalProperties": false,
+      "properties": {
+        "hypothesis": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "本轮瓶颈假设，一句话陈述；延续上一轮假设时须写明延续关系。"
+        },
+        "l1_layers_matched": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "该假设在目标路由表（goals/*.md）中命中的机制层名，层名须与 method-index.md 分层标题一致。命中范围由假设与路由表决定，不因本轮是否行动而增减。"
+        },
+        "layers_deferred": {
+          "type": "object",
+          "description": "命中但本轮不行动的层及理由；键为 l1_layers_matched 中的层名，值为非空理由，无暂缓层时写空对象。",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "description": "本轮瓶颈假设与 L1 机制层的匹配记录：命中哪些层、哪些行动、哪些暂缓及理由。"
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "优化轮次编号，同一取值同时编码在文件名中。"
+    },
+    "directions": {
+      "type": "array",
+      "description": "本轮分析产出的优化方向列表。候选通过 direction_id 关联到其中的方向，方向先于候选生成。每个方向内联证据、知识分析和候选操作说明，无需独立分析文件。",
+      "items": {
+        "type": "object",
+        "required": [
+          "direction_id",
+          "type",
+          "trial_type",
+          "hypothesis",
+          "evidence_analysis",
+          "refs_analysis",
+          "candidates_analysis"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "direction_id": {
+            "type": "string",
+            "description": "本轮内唯一的方向标识。"
+          },
+          "type": {
+            "type": "string",
+            "description": "方向类型，例如 baseline、local_search、factor_isolation、tradeoff_search、recovery、coverage。"
+          },
+          "trial_type": {
+            "type": "string",
+            "enum": ["optimization", "diagnosis"],
+            "description": "结果用途：optimization 进入正常判优、收敛和覆盖统计；diagnosis 仅用于验证假设。"
+          },
+          "status": {
+            "type": "string",
+            "description": "方向状态，例如 proposed、validated、rejected、inconclusive。"
+          },
+          "target_params": {
+            "type": "array",
+            "description": "该方向计划调整的参数名列表。"
+          },
+          "baseline_ref": {
+            "type": "string",
+            "description": "该方向对比所依据的候选或结果引用。"
+          },
+          "hypothesis": {
+            "type": "string",
+            "description": "待验证的假设，必须引用具体历史依据。"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "description": "支撑该假设的历史 trial 或约束引用。"
+          },
+          "evidence_analysis": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "读取的证据及发现：记录来源、具体指标、失败或约束事实，区分已验证事实与未验证假设。"
+          },
+          "refs_analysis": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "读取的知识点及基于知识的分析：记录 goals 路由、relationships 组合校验和方法卡结论，说明证据如何匹配知识、为何采纳或排除方向。"
+          },
+          "candidates_analysis": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "分析后的操作：说明 search_space 新增、修改、删除条目的名称、前后定义及依据，候选取值、默认继承项、执行前校验和回退动作；未变更时明确写明。"
+          },
+          "expected_effect": {
+            "description": "预期效果，属于待验证假设，不是实测结果。"
+          },
+          "constraints": {
+            "type": "array",
+            "description": "该方向必须遵守的额外约束。"
+          },
+          "priority": {
+            "type": "number",
+            "description": "候选预算分配时的方向优先级。"
+          },
+          "coverage": {
+            "type": "string",
+            "description": "该方向在搜索空间中的覆盖情况，例如 unexplored。"
+          }
+        }
+      },
+      "minItems": 1
+    },
+    "candidates": {
+      "type": "array",
+      "description": "本轮待校验和执行的候选列表。",
+      "items": {
+        "type": "object",
+        "required": [
+          "candidate_id",
+          "direction_id",
+          "params"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "description": "本次运行内唯一的候选标识。"
+          },
+          "direction_id": {
+            "type": "string",
+            "description": "生成该候选的分析方向标识，指向本文件顶层 directions 数组中的 direction_id。"
+          },
+          "baseline_ref": {
+            "type": "string",
+            "description": "用于对比的基线候选或结果引用。"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "description": "支撑该候选的历史结果或约束引用列表。"
+          },
+          "params": {
+            "type": "object",
+            "description": "仅保存实际参数值；未显式赋值的字段采用 search_space 默认值。不得将 value/dtype/config_position 定义对象放入 params。",
+            "additionalProperties": {"type": ["string", "number", "boolean", "array", "object"]}
+          },
+          "rationale": {
+            "type": "string",
+            "description": "提出该候选的理由，需引用具体方法卡或运行结果。"
+          },
+          "expected_effect": {
+            "type": "string",
+            "description": "执行前的预期效果；这不是实测指标。"
+          },
+          "risk": {
+            "type": "string",
+            "description": "预期的执行或性能风险。"
+          },
+          "source": {
+            "type": "string",
+            "description": "候选来源，缺省为 agent。"
+          }
+        }
+      }
+    }
+  }
+}

@@ -27,10 +27,12 @@ TOML back-fill is implemented with ``tomlkit`` (round-trip preserving: comments
 and untouched lines survive byte-for-byte; only the touched key is normalized).
 Requires the repo uv environment (``uv sync``) so ``tomlkit`` is importable.
 
-Run in Round-0 preflight and before every optix launch:
+Run --check-only in Round-0 preflight and before every optix launch.
+Use write/back-fill options only during Round-0 assembly, before collect_context
+records config_toml_sha256; never modify the TOML during an active run.
     # check only (exit 1 if incomplete)
     python skills/optix-assistant/scripts/config_preflight.py --check-only --config <path>
-    # back-fill one missing piece at a time (each exits 0 if complete after fill)
+    # Round-0 write examples: back-fill before collect_context records the hash
     python skills/optix-assistant/scripts/config_preflight.py --config <path> --set-model /weights/qwen
     python skills/optix-assistant/scripts/config_preflight.py --config <path> --set-agent-mode --ttft-slo 3.0
     # write run-time budgets into config.toml [agent_optimizer] — the actual
@@ -40,6 +42,9 @@ Run in Round-0 preflight and before every optix launch:
 """
 
 import argparse
+import ast
+import importlib.util
+import json
 import os
 import re
 import shlex
@@ -52,6 +57,7 @@ from typing import Any, Dict, List
 
 import tomlkit
 
+from check_search_space import check_fixed_concurrency
 from common import bad_json_tokens, table_or_create
 
 #: placeholder values in the default config.toml that must be replaced by the user
@@ -145,8 +151,7 @@ def _visible_device_count() -> int:
 def _tp_factor_choices(world_size: int) -> List[int]:
     """TP choices for a world size: all its divisors (capped at 64).
 
-    Same algorithm as collect_context.default_parallel_search_space, so the
-    guided config_writer command yields the identical search domain.
+    Used by the guided config_writer command when initializing TP fields.
     """
     return [v for v in (1, 2, 4, 8, 16, 32, 64) if v <= world_size and world_size % v == 0] or [1]
 
@@ -249,7 +254,7 @@ def check_completeness(
             errors.append(
                 f"[agent_optimizer].run_dir 指向 {run_dir!r}，与 agent run-dir 不一致 —— 建议留空让 optix 自动解析"
             )
-        # 24h 全局时间预算校验
+        # 单轮执行时间上限校验（≤24h）
         time_limit = agent_cfg.get("time_limit_minutes")
         if time_limit is not None:
             try:
@@ -293,13 +298,26 @@ def check_completeness(
         has_tp = any(str(t.get("name") or "").strip().lower() == "tp" for t in tf)
         if not has_tp:
             factors = _tp_factor_choices(world_size)
+            combos = "、".join(f"tp={f},dp={world_size // f}" for f in factors)
             errors.append(
                 f"[{engine}.target_field] 缺少并行拆分参数 tp（world_size={world_size}）—— "
-                f"baseline 将以 tp=1 起服务，多卡必 OOM。运行（保持单一写入入口，勿手改 TOML）：\n"
-                f"  config_writer --config <config 路径> --target-field engine={engine} "
-                f"name=tp config_position=run dtype=enum value={world_size} "
-                f"dtype_param='{factors}'\n"
-                f"（因数集={factors}；dp/pp 可留空，collect_context 会兜底补齐）"
+                f"baseline 将以 tp=1 起服务，多卡必 OOM。world_size 只是资源额度"
+                f"（tp×dp={world_size}），不是布局约束。合法组合：{combos}。"
+                f"按以下两种方式之一登记 tp（写入一律走 config_writer，禁止手改 TOML）：\n"
+                f"  A) 登记为搜索维度：tp、dp 都登记为 enum 可变维度；此后每个候选的 tp/dp "
+                f"必须成对出现且 tp×dp={world_size}：\n"
+                f"     config_writer --config <config 路径> --target-field engine={engine} "
+                f"name=tp config_position=run dtype=enum value={factors[0]} dtype_param='{factors}'\n"
+                f"     config_writer --config <config 路径> --target-field engine={engine} "
+                f"name=dp config_position=run dtype=enum value={world_size // factors[0]} "
+                f"dtype_param='{[world_size // f for f in factors]}'\n"
+                f"  B) 登记为常量：choices 收窄为单值即常量（保留多值仍是搜索维度）；"
+                f"dp 写入 others：\n"
+                f"     config_writer --config <config 路径> --target-field engine={engine} "
+                f"name=tp config_position=run dtype=enum value=<选定tp> dtype_param='[<选定tp>]'\n"
+                f"     在 [vllm.command].others 追加 --data-parallel-size <world_size//选定tp>\n"
+                f"  钉死组合时，在场景冻结清单记录选定组合、备选组合、不探索理由。"
+                f"禁止只登记 tp 常量而不声明 dp。"
             )
 
     # --- others 伪 JSON 兜底（最后一道门禁） ---------------------------------------
@@ -376,6 +394,294 @@ def _run_ais_bench_search_gate(config: Dict[str, Any]) -> tuple[List[str], List[
         if snippet:
             parts.append(f"ais_bench 输出: {snippet}")
         errors.append(" —— ".join(parts))
+    return errors, warnings
+
+
+# benchmark_spec 一致性门禁（P1，2026-09-14）
+# context.json 的 benchmark_spec（用户确认的压测负载：输入/输出长度、请求数 + 并发）
+# 是全流程唯一事实源；本门禁在第一个 trial 启动前比对三个生效面的实际值，错配即拦截。
+# 并发两形态：固定 concurrency=N → CONCURRENCY 钉死 min==max==value（硬约束）；
+# 可调 concurrency_range=[lo,hi] → CONCURRENCY 进搜索空间 min<max 与范围对齐（吞吐优先）。
+# 比对三个生效面：
+#   ① config.toml：[ais_bench.command].others --num-prompts + [[engine].target_field]
+#     CONCURRENCY（并发真源，optix 每 trial 据此改写 models 配置 batch_size）
+#   ② ais_bench models 配置：batch_size（并发）、max_out_len（输出长度）
+#   ③ 共享真源 <ais_bench 包>/datasets/synthetic/synthetic_config.py：
+#     StringConfig.Input/Output.Params（输入/输出长度）、RequestCount（请求数）
+# 生效请求数 = min(--num-prompts, RequestCount)，故两源分别比对。②③ 需定位已安装的
+# ais_bench 包；定位不到时降级 WARNING（① 始终强制）。
+
+
+def _find_context_json(explicit: str, run_id: str = "") -> Path | None:
+    """Resolve context.json：显式路径 > run 目录自动发现（仅唯一候选才采纳）。"""
+    if explicit:
+        p = Path(explicit)
+        return p if p.exists() else None
+    runs = Path.cwd() / ".agent_optimizer" / "runs"
+    if run_id and (runs / run_id / "context.json").exists():
+        return runs / run_id / "context.json"
+    found = sorted(runs.glob("*/context.json")) if runs.exists() else []
+    return found[0] if len(found) == 1 else None
+
+
+def _ais_bench_pkg_root() -> Path | None:
+    """不执行 import 定位已安装的 ais_bench 包目录（editable/命名空间包均可）。
+
+    两级查找：① 当前解释器 importlib find_spec；② PATH 上的 ais_bench 可执行文件
+    （如独立 venv 安装，optix 实际用的就是 PATH 上这个）——解析其 venv 的 python
+    再 find_spec。两级都找不到才返回 None（按未安装处理，校验降级 warning）。
+    """
+    try:
+        spec = importlib.util.find_spec("ais_bench")
+    except Exception:  # noqa: BLE001 - 定位失败按未安装处理
+        spec = None
+    if spec and spec.submodule_search_locations:
+        return Path(spec.submodule_search_locations[0])
+    exe = shutil.which("ais_bench")
+    if not exe:
+        return None
+    venv_py = Path(exe).resolve().parent / "python"
+    if not venv_py.exists():
+        return None
+    try:
+        res = subprocess.run(
+            [
+                str(venv_py),
+                "-c",
+                "import importlib.util as u; s = u.find_spec('ais_bench'); "
+                "print(s.submodule_search_locations[0] if s and s.submodule_search_locations else '')",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001 - 探测失败按未安装处理
+        return None
+    out = (res.stdout or "").strip()
+    return Path(out) if res.returncode == 0 and out else None
+
+
+def _read_model_cfg_values(model_file: Path) -> Dict[str, Any]:
+    """AST 读取 ais_bench models Python 配置里的 batch_size / max_out_len / path（不执行文件）。"""
+    out: Dict[str, Any] = {}
+    tree = ast.parse(model_file.read_text(encoding="utf-8"), filename=str(model_file))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg in ("batch_size", "max_out_len", "path"):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, (int, str)):
+                out.setdefault(node.arg, node.value.value)
+            elif node.arg == "path":
+                out.setdefault("path", "<dynamic>")  # 非字面量赋值：存在即可，不参与空值判定
+    return out
+
+
+def _check_ais_bench_model_path(config: Dict[str, Any]) -> tuple[List[str], List[str]]:
+    """ais_bench models 配置的 path（tokenizer 路径）必填校验。
+
+    perf/concurrency 模式下 ais_bench 用 path 加载 tokenizer；缺省为空字符串，
+    首个 trial 才报 `Tokenizer path '' does not exist` —— 提前到 preflight 拦截。
+    不校验 path 指向的目录是否存在（写 config 的机器不一定是跑 trial 的机器）。
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+    models_name = str(((config.get("ais_bench") or {}).get("command") or {}).get("models") or "").strip()
+    if not models_name or models_name in _PLACEHOLDER_VALUES:
+        return errors, warnings
+    pkg = _ais_bench_pkg_root()
+    if pkg is None:
+        return errors, warnings  # 包不在本机：一致性门禁里已告警，此处静默
+    model_files = sorted(pkg.glob(f"benchmark/configs/models/**/{models_name}.py"))
+    if not model_files:
+        return errors, warnings  # 短名解析不到：--search 门禁已拦截，此处不重复
+    path_val = _read_model_cfg_values(model_files[0]).get("path")
+    if not isinstance(path_val, str) or not path_val.strip():
+        errors.append(
+            f"models 配置缺 path（tokenizer 路径）：{model_files[0].name} 的 path 缺失或为空 —— "
+            "ais_bench perf/concurrency 模式按 path 加载 tokenizer，缺失会在首个 trial 报 "
+            "`Tokenizer path '' does not exist`；在 models 配置的模型 dict 里补 path=<模型权重目录>"
+        )
+    return errors, warnings
+
+
+def _read_synthetic_cfg_values(synth_file: Path) -> Dict[str, Any]:
+    """AST 读取 synthetic_config.py 顶层 ``synthetic_config`` 字面量 dict（不执行文件）。"""
+    tree = ast.parse(synth_file.read_text(encoding="utf-8"), filename=str(synth_file))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == "synthetic_config":
+                    try:
+                        value = ast.literal_eval(node.value)
+                    except (ValueError, SyntaxError):
+                        return {}
+                    return value if isinstance(value, dict) else {}
+    return {}
+
+
+def _check_benchmark_consistency(
+    config: Dict[str, Any],
+    engine: str,
+    context_path: str,
+    benchmark: str,
+    run_id: str = "",
+) -> tuple[List[str], List[str]]:
+    """比对 config.toml + ais_bench 实际配置 vs context.benchmark_spec。
+
+    返回 (errors, warnings)。非 ais_bench / 无已确认 benchmark_spec 时跳过（仅警告）。
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+    if benchmark != "ais_bench":
+        warnings.append(f"benchmark={benchmark} 跳过 benchmark_spec 一致性校验（该门禁仅覆盖 ais_bench）")
+        return errors, warnings
+    ctx_file = _find_context_json(context_path, run_id)
+    if ctx_file is None:
+        warnings.append("未找到 context.json（--context 未给且自动发现失败）—— 跳过 benchmark_spec 一致性校验")
+        return errors, warnings
+    try:
+        context = json.loads(ctx_file.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - 坏 context 不阻断既有完整性检查
+        warnings.append(f"context.json 解析失败（{exc}）—— 跳过 benchmark_spec 一致性校验")
+        return errors, warnings
+    spec = context.get("benchmark_spec") or {}
+    base_vals = [spec.get(k) for k in ("input_len_avg", "output_len_avg", "num_requests")]
+    # 并发两形态：固定 concurrency=N（延迟敏感，硬约束）/ 可调 concurrency_range=[lo,hi]
+    # （吞吐优先，并发进搜索空间），二者居其一
+    conc_fixed = spec.get("concurrency")
+    conc_range = spec.get("concurrency_range")
+    conc_ok = isinstance(conc_fixed, int) or (
+        isinstance(conc_range, list)
+        and len(conc_range) == 2
+        and all(isinstance(v, int) for v in conc_range)
+        and conc_range[0] < conc_range[1]
+    )
+    if not context.get("benchmark_spec_confirmed") or not all(isinstance(v, int) for v in base_vals) or not conc_ok:
+        warnings.append("context.json 无已确认的 benchmark_spec —— 跳过一致性校验（headless 模式必须先登记）")
+        return errors, warnings
+    exp_input, exp_output, exp_reqs = (int(v) for v in base_vals)
+    exp_conc = int(conc_fixed) if isinstance(conc_fixed, int) else None
+    exp_range = [int(v) for v in conc_range] if exp_conc is None else None
+
+    # ① config.toml 面：--num-prompts + CONCURRENCY target_field
+    ais_others = str(((config.get("ais_bench") or {}).get("command") or {}).get("others") or "")
+    tokens = shlex.split(ais_others)
+    num_prompts: int | None = None
+    for i, tok in enumerate(tokens):
+        if tok == "--num-prompts" and i + 1 < len(tokens):
+            try:
+                num_prompts = int(tokens[i + 1])
+            except ValueError:
+                num_prompts = None
+            break
+        if tok.startswith("--num-prompts="):
+            try:
+                num_prompts = int(tok.split("=", 1)[1])
+            except ValueError:
+                num_prompts = None
+            break
+    if num_prompts is None:
+        errors.append(
+            f"[ais_bench.command].others 缺 --num-prompts {exp_reqs}（benchmark_spec.num_requests）—— "
+            f'经 config_writer --set-others ais_bench="--datasets <数据集短名> --num-prompts {exp_reqs}" 写入'
+        )
+    elif num_prompts != exp_reqs:
+        errors.append(
+            f"请求数不匹配：[ais_bench.command].others --num-prompts={num_prompts}，"
+            f"benchmark_spec.num_requests={exp_reqs}"
+        )
+    conc_field = None
+    for tf in (config.get(engine) or {}).get("target_field") or []:
+        if str(tf.get("name") or "").strip().upper() == "CONCURRENCY":
+            conc_field = tf
+            break
+    pin_cmd = (
+        f"config_writer --target-field engine={engine} name=CONCURRENCY "
+        f"config_position=env dtype=int value={exp_conc} min={exp_conc} max={exp_conc}"
+    )
+    if exp_conc is not None:
+        errors.extend(
+            f"[{engine}.target_field] {message} —— 钉死命令：{pin_cmd}"
+            for message in check_fixed_concurrency((config.get(engine) or {}).get("target_field") or [], exp_conc)
+        )
+    else:
+        # 可调形态（吞吐优先）：CONCURRENCY 是搜索维度，min<max 且与 spec 范围对齐
+        lo, hi = exp_range
+        range_cmd = (
+            f"config_writer --target-field engine={engine} name=CONCURRENCY "
+            f"config_position=env dtype=int value={lo} min={lo} max={hi}"
+        )
+        if conc_field is None:
+            errors.append(
+                f"[{engine}.target_field] 缺 CONCURRENCY（benchmark_spec.concurrency_range={exp_range}）—— "
+                f"写入命令：{range_cmd}"
+            )
+        else:
+            tf_min, tf_max = conc_field.get("min"), conc_field.get("max")
+            numeric = (
+                isinstance(tf_min, (int, float))
+                and not isinstance(tf_min, bool)
+                and isinstance(tf_max, (int, float))
+                and not isinstance(tf_max, bool)
+            )
+            if not numeric or int(tf_min) >= int(tf_max):
+                errors.append(
+                    f"并发形态不匹配：benchmark_spec.concurrency_range={exp_range}（可调，进搜索空间），"
+                    f"但 CONCURRENCY 被钉死（min={tf_min} max={tf_max}）—— 改范围命令：{range_cmd}"
+                )
+            elif int(tf_min) != lo or int(tf_max) != hi:
+                errors.append(
+                    f"并发范围不匹配：[{engine}.target_field] CONCURRENCY min={tf_min} max={tf_max}，"
+                    f"benchmark_spec.concurrency_range={exp_range} —— 写入命令：{range_cmd}"
+                )
+
+    # ②③ ais_bench 实际配置面（定位不到包时降级 warning，① 已强制）
+    pkg = _ais_bench_pkg_root()
+    if pkg is None:
+        warnings.append("ais_bench 未安装（当前 python 与 PATH 均定位不到）—— 跳过 models/synthetic_config 内容校验")
+        return errors, warnings
+    models_name = str(((config.get("ais_bench") or {}).get("command") or {}).get("models") or "").strip()
+    model_files = sorted(pkg.glob(f"benchmark/configs/models/**/{models_name}.py")) if models_name else []
+    if not model_files:
+        warnings.append(f"models 配置文件未找到（{models_name}）—— 跳过 batch_size/max_out_len 校验")
+    else:
+        got = _read_model_cfg_values(model_files[0])
+        got_bs = got.get("batch_size")
+        got_mol = got.get("max_out_len")
+        if got_bs is not None and exp_conc is not None and got_bs != exp_conc:
+            errors.append(
+                f"并发不匹配：{model_files[0].name} batch_size={got_bs}，benchmark_spec.concurrency={exp_conc}"
+            )
+        elif got_bs is not None and exp_range and not (exp_range[0] <= got_bs <= exp_range[1]):
+            # 可调形态下 optix 每 trial 改写 batch_size，初始值只需落在范围内
+            warnings.append(
+                f"{model_files[0].name} batch_size={got_bs} 超出 benchmark_spec.concurrency_range={exp_range}"
+                "（可调形态：初始值仅影响首个 trial 前的探测，建议调到范围内）"
+            )
+        if got_mol is not None and got_mol != exp_output:
+            errors.append(
+                f"输出长度不匹配：{model_files[0].name} max_out_len={got_mol}，benchmark_spec.output_len_avg={exp_output}"
+            )
+    synth = pkg / "datasets" / "synthetic" / "synthetic_config.py"
+    if not synth.exists():
+        warnings.append(f"synthetic_config.py 未找到（{synth}）—— 跳过 StringConfig/RequestCount 校验")
+    else:
+        sc = _read_synthetic_cfg_values(synth)
+        in_params = ((sc.get("StringConfig") or {}).get("Input") or {}).get("Params") or {}
+        out_params = ((sc.get("StringConfig") or {}).get("Output") or {}).get("Params") or {}
+        got_in = (in_params.get("MinValue"), in_params.get("MaxValue"))
+        got_out = (out_params.get("MinValue"), out_params.get("MaxValue"))
+        if got_in != (exp_input, exp_input):
+            errors.append(
+                f"输入长度不匹配：synthetic_config StringConfig.Input={got_in}，benchmark_spec.input_len_avg={exp_input}"
+            )
+        if got_out != (exp_output, exp_output):
+            errors.append(
+                f"输出长度不匹配：synthetic_config StringConfig.Output={got_out}，benchmark_spec.output_len_avg={exp_output}"
+            )
+        got_reqs = sc.get("RequestCount")
+        if got_reqs != exp_reqs:
+            errors.append(
+                f"请求数不匹配：synthetic_config RequestCount={got_reqs}，benchmark_spec.num_requests={exp_reqs}"
+            )
     return errors, warnings
 
 
@@ -589,11 +895,15 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument(
         "--set-max-rounds", type=int, help="Back-fill [agent_optimizer].max_rounds（轮数上限，optix 运行终止依据）"
     )
-    parser.add_argument("--set-max-trials", type=int, help="Back-fill [agent_optimizer].max_trials（trial 总数上限）")
+    parser.add_argument(
+        "--set-max-trials",
+        type=int,
+        help="Back-fill [agent_optimizer].max_trials（单轮候选数上限：每轮最多执行的 trial 数）",
+    )
     parser.add_argument(
         "--set-time-limit-minutes",
         type=int,
-        help="Back-fill [agent_optimizer].time_limit_minutes（全局时间预算，分钟，≤1440）",
+        help="Back-fill [agent_optimizer].time_limit_minutes（单轮执行时间上限，分钟，≤1440；跨轮总预算由 agent 跨轮累计管理）",
     )
     parser.add_argument("--ttft-slo", type=float, help="Back-fill ttft_slo")
     parser.add_argument("--tpot-slo", type=float, help="Back-fill tpot_slo")
@@ -605,6 +915,14 @@ def main(argv: List[str] | None = None) -> int:
             "optix-assistant run-id（与 collect_context --run-id 一致）。仅用于校验 "
             "[agent_optimizer].run_id 是否与它对齐，不写入 config.toml；写入需通过 "
             "--set-agent-mode（自动对齐 run_id + 清空 run_dir）。"
+        ),
+    )
+    parser.add_argument(
+        "--context",
+        default="",
+        help=(
+            "context.json 路径（benchmark_spec 一致性门禁的真源）。缺省时自动发现 "
+            "CWD/.agent_optimizer/runs/<run-id>/context.json；无已确认 benchmark_spec 时跳过该校验"
         ),
     )
     args = parser.parse_args(argv)
@@ -669,6 +987,15 @@ def main(argv: List[str] | None = None) -> int:
     if args.benchmark == "ais_bench":
         # 短名合法性由安装的 ais_bench 判定（--search fail-closed），不依赖文档经验
         gate_errors, gate_warnings = _run_ais_bench_search_gate(config)
+        # models 配置 path（tokenizer 路径）必填：缺失时首个 trial 才报错，提前拦截
+        path_errors, path_warnings = _check_ais_bench_model_path(config)
+        gate_errors = [*gate_errors, *path_errors]
+        gate_warnings = [*gate_warnings, *path_warnings]
+    # benchmark_spec 一致性门禁：config.toml + ais_bench 实际配置 vs context 真源，
+    # 错配在第一个 trial 前拦截（headless 契约：不过门禁不得启动 optix）
+    spec_errors, spec_warnings = _check_benchmark_consistency(config, args.engine, args.context, args.benchmark, run_id)
+    gate_errors = [*gate_errors, *spec_errors]
+    gate_warnings = [*gate_warnings, *spec_warnings]
     errors = [*errors, *gate_errors]
     for e in errors:
         print(f"ERROR: {e}")

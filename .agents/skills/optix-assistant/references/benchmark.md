@@ -44,13 +44,37 @@ python <SKILL_ROOT>/scripts/config_writer.py --config <config.toml> \
 
 `--set-others` 整体覆盖 `[vllm_benchmark.command].others`，支持 `$VAR` 占位符（与 `[vllm.command].others` 规则一致）。
 
+### vllm bench serve 关键参数语义（`vllm bench serve --help` 实测，vLLM 0.23）
+
+optix 拼出的固定 argv 形态：
+`vllm bench serve --host <h> --port <p> --model <m> --served-model-name <n> --dataset-name <d> --max-concurrency $CONCURRENCY --request-rate $REQUESTRATE --result-dir <result_dir> --save-result [--num-prompts <N>] [<others 拆分追加>]`
+（`$CONCURRENCY`/`$REQUESTRATE` 是占位 token，每 trial 由 optix 替换为候选值；
+`REQUESTRATE` ≤0 时该 flag 连同值被整体删除。）
+
+| flag | 语义 | 默认 |
+|---|---|---|
+| `--request-rate` | 每秒请求数；`inf` = 所有请求 t=0 同时发出；有限值按 Poisson 到达（`--burstiness`≠1 时 gamma 分布） | `inf` |
+| `--max-concurrency` | 同时在跑的请求数上限；与 `--request-rate` 同用时实际速率可能低于设定值（服务端跟不上时） | 无（None） |
+| `--num-prompts` | 总请求数 | 1000 |
+| `--random-input-len` / `--random-output-len` | 每请求输入/输出 token 数，仅 random 数据集生效 | 1024 / 128 |
+| `--input-len` / `--output-len` | 通用长度入口，映射到具体数据集的长度参数（如对 random 即上面两项） | 数据集默认 |
+| `--random-range-ratio` | random 长度采样波动比例，采样区间 `[len×(1-r), len×(1+r)]`，取值 [0,1) | 0.0 |
+| `--dataset-name` | 数据集（`random`/`sharegpt`/`sonnet`/`hf`/`custom`/…） | `random` |
+| `--burstiness` | 到达突发度：1.0=Poisson，<1 更突发，>1 更均匀；仅 `--request-rate` 非 `inf` 时生效 | 1.0 |
+| `--served-model-name` | API 侧模型名，缺省同 `--model` | 同 `--model` |
+| `--ignore-eos` | 请求带 ignore_eos，输出长度贴近 `--random-output-len`（否则 EOS 会提前截断输出，拉偏 TPOT/吞吐） | False |
+| `--result-dir` + `--save-result` | 结果 JSON 落盘目录；optix 固定携带两者，指标从该 JSON 解析（映射见 `optix-reference.md` 性能指标映射一节） | 当前目录 / 不保存 |
+
 ## 3. ais_bench（MindIE 引擎 / 自定义负载）
 
 > **配置形态与放置规则（本文唯一流程指导，实测验证）**：
 > 1. AISBench 的 `models`/`datasets` 配置是 **Python 文件**（mmengine 风格，定义 `models = [...]` / `datasets = [...]` 列表），**不是 YAML**。
-> 2. CLI 的 `--models/--datasets` **只接受包内可被唯一解析的短名**（`match_cfg_file` 递归搜索，匹配 0 个或 >1 个都报 `UTILS-MATCH-001`），**不接受绝对路径**。**具体匹配规则随 ais_bench 版本而变**——当前实测按配置文件 **basename** 全树 fnmatch（带 `子目录/` 前缀或绝对路径均 0 命中）；authority 是**运行环境 `ais_bench --search` 实测**，不是本文。搜索目录为 `<args.config_dir>/models` 与 **`<ais_bench 包根>/benchmark/configs/models`**（注意是 `benchmark/configs/`，不是仓根的 `configs/`）。editable 安装下包根即 `python -c "import ais_bench; import os; print(os.path.dirname(ais_bench.__file__))"`。写入 config 后由 `config_preflight --check-only` 的 ais_bench `--search` 门禁统一校验（错误在门禁期拦截，不拖到 optix 启动）。
+> 2. CLI 的 `--models/--datasets` **只接受包内可被唯一解析的短名**（`match_cfg_file` 递归搜索，匹配 0 个或 >1 个都报 `UTILS-MATCH-001`），**不接受绝对路径**。**具体匹配规则随 ais_bench 版本而变**——当前实测按配置文件 **basename** 全树 fnmatch（带 `子目录/` 前缀或绝对路径均 0 命中）；authority 是**运行环境 `ais_bench --search` 实测**，不是本文。搜索目录为 `<args.config_dir>/models` 与 **`<ais_bench 包根>/benchmark/configs/models`**（注意是 `benchmark/configs/`，不是仓根的 `configs/`）。包根定位（PyPI wheel / 源码安装通用）： `python -c "import ais_bench; import os; print(os.path.dirname(ais_bench.__file__))"`。写入 config 后由 `config_preflight --check-only` 的 ais_bench `--search` 门禁统一校验（错误在门禁期拦截，不拖到 optix 启动）。
 > 3. CLI **强制要求显式 `--datasets`**（缺省报 `TMAN-CMD-001: You must specify --datasets`）；optix 的命令只带 `--models/--mode/--work-dir`，因此 `--datasets` 必须经 `[ais_bench.command].others = "--datasets <短名>"` 传递。
 > 4. 启动前必做预检：`ais_bench --models <短名> --datasets <短名> --search`（毫秒级，打印解析路径表格）。
+> 5. `--search` 只验短名解析，**不验配置内容**。models/datasets/synthetic_config 改完后，
+>    **先小规模跑通一次再进正式寻优**（如 `--num-prompts 20` 起一个短 trial，或直接用 ais_bench 拉起一次），
+>    把配置错误拦在正式 trial 之外。
 
 ### 必填项（preflight 检查）
 
@@ -66,10 +90,16 @@ python <SKILL_ROOT>/scripts/config_writer.py --config <config.toml> \
 ```bash
 # 1) 编写 models / datasets 配置（基于 AISBench 内置模板，Python）：
 #    models:  <pkg>/benchmark/configs/models/optix_custom/<name>.py
-#      参考 api_examples/demo_infer_vllm_api_perf.py + models/vllm_api/vllm_api_stream_chat.py，
-#      VLLMCustomAPIChatStream 配置 host_ip/host_port/max_out_len/batch_size/generation_kwargs
+#      参考内置模板 models/vllm_api/vllm_api_stream_chat.py 与 models/vllm_api/vllm_api_general_stream.py，
+#      VLLMCustomAPIChatStream 配置 path/host_ip/host_port/max_out_len/batch_size/generation_kwargs
+#      （path = tokenizer 路径，指向模型权重目录，perf/concurrency 模式必填，缺了首个 trial 才报错）
 #    datasets: <pkg>/benchmark/configs/datasets/optix_custom/<name>.py
 #      参考 datasets/synthetic/synthetic_gen_string.py（RequestCount / StringConfig 控制规模与输入输出长度）
+# 1b) 采样参数默认不设置：generation_kwargs 只保留 benchmark 必需的 ignore_eos
+#     （精确输出长度），禁止自行指定 temperature/top_p/top_k 等采样参数——请求不带
+#     采样参数时 vLLM 走模型 generation_config.json 默认值；temperature 直接影响
+#     draft 接受率（投机解码场景）与输出分布，随意指定会让吞吐/TPOT 口径失真、
+#     跨 run 不可比。仅当用户明确要求特定采样参数时才写入，并在交付报告中注明。
 # 2) 预检（必须能解析出 --models 与 --datasets 两行）
 ais_bench --models <短名> --datasets <短名> --search
 # 3) 写入 config.toml（datasets/num-prompts 自动并入 others）
@@ -102,6 +132,11 @@ python <SKILL_ROOT>/scripts/config_writer.py --config <config.toml> \
 - ais_bench 的 `--models/--datasets` 传**绝对路径** → 必报 `UTILS-MATCH-001 match config file failed`（只按包内短名匹配），配置需放入 `<pkg>/benchmark/configs/models|datasets/` 下；
 - ais_bench 的 `--models/--datasets` 写成 `子目录/文件名`（含目录前缀）→ **同样 `UTILS-MATCH-001`**（匹配规则随版本而变，当前实测按 basename，不含目录）；短名 = config 文件名去 `.py`、**不带目录**，新建 model/dataset 配置须保证 basename 在整棵 `models|datasets` 树下唯一；一律以 `ais_bench --search` 唯一解析为准；
 - ais_bench 只配 models 不配 datasets → 启动时 `TMAN-CMD-001 You must specify --datasets`；经 `[ais_bench.command].others = "--datasets <短名>"` 传递；
+- ais_bench models 配置缺 `path`（tokenizer 路径）→ 首个 trial 报 `Tokenizer path '' does not exist. Please set path in model config`；在模型 dict 里补 `path=<模型权重目录>`（`config_preflight --check-only` 已加该校验，门禁期拦截）；
+- `synthetic_config.py` 的 `StringConfig.Input/Output.Params` 合法键随 `Type` 而定：**uniform 只接受 `MinValue`/`MaxValue`**（固定长度写两者相等），写 `Mean` 会报 `Mean is not a valid key for uniform`；其他 Type 的合法键以 ais_bench 源码为准；
+- ais_bench 是**单端点压测**：dp>1 候选须保证全部 DP rank 位于单一端口之后。vLLM 默认 internal-LB（多 ApiServer 共享 `--port`，按请求负载均衡）满足条件，dp>1 可直接进入候选；multi-port-external-lb / external-lb（含 `--data-parallel-rank`）将各 rank 绑独立端口，直连只压单 rank，须
+前置负载均衡器，否则候选避免；
+- ais_bench models 配置的 `generation_kwargs` 里**自行指定 temperature/top_p/top_k** → 采样分布偏离模型默认，draft 接受率与吞吐口径失真且跨 run 不可比（实测两个 run 分别写了 0.01 和 1.0）；除非用户明确要求，generation_kwargs 只保留 `ignore_eos`，采样参数走模型 `generation_config.json` 默认值（请求不带采样参数时 vLLM 的默认行为）；
 - ais_bench 的 `--search` 是零副作用预检命令，启动前必跑一次（拦下上述两类配置故障）；
 - 两个 benchmark 的 host/port 都指**被测服务**，不是本机调试端口。
 
@@ -123,7 +158,8 @@ python <SKILL_ROOT>/scripts/config_writer.py --config <config.toml> \
 | 项 | ais_bench | vllm_benchmark |
 |---|---|---|
 | mode | `perf`（备选 concurrency / throughput） | —（无 mode 字段） |
-| 压测规模 | `--num-prompts` 建议 3000 | `--num-prompts` 建议 500 |
+| 并发 | **必问形态**：延迟敏感（用户关心并发）→ 固定值 N（硬约束，CONCURRENCY 钉死）；只关心总吞吐 → 范围 lo~hi（进搜索空间，建议值取 `recommend_params` 输出的 concurrency_default ~ concurrency_hi） | 同左 |
+| 压测规模 | `--num-prompts` 建议 3000（≥并发上限） | `--num-prompts` 建议 500 |
 | 输入长度 | datasets 配置 `StringConfig.Input` 定义 | 对话场景 `--random-input-len 1024`；长文本 4096；需业务确认 |
 | 输出长度 | datasets 配置 `StringConfig.Output` 定义 | 对话场景 `--random-output-len 256`；长文本 512；需业务确认 |
 | host/port | —（无 host/port，由 models 配置 `host_ip/host_port` 定义负载） | 默认 `127.0.0.1:8000`，**必须与 `[vllm.command]` 一致** |
@@ -148,14 +184,19 @@ python <SKILL_ROOT>/scripts/config_writer.py --config <config.toml> \
 - **输入/输出长度** → 必问（禁止静默用占位默认），见步骤 2
 
 1. 0a 询问 benchmark（上文话术）→ 无偏好默认 ais_bench
-2. 收集必填项：每项给出 6.2 建议值 → 用户确认 → 记下。**输入/输出长度必问**：
+2. 收集必填项：每项给出 6.2 建议值 → 用户确认 → 记下。**输入/输出长度必问**（禁止静默用占位默认）；**并发必问形态**：
+   "业务对并发敏感吗？"——延迟敏感 → 固定并发 N（硬约束，逐 trial 不变）；
+   只关心总吞吐 → 并发范围 lo~hi（并发成为搜索维度，optimizer 与服务参数一起调，
+   目标吞吐最大化）。两形态分别经 `collect_context --concurrency N` /
+   `--concurrency-min lo --concurrency-max hi` 登记，写入 CONCURRENCY target_field 时
+   固定形态钉死 `min==max==value`、范围形态给 `min<max`（门禁按形态分别校验）；
    - vllm_benchmark → 确认后 `config_writer.py --config <config.toml> --set-others vllm_benchmark="--random-input-len <N> --random-output-len <N>"` 写入 `[vllm_benchmark.command].others`
    - ais_bench → 用户确认 datasets 配置的 Input/Output 长度
    - 长度同时传给 `collect_context --input-len <N> --output-len <N>` 供 Roofline/KV 数值推导
 3. `config_writer.py` 写入（`--set` + `--set-others`/`--append-others`，命令见 §2/§3）
 4. `config_preflight.py --check-only` 复检 → 退出 0 → 生效配置确认表 → 用户确认 → 进入寻优
 5. models/datasets Python 配置用户没有时：指向 AISBench 官方文档（models 配置说明）+
-   内置模板 `configs/api_examples/demo_infer_vllm_api_perf.py`（models）与
-   `configs/models/vllm_api/vllm_api_stream_chat.py`、`datasets/synthetic/synthetic_gen_string.py`，
+   内置模板 `configs/models/vllm_api/vllm_api_stream_chat.py`（models）与
+   `datasets/synthetic/synthetic_gen_string.py`（datasets），
    说明"需要一份模型任务配置（Python），可先按内置模板创建并放入 `<pkg>/benchmark/configs/{models,datasets}/`"，
    再经 `config_writer.py --set ais_bench.command.models=<短名> --append-others ais_bench="--datasets <短名>"` 写入 + `--search` 预检。

@@ -186,10 +186,26 @@ class AgentOptimizer:
     # Search-space context shared across rounds
     # ------------------------------------------------------------------ #
     def _load_search_space_context(self) -> dict:
-        context = {}
-        search_space_file = self.run_dir / "context.json"
-        if search_space_file.exists():
-            context = json.loads(search_space_file.read_text(encoding="utf-8"))
+        context_path = self.run_dir / "context.json"
+        if not context_path.exists():
+            raise ValueError(
+                f"Search-space context not found: {context_path}. Establish the search space "
+                "first per the optix-assistant skill workflow (context.json with a "
+                "'search_space' section) before running agent-mode optimization."
+            )
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        search_space = context.get("search_space")
+        if search_space is None:
+            raise ValueError(
+                f"Search-space context {context_path} has no 'search_space' section. Establish "
+                "the search space first per the optix-assistant skill workflow."
+            )
+        if not isinstance(search_space, dict):
+            raise ValueError(
+                f"Search-space context {context_path}: 'search_space' must be an object, "
+                f"got {type(search_space).__name__}. Rebuild it per the optix-assistant "
+                "skill workflow."
+            )
         return context
 
     # ------------------------------------------------------------------ #
@@ -248,7 +264,6 @@ class AgentOptimizer:
                     # Dual-gate convergence: trend AND search-space coverage.
                     coverage = search_space_coverage(
                         self.run_dir,
-                        context,
                         min_rounds=self.config.min_rounds,
                         min_trials=self.config.min_trials,
                     )

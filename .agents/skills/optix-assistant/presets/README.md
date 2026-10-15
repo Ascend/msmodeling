@@ -129,8 +129,13 @@ python .agents/skills/optix-assistant/presets/scripts/validate_presets_schema.py
 
 ## 运行时如何被使用
 
-- `collect_context.py::_inject_vendor_preset`：按 **模型名/aliases + 硬件 + workload 长度**匹配目录，
-  命中则把官方推荐参数**填空**注入搜索空间（`source="vendor_preset"`），并写入 `knowledge.vendor_preset`。
-- **优先级**：用户显式配置（config.toml / search-space / recommend-result）最高，vendor 只填空不覆盖；
+- `collect_context.py::_inject_vendor_preset`：按 `source.optimizer_strategy` 分流——
+  agent 模式跳过注入（其唯一消费者 `apply_launch_config.py` 是 PSO 专用，agent
+  模式没有消费方；官方案例走 `knowledge/case-knowledge`，见
+  `references/pso-mode.md`「preset 分流」硬边界）。PSO 模式按 **模型名/aliases +
+  硬件 + workload 长度**匹配目录，命中则写入 `knowledge.vendor_preset`（params /
+  env / additional_config），**不注入搜索空间**；`env` 与 `additional_config` 由
+  `apply_launch_config.py` 落到 `launch_env.sh` 和 config.toml。
+- **优先级**：用户显式配置（config.toml / search-space / recommend-result）最高，vendor 值只作种子与静态通道补充；
   实测结果（results.round-*.json）最终权威。详见设计文档 §2.2。
 - **未命中 / 文件缺失 / 硬件不符** → 静默回退，不影响寻优。
