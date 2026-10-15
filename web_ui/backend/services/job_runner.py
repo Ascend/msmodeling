@@ -361,11 +361,13 @@ def build_run_job(job_manager: "JobManager") -> "JobManager | None":
                 for ch, content in case_logs.items():
                     write_case_log_file(ch, content)
 
-            # 6. Check for validation failures in records
-            # If ANY case failed validation, collect the error info.
-            # If ALL cases failed, mark job as FAILED; otherwise SUCCEEDED with partial errors.
+            # 6. Check for failures in records (validation + runtime).
+            # A record is "failed" if it has summary.error — either via validation_failed
+            # (parameter errors) or plain error (runtime crash like model load failure).
+            # If ALL records failed, the job is FAILED; otherwise SUCCEEDED (partial ok).
             validation_errors = []
             validation_fields_set = set()
+            runtime_errors = []
             for r in all_records:
                 summary = r.summary if isinstance(r.summary, dict) else {}
                 if summary.get("validation_failed"):
@@ -373,26 +375,39 @@ def build_run_job(job_manager: "JobManager") -> "JobManager | None":
                     fields = summary.get("error_fields")
                     if fields:
                         validation_fields_set.update(fields)
+                elif summary.get("error"):
+                    # Runtime error without validation_failed — also a failure.
+                    runtime_errors.append(summary.get("error", "Runtime error"))
 
             # 7. Success — persist params_hash + log_text so a future identical
             # submission reuses this run's results + CLI log (Phase C cache source).
             log_text = "\n".join(ring.get_all()) if ring else None
 
-            if len(validation_errors) == len(all_records):
-                # ALL cases failed validation — mark job as FAILED
+            total_failures = len(validation_errors) + len(runtime_errors)
+
+            if total_failures == len(all_records) and len(all_records) > 0:
+                # ALL cases failed (validation + runtime) → FAILED.
+                # Do NOT write params_hash — prevents cache poisoning (Step 3 in bug).
+                is_all_validation = len(runtime_errors) == 0
+                first_error = validation_errors[0] if validation_errors else runtime_errors[0]
                 _w(
-                    lambda e=validation_errors[0], f=list(validation_fields_set): job_repo.update(
+                    lambda e=first_error, f=list(validation_fields_set), av=is_all_validation: job_repo.update(
                         job.id,
                         status=JobStatus.FAILED,
-                        error="Validation failed",
+                        error="Validation failed" if av else "Execution failed",
                         error_detail=e,
-                        error_fields=f if f else None,
-                        params_hash=params_hash,
+                        error_fields=f if av and f else None,
                         log_text=log_text,
                         completed_at=_utcnow(),
                     )
                 )
-                logger.warning(f"Job {job.id}: all {len(all_records)} case(s) failed validation")
+                if is_all_validation:
+                    logger.warning(f"Job {job.id}: all {len(all_records)} case(s) failed validation")
+                else:
+                    logger.warning(
+                        f"Job {job.id}: all {len(all_records)} case(s) failed "
+                        f"(validation={len(validation_errors)}, runtime={len(runtime_errors)})"
+                    )
             else:
                 # SECURITY: Second cancel_flag check before SUCCEEDED write.
                 # Covers IO window between run() return and status persistence.

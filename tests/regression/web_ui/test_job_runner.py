@@ -945,3 +945,153 @@ class TestChromeTraceAndCaseLogs:
             mock_capture.return_value.__exit__.return_value = False
 
             run_job(job)  # must not raise; prints fallback "(no source log; ...)"
+
+
+# ---------------------------------------------------------------------------
+# Terminal state decision (validation + runtime errors)
+# ---------------------------------------------------------------------------
+
+
+def _make_record(case_hash="h1", summary=None, case_log="log"):
+    """Build a fake result record with the given summary dict."""
+    rec = MagicMock()
+    rec.case_hash = case_hash
+    rec.case_log = case_log
+    rec.summary = summary if summary is not None else {}
+    rec.config = {"model_id": "test"}
+    rec.tables = {}
+    return rec
+
+
+def _run_with_records(records):
+    """Helper: run a job with the given records, return (updates, runner_mock)."""
+    manager = _make_manager()
+    run_job = _run_job_from(manager)
+    job = _make_job()
+    runner = MagicMock()
+    runner.run.return_value = (records, [])
+
+    with (
+        patch("services.job_runner.JobRepository") as mock_job_repo,
+        patch("services.job_runner.ResultRepository") as mock_res_repo,
+        patch("services.job_runner.CaseLogRepository"),
+        patch("services.job_runner.write_case_log_file"),
+        patch("services.params_hash.compute_params_hash", return_value="hash123"),
+        patch("runners.registry.create_runner", return_value=runner),
+        patch("services.sim_warmup.ensure_sim_stack_warmed"),
+        patch("services.job_runner.capture_job") as mock_capture,
+    ):
+        mock_job_repo.return_value.find_succeeded_by_params_hash.return_value = None
+        mock_res_repo.return_value.succeeded_case_hashes_for_module.return_value = []
+        ring = MagicMock()
+        ring.get_all.return_value = ["log line"]
+        mock_capture.return_value.__enter__.return_value = ring
+        mock_capture.return_value.__exit__.return_value = False
+
+        run_job(job)
+
+    updates = [c.kwargs for c in mock_job_repo.return_value.update.call_args_list]
+    return updates
+
+
+class TestRunJobTerminalState:
+    """Tests for the terminal state decision logic (validation vs runtime errors).
+
+    Covers the fix: when ALL cases have summary.error (runtime errors, not just
+    validation_failed), the job should be FAILED with no params_hash written.
+    This prevents cache poisoning where a failed job is returned as "succeeded".
+    """
+
+    def test_all_validation_failed_marked_failed(self):
+        """All cases have summary.validation_failed → FAILED, error='Validation failed'."""
+        rec1 = _make_record("h1", {"error": "bad param 1", "validation_failed": True})
+        rec2 = _make_record("h2", {"error": "bad param 2", "validation_failed": True})
+
+        updates = _run_with_records([rec1, rec2])
+
+        failed = [u for u in updates if u.get("status") == JobStatus.FAILED]
+        assert len(failed) == 1
+        assert failed[0].get("error") == "Validation failed"
+        assert failed[0].get("error_detail") == "bad param 1"
+
+    def test_all_runtime_errors_marked_failed(self):
+        """All cases have summary.error (no validation_failed) → FAILED, no params_hash.
+
+        This is the bug fix: previously these were marked SUCCEEDED because only
+        validation_failed was counted. Now runtime errors also count as failures.
+        """
+        rec1 = _make_record("h1", {"error": "OSError: model load failed"})
+        rec2 = _make_record("h2", {"error": "OSError: model load failed"})
+
+        updates = _run_with_records([rec1, rec2])
+
+        failed = [u for u in updates if u.get("status") == JobStatus.FAILED]
+        assert len(failed) == 1
+        assert failed[0].get("error") == "Execution failed"
+        assert "model load failed" in failed[0].get("error_detail", "")
+        # KEY ASSERTION: params_hash NOT written by any update call.
+        # Checking only the FAILED update would miss a regression where an
+        # earlier update writes params_hash before the FAILED update omits it.
+        assert all(u.get("params_hash") is None for u in updates)
+
+    def test_mixed_validation_and_runtime_marked_failed(self):
+        """1 validation + 1 runtime error → FAILED, error='Execution failed'."""
+        rec1 = _make_record("h1", {"error": "bad param", "validation_failed": True})
+        rec2 = _make_record("h2", {"error": "model load failed"})
+
+        updates = _run_with_records([rec1, rec2])
+
+        failed = [u for u in updates if u.get("status") == JobStatus.FAILED]
+        assert len(failed) == 1
+        assert failed[0].get("error") == "Execution failed"
+        # error_fields should be None for mixed (not pure validation)
+        assert failed[0].get("error_fields") is None
+        # No update should write params_hash when all records failed.
+        assert all(u.get("params_hash") is None for u in updates)
+
+    def test_partial_runtime_errors_marked_succeeded(self):
+        """1 runtime error + 1 success → SUCCEEDED (partial ok behavior)."""
+        rec1 = _make_record("h1", {"error": "model load failed"})
+        rec2 = _make_record("h2", {})  # success
+
+        updates = _run_with_records([rec1, rec2])
+
+        succeeded = [u for u in updates if u.get("status") == JobStatus.SUCCEEDED]
+        assert len(succeeded) == 1
+        # params_hash should be written for partial success
+        assert succeeded[0].get("params_hash") == "hash123"
+
+    def test_all_success_marked_succeeded(self):
+        """All cases succeed → SUCCEEDED with params_hash."""
+        rec1 = _make_record("h1", {})
+        rec2 = _make_record("h2", {})
+
+        updates = _run_with_records([rec1, rec2])
+
+        succeeded = [u for u in updates if u.get("status") == JobStatus.SUCCEEDED]
+        assert len(succeeded) == 1
+        assert succeeded[0].get("params_hash") == "hash123"
+
+    def test_error_fields_only_for_validation(self):
+        """All validation_failed with error_fields → FAILED with error_fields set."""
+        rec1 = _make_record("h1", {"error": "bad param", "validation_failed": True, "error_fields": ["model-id"]})
+        rec2 = _make_record("h2", {"error": "bad param 2", "validation_failed": True, "error_fields": ["device"]})
+
+        updates = _run_with_records([rec1, rec2])
+
+        failed = [u for u in updates if u.get("status") == JobStatus.FAILED]
+        assert len(failed) == 1
+        assert failed[0].get("error") == "Validation failed"
+        assert set(failed[0].get("error_fields", [])) == {"model-id", "device"}
+
+    def test_error_fields_none_for_runtime(self):
+        """All runtime errors → FAILED with error_fields=None."""
+        rec1 = _make_record("h1", {"error": "OSError: model load failed"})
+        rec2 = _make_record("h2", {"error": "RuntimeError: CUDA out of memory"})
+
+        updates = _run_with_records([rec1, rec2])
+
+        failed = [u for u in updates if u.get("status") == JobStatus.FAILED]
+        assert len(failed) == 1
+        assert failed[0].get("error") == "Execution failed"
+        assert failed[0].get("error_fields") is None
