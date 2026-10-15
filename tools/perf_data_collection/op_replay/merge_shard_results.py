@@ -139,14 +139,22 @@ def _merge_one_csv(
                 cur_best = _row_best_duration(existing)
                 new_best = _row_best_duration(row)
                 if new_best > 0 and (cur_best == 0.0 or new_best < cur_best):
-                    # Replace duration columns but keep the first-seen identity
-                    # columns (Input Shapes, Runtime fields, etc.) stable.
-                    for col in DURATION_COLUMNS:
-                        if col in row:
-                            existing[col] = row[col]
-                # Backfill any columns the existing row is missing.
+                    # The faster sample wins as a whole: replace the record so
+                    # every measurement column (std, hardware counters, vector
+                    # time, ...) comes from that single sample. Keeping only
+                    # the duration columns and backfilling the rest left stale
+                    # std/counter values from the slower shard, producing a
+                    # cross-sample hybrid record. The semantic identity is
+                    # unchanged because both rows share the same signature.
+                    merged[sig] = row
+                    existing = row
+                # Backfill only columns the existing row is missing entirely
+                # (column drift between shards with wider headers). Columns
+                # that exist but are empty belong to the winning sample's own
+                # measurement record and must not be filled from a losing
+                # sample — that would re-introduce a cross-sample hybrid row.
                 for col, val in row.items():
-                    if col not in existing or (not existing[col] and val):
+                    if col not in existing and val:
                         existing[col] = val
 
     if header is None or not merged:

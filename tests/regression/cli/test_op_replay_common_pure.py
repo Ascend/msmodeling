@@ -394,3 +394,162 @@ class TestStringSignatureDtypeDistinction(unittest.TestCase):
             get_sig(base, as_str=True, op_name="DynamicQuant"),
             get_sig(fp16, as_str=True, op_name="DynamicQuant"),
         )
+
+
+MERGE_SAMPLE_FIELDNAMES = [
+    "OP State",
+    "Input Shapes",
+    "Input Data Types",
+    "Input Formats",
+    "Output Shapes",
+    "Output Data Types",
+    "Average Duration(us)",
+    "Profiling Average Duration(us)",
+    "Profiling Median Duration(us)",
+    "Profiling Std Duration(us)",
+    "Profiling Average aiv_vec_time(us)",
+]
+
+# (mean, median, std, aiv_vec_time) of one aggregated sampling summary row.
+SLOW_SAMPLE = ("100", "100", "10", "100")
+FAST_SAMPLE = ("20", "20", "2", "20")
+
+
+def _write_sample_shard(shard_dir, samples):
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    with (shard_dir / "Add.csv").open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=MERGE_SAMPLE_FIELDNAMES)
+        writer.writeheader()
+        for mean, median, std, vec_time in samples:
+            writer.writerow(
+                {
+                    "OP State": "static",
+                    "Input Shapes": "4,8;4,8",
+                    "Input Data Types": "DT_FLOAT16;DT_FLOAT16",
+                    "Input Formats": "ND;ND",
+                    "Output Shapes": "4,8",
+                    "Output Data Types": "DT_FLOAT16",
+                    "Average Duration(us)": "",
+                    "Profiling Average Duration(us)": mean,
+                    "Profiling Median Duration(us)": median,
+                    "Profiling Std Duration(us)": std,
+                    "Profiling Average aiv_vec_time(us)": vec_time,
+                }
+            )
+
+
+def _merge_sample_shards(tmp_path, slow_samples, fast_samples, slow_first=True):
+    slow_dir = tmp_path / "slow"
+    fast_dir = tmp_path / "fast"
+    _write_sample_shard(slow_dir, slow_samples)
+    _write_sample_shard(fast_dir, fast_samples)
+    out_dir = tmp_path / "merged"
+    shard_dirs = [slow_dir, fast_dir] if slow_first else [fast_dir, slow_dir]
+    merge_shard_results.merge_shard_directories(shard_dirs, out_dir)
+    with (out_dir / "Add.csv").open("r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+class TestShardMergeKeepsWinningSampleWhole:
+    """min-of-N merge must keep the winning sample's full measurement row.
+
+    Regression for #500: when a faster shard row won, only the three
+    duration columns were replaced and the remaining columns were only
+    backfilled when empty, so the merged record mixed the fast shard's
+    mean/median with the slow shard's std and hardware counters.
+    """
+
+    def test_faster_shard_replaces_whole_record(self, tmp_path):
+        merged_rows = _merge_sample_shards(tmp_path, [SLOW_SAMPLE], [FAST_SAMPLE])
+        assert len(merged_rows) == 1
+        row = merged_rows[0]
+        assert row["Profiling Average Duration(us)"] == "20"
+        assert row["Profiling Median Duration(us)"] == "20"
+        assert row["Profiling Std Duration(us)"] == "2"
+        assert row["Profiling Average aiv_vec_time(us)"] == "20"
+
+    def test_first_seen_fast_sample_is_not_polluted_by_later_slow_sample(self, tmp_path):
+        merged_rows = _merge_sample_shards(tmp_path, [SLOW_SAMPLE], [FAST_SAMPLE], slow_first=False)
+        # The winning sample must also be intact when the fast shard is the
+        # first-seen one and the slow shard never wins the replacement.
+        row = merged_rows[0]
+        assert row["Profiling Average Duration(us)"] == "20"
+        assert row["Profiling Std Duration(us)"] == "2"
+        assert row["Profiling Average aiv_vec_time(us)"] == "20"
+
+    def test_merge_is_symmetric_in_shard_order(self, tmp_path):
+        forward = _merge_sample_shards(tmp_path, [SLOW_SAMPLE], [FAST_SAMPLE])
+        reversed_rows = _merge_sample_shards(tmp_path, [SLOW_SAMPLE], [FAST_SAMPLE], slow_first=False)
+        assert len(forward) == 1
+        assert len(reversed_rows) == 1
+        for row in (forward[0], reversed_rows[0]):
+            assert row["Profiling Average Duration(us)"] == "20"
+            assert row["Profiling Median Duration(us)"] == "20"
+            assert row["Profiling Std Duration(us)"] == "2"
+            assert row["Profiling Average aiv_vec_time(us)"] == "20"
+
+    def test_multi_row_slow_shard_every_row_loses_to_fast_sample(self, tmp_path):
+        # slow shard carries two aggregated summaries (as when the first row
+        # is an older measurement); each must lose to the fast sample whole.
+        merged_rows = _merge_sample_shards(
+            tmp_path,
+            [SLOW_SAMPLE, ("80", "80", "8", "80")],
+            [FAST_SAMPLE],
+        )
+        assert len(merged_rows) == 1
+        row = merged_rows[0]
+        assert row["Profiling Average Duration(us)"] == "20"
+        assert row["Profiling Std Duration(us)"] == "2"
+        assert row["Profiling Average aiv_vec_time(us)"] == "20"
+
+    def test_empty_winning_measurement_not_backfilled_from_loser(self, tmp_path):
+        # Fast sample is first-seen (no replacement happens) but has empty
+        # std/vec columns. The losing slower sample's non-empty values must
+        # not fill them: "exists but empty" is the winning sample's own
+        # measurement fact, and backfilling it would re-create the exact
+        # cross-sample hybrid record that #500 forbids.
+        merged_rows = _merge_sample_shards(tmp_path, [SLOW_SAMPLE], [("20", "20", "", "")])
+        assert len(merged_rows) == 1
+        row = merged_rows[0]
+        assert row["Profiling Average Duration(us)"] == "20"
+        assert row["Profiling Median Duration(us)"] == "20"
+        assert row["Profiling Std Duration(us)"] == ""
+        assert row["Profiling Average aiv_vec_time(us)"] == ""
+
+    def test_missing_column_from_narrow_header_shard_still_backfilled(self, tmp_path):
+        # Column-drift fallback must survive the tightened backfill: a shard
+        # CSV with a narrower header yields rows that lack the column key
+        # entirely, and those are still filled from later shards.
+        slow_dir = tmp_path / "slow"
+        fast_dir = tmp_path / "fast"
+        fast_dir.mkdir(parents=True, exist_ok=True)
+        narrow_fields = [f for f in MERGE_SAMPLE_FIELDNAMES if f != "Profiling Average aiv_vec_time(us)"]
+        mean, median, std, _ = FAST_SAMPLE
+        with (fast_dir / "Add.csv").open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=narrow_fields)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "OP State": "static",
+                    "Input Shapes": "4,8;4,8",
+                    "Input Data Types": "DT_FLOAT16;DT_FLOAT16",
+                    "Input Formats": "ND;ND",
+                    "Output Shapes": "4,8",
+                    "Output Data Types": "DT_FLOAT16",
+                    "Average Duration(us)": "",
+                    "Profiling Average Duration(us)": mean,
+                    "Profiling Median Duration(us)": median,
+                    "Profiling Std Duration(us)": std,
+                }
+            )
+        _write_sample_shard(slow_dir, [SLOW_SAMPLE])
+        out_dir = tmp_path / "merged"
+        merge_shard_results.merge_shard_directories([fast_dir, slow_dir], out_dir)
+        with (out_dir / "Add.csv").open("r", encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["Profiling Average Duration(us)"] == "20"
+        assert row["Profiling Std Duration(us)"] == "2"
+        # Missing-key column is backfilled from the slower shard's row.
+        assert row["Profiling Average aiv_vec_time(us)"] == "100"

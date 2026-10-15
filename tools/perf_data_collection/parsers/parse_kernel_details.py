@@ -453,8 +453,9 @@ class KernelDetailsParser:
         fia_runtime_index = self._build_fia_runtime_index()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        grouped: Dict[Tuple[str, str, str], Dict[str, object]] = (
-            defaultdict(  # (type, input_shapes, output_shapes)
+        grouped: Dict[Tuple[str, ...], Dict[str, object]] = (
+            defaultdict(  # (type, input_shapes, output_shapes, input_dtypes,
+                # input_formats, output_dtypes, output_formats)
                 lambda: {
                     "sum_duration": 0.0,
                     "sum_duration_sq": 0.0,
@@ -479,7 +480,21 @@ class KernelDetailsParser:
             output_shapes = self._safe_cell(row, OUTPUT_SHAPES)
             if self._is_na_shape(input_shapes) or self._is_na_shape(output_shapes):
                 continue
-            key = (op_type, input_shapes, output_shapes)
+            # Aggregate by the full semantic identity (shapes + dtypes +
+            # formats), matching the get_sig contract in signature_utils:
+            # rows sharing shapes but differing in dtype or format are
+            # distinct perf cases and must not be averaged into one row
+            # (otherwise e.g. FP16 and FP32 samples of the same shape
+            # collapse together and only the first dtype survives).
+            key = (
+                op_type,
+                input_shapes,
+                output_shapes,
+                self._safe_cell(row, INPUT_DTYPES),
+                self._safe_cell(row, INPUT_FORMATS),
+                self._safe_cell(row, OUTPUT_DTYPES),
+                self._safe_cell(row, OUTPUT_FORMATS),
+            )
             item = grouped[key]
 
             duration = self._parse_duration(self._safe_cell(row, DURATION_US))
@@ -516,7 +531,8 @@ class KernelDetailsParser:
                 )
 
         rows_by_type: Dict[str, List[Dict[str, object]]] = defaultdict(list)
-        for (op_type, input_shapes, output_shapes), item in grouped.items():
+        for key, item in grouped.items():
+            op_type, input_shapes, output_shapes = key[0], key[1], key[2]
             if not op_type:
                 continue
             count = int(item["count"])
