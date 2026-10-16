@@ -191,6 +191,12 @@ class ValidatorRef:
     fn: Callable[..., str | None]
     ## fn(params) or fn(params, provided) when wants_provided=True.
     ## Returns None (pass) or str (error message).
+    ## ``params`` is a mutable dict keyed by kebab-case Param.name, shared by every
+    ## validator of the spec in declaration order. A validator may deliberately adjust
+    ## a value in ``params`` (e.g. clearing an option that becomes derived); changes are
+    ## applied back to the parsed namespace after validation and are visible to
+    ## validators declared later. Only adjust genuinely derived defaults; report invalid
+    ## input by returning an error message instead.
     ## ``provided`` = kebab-case names EXPLICITLY in argv (distinguishes "passed default" vs "not passed").
 
     wants_provided: bool = False

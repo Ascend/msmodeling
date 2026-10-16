@@ -374,6 +374,115 @@ class TestValidatorContract:
             )
 
 
+# ── Capacity planning: derived --num-devices ─────────────────────────
+
+
+class TestTargetQpsNumDevicesSemantics:
+    """--target-qps turns --num-devices into a derived value.
+
+    The Param default is 1, so "explicitly 1" and "not passed" are only
+    distinguishable through the parser's provided set.
+    """
+
+    def test_auto_mode_clears_num_devices(self):
+        from cli.registry.validators import target_qps_num_devices_semantics
+
+        params = {"target-qps": 1000.0, "num-devices": 1}
+        assert target_qps_num_devices_semantics(params, {"target-qps"}) is None
+        assert params["num-devices"] is None
+
+    def test_explicit_num_devices_is_preserved(self):
+        from cli.registry.validators import target_qps_num_devices_semantics
+
+        params = {"target-qps": 1000.0, "num-devices": 1}
+        assert target_qps_num_devices_semantics(params, {"target-qps", "num-devices"}) is None
+        assert params["num-devices"] == 1
+
+    def test_without_target_qps_num_devices_is_untouched(self):
+        from cli.registry.validators import target_qps_num_devices_semantics
+
+        params = {"target-qps": None, "num-devices": 1}
+        assert target_qps_num_devices_semantics(params, set()) is None
+        assert params["num-devices"] == 1
+
+    def test_validator_is_declared_before_parallel_combo_check(self):
+        """The cleared value must reach validParallelCombo, which reads params."""
+        spec = get_spec("throughput_optimizer")
+        names = [v.name for v in spec.validators]
+        assert names.index("targetQpsNumDevicesSemantics") < names.index("validParallelCombo")
+
+    def test_auto_mode_clears_num_devices_through_the_parser(self):
+        spec = get_spec("throughput_optimizer")
+        parser = build_argparser(spec)
+        argv = [
+            "--model-id",
+            "Qwen/Qwen3-32B",
+            "--input-length",
+            "1024",
+            "--output-length",
+            "512",
+            "--target-qps",
+            "1000",
+            "--tp-sizes",
+            "8",
+        ]
+        with patch.object(sys, "argv", ["prog", *argv]):
+            args = parse_module_args(spec, parser)
+        # Cleared so CapacityPlanner derives the budget range from comm_grid, and
+        # --tp-sizes is no longer rejected against the placeholder value of 1.
+        assert args.num_devices is None
+        assert args.tp_sizes == [8]
+
+
+class TestValidatorAdjustmentWriteBack:
+    """Validator param adjustments are applied back, conservatively."""
+
+    def test_changed_value_is_written_back(self):
+        from types import SimpleNamespace
+
+        from cli.registry.argparse_adapter import _apply_validator_adjustments
+
+        field = SimpleNamespace(name="num-devices", dest_name="num_devices")
+        spec = SimpleNamespace(fields=[field])
+        args = SimpleNamespace(num_devices=1)
+        _apply_validator_adjustments(args, spec, {"num-devices": None})
+        assert args.num_devices is None
+
+    def test_unchanged_value_leaves_namespace_untouched(self):
+        from types import SimpleNamespace
+
+        from cli.registry.argparse_adapter import _apply_validator_adjustments
+
+        field = SimpleNamespace(name="num-devices", dest_name="num_devices")
+        spec = SimpleNamespace(fields=[field])
+        args = SimpleNamespace(num_devices=8)
+        _apply_validator_adjustments(args, spec, {"num-devices": 8})
+        assert args.num_devices == 8
+
+    def test_absent_namespace_attribute_is_not_created(self):
+        """argparse.SUPPRESS off-flags must not be resurrected as None."""
+        from types import SimpleNamespace
+
+        from cli.registry.argparse_adapter import _apply_validator_adjustments
+
+        field = SimpleNamespace(name="no-foo", dest_name="no_foo")
+        spec = SimpleNamespace(fields=[field])
+        args = SimpleNamespace()
+        _apply_validator_adjustments(args, spec, {"no-foo": None})
+        assert not hasattr(args, "no_foo")
+
+    def test_param_missing_from_params_is_skipped(self):
+        from types import SimpleNamespace
+
+        from cli.registry.argparse_adapter import _apply_validator_adjustments
+
+        field = SimpleNamespace(name="num-devices", dest_name="num_devices")
+        spec = SimpleNamespace(fields=[field])
+        args = SimpleNamespace(num_devices=1)
+        _apply_validator_adjustments(args, spec, {})
+        assert args.num_devices == 1
+
+
 # ── Help snapshots unaffected ────────────────────────────────────────
 
 

@@ -22,7 +22,11 @@ from typing import Optional
 import pandas as pd
 from prettytable import PrettyTable
 
-from serving_cast.service.utils import MEMORY_COLUMNS, PREFILL_PHASE_MAKESPAN_COLUMN, MemoryInfo
+from serving_cast.service.utils import (
+    MEMORY_COLUMNS,
+    PREFILL_PHASE_MAKESPAN_COLUMN,
+    MemoryInfo,
+)
 from serving_cast.service.pipeline_schedule import PipelineScheduleEstimate
 from serving_cast.service.utils import ParallelSearchCandidate
 from serving_cast.utils import (
@@ -74,6 +78,11 @@ def _compute_disagg_request_qps(row: pd.Series, output_length: Optional[int]) ->
             return None
         return conc / (tpot * float(output_length)) * 1000.0
     return None
+
+
+def compute_request_qps(token_s: float, output_length: int) -> float:
+    """Compute request QPS from token throughput and output length."""
+    return float(token_s) / float(output_length)
 
 
 TTFT_COLUMN = "TTFT (ms)"

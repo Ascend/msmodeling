@@ -299,6 +299,24 @@ CONCURRENCY_SEARCH_STRATEGY = Param(
     cli_help="Concurrency search strategy.",
 )
 
+TARGET_QPS = Param(
+    name="target-qps",
+    data_type="number",
+    default=None,
+    min=0,
+    exclusive_min=True,
+    group="Service Options",
+    cli_metavar="<FLOAT>",
+    cli_help=(
+        "Target request QPS (req/s). When set, triggers capacity planning mode: "
+        "the tool searches for the minimum device count that meets this QPS under "
+        "the given SLO. If --num-devices is also set, it controls the TP search width; "
+        "otherwise the device count is auto-derived: every power-of-2 budget from the "
+        "device profile's comm_grid seed up to its capacity is searched and the results "
+        "are merged, so the reported minimum is global across those budgets."
+    ),
+)
+
 DUMP_ORIGINAL_RESULTS = Param(
     name="dump-original-results",
     data_type="boolean",
@@ -449,6 +467,13 @@ SPEC = ModuleSpec(
     log_options_after_group="General Options",
     requires_model_id=True,
     validators=[
+        # Declared first: clears --num-devices in capacity-planning auto mode so
+        # the parallel-combination bound check below is deferred to CapacityPlanner.
+        ValidatorRef(
+            name="targetQpsNumDevicesSemantics",
+            fn=V.target_qps_num_devices_semantics,
+            wants_provided=True,
+        ),
         ValidatorRef(name="validParallelCombo", fn=V.valid_parallel_combo),
         ValidatorRef(name="effectiveLenGe1", fn=V.effective_len_ge1_to),
         ValidatorRef(name="pdRatioMutexDisagg", fn=V.pd_ratio_mutex_disagg),
@@ -541,6 +566,7 @@ SPEC = ModuleSpec(
         JOBS,
         MAX_SEARCH_COMBINATIONS,
         CONCURRENCY_SEARCH_STRATEGY,
+        TARGET_QPS,
         DUMP_ORIGINAL_RESULTS,
         # MultiModal Options
         IMAGE_BATCH_SIZE,

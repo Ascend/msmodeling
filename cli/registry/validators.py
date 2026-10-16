@@ -678,3 +678,35 @@ def legacy_mtp_no_acceptance_length(params: dict[str, Any], provided: set[str]) 
     if "num-mtp-tokens" in provided and "acceptance-length" in provided:
         return "legacy --num-mtp-tokens cannot use --acceptance-length"
     return None
+
+
+def target_qps_num_devices_semantics(params: dict[str, Any], provided: set[str]) -> str | None:
+    """Capacity planning: --num-devices becomes an output, not an input.
+
+    With ``--target-qps`` the device count is searched rather than given, so
+    ``--num-devices`` is optional and only pins the TP/PP search width. Its
+    Param default is ``1``, which is indistinguishable from an explicit
+    ``--num-devices 1``; the parser's ``provided`` set is what tells the two
+    apart. When ``--target-qps`` is set and ``--num-devices`` was not passed,
+    clear it to ``None`` so that:
+
+    * the candidate upper-bound checks in ``arg_parse()`` are deferred to
+      ``CapacityPlanner`` (otherwise the placeholder ``1`` rejects every
+      legitimate ``--tp-sizes``/``--ep-sizes`` candidate), and
+    * ``CapacityPlanner`` derives the budget range from the device profile's
+      ``comm_grid``.
+
+    Must be declared before the parallel-combination validators so they observe
+    the cleared value.
+
+    Args:
+        params: Dict keyed by kebab-case param names.
+        provided: Set of explicitly passed kebab-case param names.
+
+    Returns:
+        None always; adjusts ``num-devices`` in ``params`` (applied back to the
+        parsed namespace by ``parse_module_args``).
+    """
+    if params.get("target-qps") is not None and "num-devices" not in provided:
+        params["num-devices"] = None
+    return None

@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import math
 from collections.abc import Callable
+from typing import Any
 
 from cli import spec_cli
 
@@ -176,7 +177,10 @@ def parse_module_args(
 
     args = spec_cli.parse_args(parser, argv)
 
-    # Cross-field validators
+    # Cross-field validators. They run in declaration order over one shared
+    # params dict, so a validator that adjusts a value is visible to the
+    # validators declared after it (e.g. capacity planning clears --num-devices
+    # before the parallel-combination bound check runs).
     if spec.validators:
         params = {p.name: getattr(args, p.dest_name, None) for p in spec.fields}
         provided = _explicitly_provided(spec, parser, args, argv)
@@ -184,10 +188,40 @@ def parse_module_args(
             msg = v.fn(params, provided) if v.wants_provided else v.fn(params)
             if msg is not None:
                 parser.error(msg)
+        _apply_validator_adjustments(args, spec, params)
 
     if spec.requires_model_id:
         require_model_id(parser, args)
     return args
+
+
+def _apply_validator_adjustments(
+    args: argparse.Namespace,
+    spec: ModuleSpec,
+    params: dict[str, Any],
+) -> None:
+    """Write validator-applied param adjustments back onto the namespace.
+
+    Validators receive a mutable ``params`` dict and may deliberately adjust a
+    derived value (see :func:`cli.registry.validators.target_qps_num_devices_semantics`).
+    Without this step such an adjustment would be silently dropped, because
+    ``params`` is a throwaway dict built from ``args``.
+
+    Only params whose value the validators actually changed are written back,
+    and only when the destination attribute already exists on the namespace.
+    Attributes absent from the namespace (``argparse.SUPPRESS`` off-flags) are
+    left untouched, so a read-only validator run stays a no-op.
+
+    Args:
+        args: Parsed namespace to update in place.
+        spec: Module specification owning ``params``.
+        params: Post-validation kebab-case params dict.
+    """
+    for p in spec.fields:
+        if p.name not in params or not hasattr(args, p.dest_name):
+            continue
+        if getattr(args, p.dest_name) != params[p.name]:
+            setattr(args, p.dest_name, params[p.name])
 
 
 def _explicitly_provided(

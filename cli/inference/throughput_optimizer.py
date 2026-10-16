@@ -83,12 +83,15 @@ def arg_parse():
     if "calibrated" in performance_models and not args.analytic_calibration_profile:
         parser.error("--analytic-calibration-profile is required when using --performance-model calibrated")
 
-    def _normalize_and_validate(values: list[int] | None, arg_name: str, num_devices: int) -> list[int] | None:
+    def _normalize_and_validate(values: list[int] | None, arg_name: str, num_devices: int | None) -> list[int] | None:
         if values is None:
             return None
         normalized = []
         for val in values:
-            if val > num_devices:
+            # num_devices is None in capacity-planning auto mode (the device count
+            # is an output of the search); the upper-bound check is deferred to
+            # CapacityPlanner, which knows the derived budget for each run.
+            if num_devices is not None and val > num_devices:
                 raise ValueError(
                     f"--{arg_name} contains value {val}, which is larger than --num-devices ({num_devices})."
                 )
@@ -165,53 +168,129 @@ def arg_parse():
             parser.error("--pp-layer-partitions must be a JSON list of lists, e.g. '[[31,30],[16,15,15,15]]'")
         args.pp_layer_partitions = [list(p) for p in parsed]
 
-    tp_candidates, ep_candidates, moe_dp_candidates, mtp_candidates = resolve_parallel_search_candidates(
-        args.tp_sizes,
-        args.ep_sizes,
-        args.moe_dp_sizes,
-        args.num_mtp_token_sizes,
-        args.num_mtp_tokens,
-        args.num_devices,
-    )
-    dcp_candidates = resolve_search_sizes(args.dcp_sizes, args.num_devices, 1)
-    total_combinations = count_search_combinations(
-        tp_candidates,
-        ep_candidates,
-        moe_dp_candidates,
-        mtp_candidates,
-    ) * len(dcp_candidates)
-
-    has_valid_combination = any(
-        args.num_devices % tp == 0
-        and args.num_devices % ep == 0
-        and args.num_devices % (ep * moe_dp) == 0
-        and tp % dcp == 0
-        for tp in tp_candidates
-        for ep in ep_candidates
-        for moe_dp in moe_dp_candidates
-        for dcp in dcp_candidates
-    )
-    if not has_valid_combination:
-        parser.error(
-            "No valid parallel combination is produced by the provided search arguments under current --num-devices."
-        )
-
+    # Candidate upper-bound diagnostics all key off a concrete device count. In
+    # capacity-planning auto mode num_devices is None (see the
+    # targetQpsNumDevicesSemantics validator), so the bound is unknown here and
+    # the checks below are deferred to CapacityPlanner, which evaluates them
+    # against each derived budget. None of these locals are consumed downstream;
+    # ParallelRunner re-resolves the candidate ranges from the actual device count.
     args.search_combination_warning_emitted = False
-    if args.max_search_combinations and total_combinations > args.max_search_combinations:
-        args.search_combination_warning_emitted = True
-        spec_label = "Spec" if draft_method(args) is not None else "MTP"
-        print(
-            "[WARNING] Large number of parallel search combinations "
-            f"({total_combinations} = TP:{len(tp_candidates)} x EP:{len(ep_candidates)} "
-            f"x MOE-DP:{len(moe_dp_candidates)} x {spec_label}:{len(mtp_candidates)} x DCP:{len(dcp_candidates)}). "
-            "Optimization may take a long time. Consider narrowing --tp-sizes, --ep-sizes, "
-            "--moe-dp-sizes, --num-mtp-tokens/--num-speculative-tokens, or --dcp-sizes; "
-            "or increase --max-search-combinations.",
-            file=sys.stderr,
-            flush=True,
+    if args.num_devices is not None:
+        tp_candidates, ep_candidates, moe_dp_candidates, mtp_candidates = resolve_parallel_search_candidates(
+            args.tp_sizes,
+            args.ep_sizes,
+            args.moe_dp_sizes,
+            args.num_mtp_token_sizes,
+            args.num_mtp_tokens,
+            args.num_devices,
         )
+        dcp_candidates = resolve_search_sizes(args.dcp_sizes, args.num_devices, 1)
+        total_combinations = count_search_combinations(
+            tp_candidates,
+            ep_candidates,
+            moe_dp_candidates,
+            mtp_candidates,
+        ) * len(dcp_candidates)
+
+        has_valid_combination = any(
+            args.num_devices % tp == 0
+            and args.num_devices % ep == 0
+            and args.num_devices % (ep * moe_dp) == 0
+            and tp % dcp == 0
+            for tp in tp_candidates
+            for ep in ep_candidates
+            for moe_dp in moe_dp_candidates
+            for dcp in dcp_candidates
+        )
+        if not has_valid_combination:
+            parser.error(
+                "No valid parallel combination is produced by the provided search arguments "
+                "under current --num-devices."
+            )
+
+        if args.max_search_combinations and total_combinations > args.max_search_combinations:
+            args.search_combination_warning_emitted = True
+            spec_label = "Spec" if draft_method(args) is not None else "MTP"
+            print(
+                "[WARNING] Large number of parallel search combinations "
+                f"({total_combinations} = TP:{len(tp_candidates)} x EP:{len(ep_candidates)} "
+                f"x MOE-DP:{len(moe_dp_candidates)} x {spec_label}:{len(mtp_candidates)} x DCP:{len(dcp_candidates)}). "
+                "Optimization may take a long time. Consider narrowing --tp-sizes, --ep-sizes, "
+                "--moe-dp-sizes, --num-mtp-tokens/--num-speculative-tokens, or --dcp-sizes; "
+                "or increase --max-search-combinations.",
+                file=sys.stderr,
+                flush=True,
+            )
 
     return args
+
+
+def run_capacity_planning(args, start_time: float, logger: logging.Logger) -> int:
+    """Execute capacity planning mode when --target-qps is present.
+
+    Returns:
+        Process exit code: 0 on completion, 1 when the requested mode is not
+        supported by capacity planning.
+    """
+    from serving_cast.service.capacity_planner import (
+        CapacityPlanConfig,
+        CapacityPlanner,
+        render_capacity_planning_result,
+    )
+
+    if args.enable_optimize_prefill_decode_ratio:
+        mode = "pd_ratio"
+    elif args.disagg:
+        # Disaggregation extrapolates from one phase at a time: prefill-only
+        # (--ttft-limit) or decode-only (--tpot-limit). Any other combination
+        # would fall through to run_agg() and silently simulate a different
+        # deployment than the same command without --target-qps.
+        if args.ttft_limits is not None and args.tpot_limits is None:
+            mode = "disagg_prefill"
+        elif args.tpot_limits is not None and args.ttft_limits is None:
+            mode = "disagg_decode"
+        else:
+            logger.error(
+                "--disagg capacity planning requires exactly one of --ttft-limit or "
+                "--tpot-limit (prefill-only or decode-only). Remove --target-qps to run "
+                "disaggregation with other SLO combinations."
+            )
+            return 1
+    else:
+        mode = "aggregation"
+
+    p_dev = getattr(args, "prefill_devices_per_instance", None)
+    d_dev = getattr(args, "decode_devices_per_instance", None)
+
+    device = args.device[0] if isinstance(args.device, list) else args.device
+    if isinstance(args.device, list) and len(args.device) > 1:
+        logger.warning(
+            "Capacity planning supports a single --device; using %r (ignored: %s).",
+            device,
+            ", ".join(map(str, args.device[1:])),
+        )
+
+    # num_devices is None when the device count was not pinned on the command
+    # line (see the targetQpsNumDevicesSemantics validator): the planner then
+    # derives the budget range from the device profile's comm_grid.
+    config = CapacityPlanConfig(
+        target_qps=float(args.target_qps),
+        ttft_limit=float(args.ttft_limits) if args.ttft_limits is not None else None,
+        tpot_limit=float(args.tpot_limits) if args.tpot_limits is not None else None,
+        mode=mode,
+        output_length=int(args.output_length),
+        num_devices=int(args.num_devices) if args.num_devices is not None else None,
+        device=device,
+        prefill_devices_per_instance=p_dev,
+        decode_devices_per_instance=d_dev,
+    )
+    planner = CapacityPlanner(config)
+    result = planner.run(args)
+    render_capacity_planning_result(result, config, logger=logger)
+
+    elapsed_time = time.time() - start_time
+    logger.info("Capacity planning completed in %.2f seconds.", elapsed_time)
+    return 0
 
 
 def main():
@@ -266,10 +345,22 @@ def main():
         if args.disagg:
             logger.error("--enable-optimize-prefill-decode-ratio cannot be used together with --disagg.")
             return 1
-        if prefill_devices_per_instance is None or decode_devices_per_instance is None:
+        if prefill_devices_per_instance is None and decode_devices_per_instance is None:
+            if getattr(args, "target_qps", None) is not None:
+                logger.info(
+                    "PD ratio mode with --target-qps: per-instance not specified, "
+                    "will auto-search (p_dev, d_dev) combinations."
+                )
+            else:
+                logger.error(
+                    "Both --prefill-devices-per-instance and --decode-devices-per-instance "
+                    "are required when PD ratio optimization is enabled."
+                )
+                return 1
+        elif prefill_devices_per_instance is None or decode_devices_per_instance is None:
             logger.error(
                 "Both --prefill-devices-per-instance and --decode-devices-per-instance "
-                "are required when PD ratio optimization is enabled."
+                "must be specified together, or both omitted for auto-search with --target-qps."
             )
             return 1
     elif prefill_devices_per_instance is not None or decode_devices_per_instance is not None:
@@ -281,6 +372,10 @@ def main():
 
     # Terminal ASCII curves (plotext) run automatically when structurally allowed.
     plot_curves_allowed = len(device_targets) == 1 and not isinstance(args.input_length, str)
+
+    # Capacity planning mode: --target-qps present
+    if getattr(args, "target_qps", None) is not None:
+        return run_capacity_planning(args, start_time, logger)
 
     logger.info("Starting experiments.")
     hw_rows = run_multi_device_loop(

@@ -7,13 +7,15 @@
 
 ## 2 主要场景
 
-吞吐优化器可用于硬件规划、SLO 约束下的吞吐寻优，以及 PD 分离部署设计。按部署形态划分，主要支持以下三类场景：
+吞吐优化器可用于硬件规划、SLO 约束下的吞吐寻优、PD 分离部署设计，以及反推「满足目标 QPS 所需最少卡数」的容量规划。按部署形态划分，主要支持以下五类场景：
 
 | 模式 | 适用场景 | 关键参数 |
 | --- | --- | --- |
 | PD 混部 | Prefill 与 Decode 运行在同一实例中，适合快速评估整体吞吐 | `--tpot-limit`、`--ttft-limit`|
 | PD 分离 | Prefill 与 Decode 分开部署，需要分别评估阶段能力 | `--disagg`、`--ttft-limit` 或 `--tpot-limit` |
 | PD 配比 | 需要规划 Prefill 与 Decode 实例数量比例 | `--enable-optimize-prefill-decode-ratio`、`--prefill-devices-per-instance`、`--decode-devices-per-instance` |
+| KV Cache Offload | 需要评估 KV Cache 卸载（Decode 稀疏 / Prefill 层级）后的 TTFT、TPOT 与并发上限变化 | `--enable-decode-kv-offload`、`--enable-prefill-kv-offload` |
+| 容量规划 | 已知目标 QPS 与 SLO，需要反推最少卡数 | `--target-qps`（可叠加以上任一模式的参数） |
 
 上述任一场景均可叠加 `--speculative-method {dflash,dspark}` 启用投机解码（MTP 建议使用统一接口 `--speculative-method mtp`），详见 [2.2 叠加投机解码](#叠加投机解码dflash--dspark)。
 
@@ -211,6 +213,86 @@ msmodeling inference throughput-optimizer zai-org/GLM-5.2 \
 - host 链路带宽取 DeviceProfile（A3 = 70 GB/s/die/方向理论峰值）；带宽档位敏感性需 profile 变体。
 - Prefill 层级 offload 的 B/I 使用代码默认（`B=2`、`I=0`）。
 
+### 2.5 容量规划场景
+
+容量规划模式回答反向问题：**给定目标 QPS 与 SLO，最少需要多少张卡？** 它在现有 optimizer 的寻优结果之上叠加线性推算，不改变 optimizer 本身的搜索逻辑——同一命令加不加 `--target-qps` 会走相同的仿真路径，只是前者额外给出最少卡数结论。
+
+传入 `--target-qps` 即触发该模式，可与 PD 混部、PD 分离、PD 配比组合使用。
+
+#### 聚合模式
+
+```bash
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 1024 \
+    --output-length 512 \
+    --ttft-limit 500 \
+    --tpot-limit 50 \
+    --target-qps 1000
+```
+
+#### PD 分离模式
+
+`--disagg` 与容量规划组合时，必须**恰好指定一个**阶段 SLO，用于确定推算所依据的阶段：
+
+```bash
+# Prefill 阶段
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 2048 \
+    --output-length 512 \
+    --disagg \
+    --ttft-limit 500 \
+    --target-qps 500
+
+# Decode 阶段
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 2048 \
+    --output-length 512 \
+    --disagg \
+    --tpot-limit 50 \
+    --target-qps 500
+```
+
+#### PD 配比模式
+
+```bash
+# 固定每实例卡数
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 3500 \
+    --output-length 1500 \
+    --enable-optimize-prefill-decode-ratio \
+    --prefill-devices-per-instance 4 \
+    --decode-devices-per-instance 2 \
+    --ttft-limit 500 \
+    --tpot-limit 50 \
+    --target-qps 500
+
+# 自动搜索每实例卡数：不传 --prefill-devices-per-instance / --decode-devices-per-instance
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 3500 \
+    --output-length 1500 \
+    --enable-optimize-prefill-decode-ratio \
+    --ttft-limit 500 \
+    --tpot-limit 50 \
+    --target-qps 500
+```
+
+#### 约束
+
+- `--target-qps` 必须为正数；只要传入即触发容量规划模式。
+- `--num-devices` 变为可选：
+  - 指定时，容量规划只在该卡数上运行一次 optimizer；该值同时作为 PD 配比自动搜索中每实例卡数的上限。
+  - 不指定时，从设备画像的 `comm_grid` 推导起始预算，并枚举到 `comm_grid` 容量的**全部** 2 的幂预算，每个预算完整运行一次 optimizer，结果合并后取全局最少卡数。单卡 QPS 随卡数非单调（更大预算可能引入更优并行结构），因此不做提前退出；预算次数有限，例如 A3 的 `comm_grid` 容量为 768、共 8 个预算。
+  - 取值超过设备 `comm_grid` 容量时直接判为不可行，不会再运行注定失败的 optimizer。
+- `--disagg` 与容量规划组合时，`--ttft-limit` 与 `--tpot-limit` 必须恰有一个；同时给出或都不给出会显式报错，避免静默改用聚合仿真路径。
+- PD 配比自动搜索会枚举 P、D 每实例卡数的全部组合（`p_budgets × d_budgets`），组合数随预算数量平方增长。每实例卡数预算来自设备 `comm_grid`，与 `--tp-sizes` 无关——TP 是实例**内部**的并行结构，实例卡数应以其乘积（`TP × PP`）为量级；需要精确控制时请显式传入 `--prefill-devices-per-instance` / `--decode-devices-per-instance`。
+- `--tp-sizes` / `--pp-sizes` / `--ep-sizes` 等搜索维度在容量规划下语义不变，仍控制**每个实例内部**的并行结构搜索。
+- 容量规划模式下 `--device` 只取第一个设备；传入多个设备时会在日志中给出告警。
+
 ## 3 结果说明
 
 命令执行成功后，终端会先打印输入配置和最优配置摘要，随后展示候选并行配置表。输出指标包括吞吐量、TTFT、TPOT、并发度，以及模式相关字段（如 QPS 或 PD 配比）。例如 2.1 PD 混部场景输出：
@@ -354,6 +436,47 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --batch-range 1 256
 ```
 
+### 3.2 容量规划结果
+
+启用 `--target-qps` 时，命令会在标准寻优表格之前先输出容量规划摘要：
+
+```text
+****************************************************************************************************
+  Capacity Planning Result
+  --------------------------------------------------------------------------------------------------
+  Target QPS:  1000.00 req/s
+  SLO:         TTFT <= 500 ms, TPOT <= 50 ms
+  --------------------------------------------------------------------------------------------------
+  Minimum Devices: 64
+  Achieved QPS:     1008.00 req/s
+  Per-Die QPS:      15.75 req/s
+  Replicas Needed:  8
+  Per-Replica Dies: 8
+  Parallel:         TP=8 | PP=1 | DP=1
+  Batch Size:       64
+  TTFT:             320.00 ms
+  TPOT:             42.00 ms
+  --------------------------------------------------------------------------------------------------
+  推算对比表 (按总卡数升序, 同卡数取单卡QPS最高)
+  ...
+****************************************************************************************************
+```
+
+字段说明：
+
+| 字段 | 含义 |
+| --- | --- |
+| `Minimum Devices` | 满足目标 QPS 与 SLO 的最少总卡数 |
+| `Achieved QPS` | 按最少卡数方案推算实际达到的请求 QPS，不低于目标 QPS |
+| `Per-Die QPS` | 单卡请求 QPS，用于同卡数方案之间比较 |
+| `Replicas Needed` | 所需实例（副本）数 |
+| `Per-Replica Dies` | 每个实例占用的卡数 |
+| `Parallel` / `Batch Size` / `TTFT` / `TPOT` | 最优配置的并行策略与性能指标 |
+
+PD 配比模式下，摘要改为输出 `Topology`（形如 `xPyD`）、`P QPS`、`D QPS`、`PD Ratio`，推算对比表列出各 (P, D) 组合的总卡数与单卡 QPS。
+
+若没有任何可行配置，摘要输出 `No feasible configuration found under the given constraints.`，并在日志中给出原因（模型放不下、无 SLO 达标配置、或所有预算超出设备 `comm_grid` 容量）。
+
 ## 4 参数
 
 ```bash
@@ -456,6 +579,11 @@ Service Options:
                         TTFT constraints under which to search for the best throughput. None means no constraint. (default: None)
   --tpot-limit TPOT_LIMITS
                         TPOT constraints under which to search for the best throughput. None means no constraint. (default: None)
+  --target-qps TARGET_QPS
+                        Target request QPS (req/s). When set, triggers capacity planning mode: the tool searches for the minimum device count that meets
+                        this QPS under the given SLO. If --num-devices is also set, it controls the TP search width; otherwise the device count is
+                        auto-derived: every power-of-2 budget from the device profile's comm_grid seed up to its capacity is searched and the results are
+                        merged, so the reported minimum is global across those budgets.
   --max-batched-tokens MAX_BATCHED_TOKENS
                         Max batched tokens per data-parallel replica for one prefill or mixed prefill/decode step. If omitted, starts from 4 * input_length and falls back on Prefill OOM. (default: None)
   --prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE
@@ -555,6 +683,7 @@ KV Cache Offload Options:
 | `--chrome-trace-file` | Debug Options | 可选 | 生成 Chrome Trace 文件，用于可视化分析算子级性能。<br>1. 类型：Str。<br>2. 参考值：Trace 文件路径，例如 `trace.json`。<br>3. 默认值：`None`，表示不生成 Chrome Trace 文件。 |
 | `--ttft-limit` | Service Options | 可选 | 指定 TTFT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TTFT。 |
 | `--tpot-limit` | Service Options | 可选 | 指定 TPOT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TPOT。 |
+| `--target-qps` | Service Options | 可选 | 指定目标请求 QPS（req/s）；设置后触发容量规划模式，在给定 SLO 下反推满足该 QPS 的最少卡数。<br>1. 类型：Float。<br>2. 取值范围：正数。<br>3. 默认值：`None`。<br>4. 与 `--num-devices` 的配合方式、以及 `--disagg` 下需恰好指定一个阶段 SLO 的约束，见 [2.5 容量规划场景](#25-容量规划场景)。 |
 | `--max-batched-tokens` | Service Options | 可选 | 指定单个数据并行（DP）副本在一次 prefill 或混合 prefill/decode step 的最大 batched tokens。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；自动模式先使用 `4 * input_length`，并在 Prefill OOM 时依次降级为 `2 * input_length`、`1 * input_length`。 |
 | `--batch-range` | Service Options | 可选 | 指定 batch size 搜索范围。<br>1. 类型：List[Int]。<br>2. 格式：`[min max]` 或 `[max]`。<br>3. 默认值：`None`；未指定 `min` 时默认从 `1` 开始搜索，未指定 `max` 时不设置上限。 |
 | `--serving-cost` | Service Options | 可选 | 指定服务成本，用于成本相关指标计算。<br>1. 类型：Float。<br>2. 取值范围：非负数。<br>3. 默认值：`0`。 |
@@ -716,3 +845,31 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
   `Allocated D QPS = D 实例数 * D QPS`
 
   `Balanced QPS = min(Allocated P QPS, Allocated D QPS)`
+
+### 5.3 容量规划下最少卡数的计算方法
+
+容量规划复用 optimizer 的寻优结果：先在候选卡数上运行 optimizer，得到每实例的请求 QPS，再线性推算满足目标 QPS 所需的最少卡数。
+
+- **聚合 / PD 分离模式**：
+
+  先求每实例请求 QPS，再按实例数放大：
+
+  - 每实例请求 QPS：
+    - 聚合：`per_replica_qps = token/s ÷ output_length ÷ dp_size`
+    - PD 分离 Prefill：`per_replica_qps = concurrency ÷ prefill_phase_makespan_ms × 1000`
+    - PD 分离 Decode：`per_replica_qps = concurrency ÷ (tpot × output_length) × 1000`
+  - 所需实例数：`replicas_needed = ceil(target_qps ÷ per_replica_qps)`
+  - 总卡数：`total_gpus = replicas_needed × per_replica_gpus`
+  - 单卡 QPS：`per_die_qps = per_replica_qps ÷ per_replica_gpus`
+
+  其中 `per_replica_gpus` 为每个实例占用的卡数（聚合/分离模式下通常为 `num_devices ÷ dp_size`）。当 EP 跨越多个 DP 副本（`num_devices ÷ dp_size < ep_size ≤ num_devices`）时，以整个实例作为复制单元，此时 `per_replica_gpus = num_devices`，且 `per_replica_qps` 不再除以 `dp_size`。
+
+- **PD 配比模式**：P、D 两侧独立扩缩，实际达到的 QPS 取两侧较小值：
+
+  - `p_inst = ceil(target_qps ÷ p_qps)`，`d_inst = ceil(target_qps ÷ d_qps)`
+  - `total_gpus = p_inst × p_dev + d_inst × d_dev`
+  - `achieved_qps = min(p_inst × p_qps, d_inst × d_qps)`
+
+- **排序规则**：按 `total_gpus` 升序排序，同卡数时按 `per_die_qps` 降序，取第一条作为最少卡数方案；推算对比表按同样顺序展示全部候选。
+
+> 推算过程保留完整精度，仅在输出渲染时格式化为两位小数。若在推算前就把每实例 QPS 舍入到两位小数，`achieved_qps` 的误差会随实例数放大（例如每实例 0.014 req/s、目标 1 req/s 时需要 72 个实例，正确结果为 1.008 req/s，舍入后会误报为 0.72 req/s）。

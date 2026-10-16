@@ -16,6 +16,7 @@
 
 import re
 import sys
+import time
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
@@ -739,6 +740,126 @@ class TestThroughputOptimizer(TestCase):
         ):
             self.assertEqual(throughput_optimizer_module.main(), 1)
             mock_tasks.run_disagg.assert_not_called()
+
+
+class TestCapacityPlanningArgSemantics(TestCase):
+    """--target-qps makes --num-devices an output, not an input.
+
+    The device count default of 1 is indistinguishable from an explicit
+    ``--num-devices 1``, so the registry derives "was it provided" from the
+    parser's explicitly-provided set and clears it in capacity-planning auto mode.
+    """
+
+    @staticmethod
+    def _parse_args(extra: list[str]):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "Qwen/Qwen3-32B",
+            "--device=TEST_DEVICE",
+            "--input-length=1024",
+            "--output-length=512",
+            *extra,
+        ]
+        with patch.object(sys, "argv", argv):
+            return throughput_optimizer_module.arg_parse()
+
+    def test_target_qps_without_num_devices_enables_auto_mode(self):
+        args = self._parse_args(["--target-qps=1000"])
+        self.assertIsNone(args.num_devices)
+
+    def test_target_qps_defers_parallel_candidate_bound_check(self):
+        """Auto mode must not bound --tp-sizes by the placeholder default of 1."""
+        args = self._parse_args(["--target-qps=1000", "--tp-sizes", "8"])
+        self.assertIsNone(args.num_devices)
+        self.assertEqual(args.tp_sizes, [8])
+
+    def test_target_qps_with_explicit_num_devices_pins_device_count(self):
+        args = self._parse_args(["--target-qps=1000", "--num-devices=16"])
+        self.assertEqual(args.num_devices, 16)
+
+    def test_target_qps_with_explicit_single_device_is_not_auto_mode(self):
+        args = self._parse_args(["--target-qps=1000", "--num-devices=1"])
+        self.assertEqual(args.num_devices, 1)
+
+    def test_num_devices_default_is_unchanged_without_target_qps(self):
+        args = self._parse_args([])
+        self.assertEqual(args.num_devices, 1)
+
+    def test_num_devices_upper_bound_still_enforced_without_target_qps(self):
+        with self.assertRaises(SystemExit):
+            self._parse_args(["--num-devices=4", "--tp-sizes", "8"])
+
+
+class TestCapacityPlanningModeSelection(TestCase):
+    """--target-qps mode dispatch: disagg requires exactly one phase SLO limit."""
+
+    def _dispatch(self, extra: list[str]):
+        """Run run_capacity_planning with CapacityPlanner stubbed out.
+
+        Returns:
+            tuple[int, CapacityPlanConfig | None]: exit code and the config the
+            planner was constructed with (None when dispatch returned early).
+        """
+        import logging
+
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        args = TestCapacityPlanningArgSemantics._parse_args(extra)
+        with (
+            patch("serving_cast.service.capacity_planner.CapacityPlanner") as planner_cls,
+            patch("serving_cast.service.capacity_planner.render_capacity_planning_result"),
+        ):
+            code = throughput_optimizer_module.run_capacity_planning(
+                args, time.time(), logging.getLogger(THROUGHPUT_OPTIMIZER_MODULE)
+            )
+        config = planner_cls.call_args.args[0] if planner_cls.call_args else None
+        return code, config
+
+    def test_disagg_prefill_only_selects_disagg_prefill(self):
+        code, config = self._dispatch(["--target-qps=500", "--disagg", "--ttft-limit=500"])
+        self.assertEqual(code, 0)
+        self.assertEqual(config.mode, "disagg_prefill")
+
+    def test_disagg_decode_only_selects_disagg_decode(self):
+        code, config = self._dispatch(["--target-qps=500", "--disagg", "--tpot-limit=50"])
+        self.assertEqual(code, 0)
+        self.assertEqual(config.mode, "disagg_decode")
+
+    def test_disagg_with_both_slo_limits_is_rejected(self):
+        """Otherwise the same command would silently simulate run_agg()."""
+        import logging
+
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        args = TestCapacityPlanningArgSemantics._parse_args(
+            ["--target-qps=500", "--disagg", "--ttft-limit=500", "--tpot-limit=50"]
+        )
+        with self.assertLogs("cli.inference.throughput_optimizer", "ERROR") as logs:
+            code = throughput_optimizer_module.run_capacity_planning(
+                args, time.time(), logging.getLogger(THROUGHPUT_OPTIMIZER_MODULE)
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("exactly one of --ttft-limit or --tpot-limit", "\n".join(logs.output))
+
+    def test_disagg_without_slo_limits_is_rejected(self):
+        import logging
+
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        args = TestCapacityPlanningArgSemantics._parse_args(["--target-qps=500", "--disagg"])
+        with self.assertLogs("cli.inference.throughput_optimizer", "ERROR"):
+            code = throughput_optimizer_module.run_capacity_planning(
+                args, time.time(), logging.getLogger(THROUGHPUT_OPTIMIZER_MODULE)
+            )
+        self.assertEqual(code, 1)
+
+    def test_aggregation_mode_keeps_auto_device_count(self):
+        code, config = self._dispatch(["--target-qps=1000", "--ttft-limit=500", "--tpot-limit=50"])
+        self.assertEqual(code, 0)
+        self.assertEqual(config.mode, "aggregation")
+        self.assertIsNone(config.num_devices)
 
 
 @pytest.mark.nightly

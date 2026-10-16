@@ -7,13 +7,15 @@ This document is intended for developers, performance engineers, and capacity pl
 
 ## 2 Main Scenarios
 
-The throughput optimizer can be used for hardware planning, throughput optimization under SLO constraints, and PD-disaggregation deployment design. By deployment form, it mainly supports the following scenarios:
+The throughput optimizer can be used for hardware planning, throughput optimization under SLO constraints, PD-disaggregation deployment design, and capacity planning (working backwards from a target QPS to the minimum device count). By deployment form, it mainly supports the following scenarios:
 
 | Mode | Applicable Scenario | Key Parameters |
 | --- | --- | --- |
 | PD aggregation | prefill and decode run on the same instance, suitable for quickly evaluating overall throughput | `--tpot-limits`, `--ttft-limits`|
 | PD disaggregation | prefill and decode are deployed separately, requiring evaluation of the capability of each phase | `--disagg`, `--ttft-limits` or `--tpot-limits` |
 | PD ratio | For planning the ratio of prefill to decode instance counts | `--enable-optimize-prefill-decode-ratio`, `--prefill-devices-per-instance`, `--decode-devices-per-instance` |
+| KV cache offload | For evaluating how decode-sparse / prefill-layerwise KV cache offload changes TTFT, TPOT and the concurrency ceiling | `--enable-decode-kv-offload`, `--enable-prefill-kv-offload` |
+| Capacity planning | A target QPS and SLO are known and the minimum device count must be derived | `--target-qps` (combined with the parameters of any mode above) |
 
 Any of the above scenarios can be combined with `--speculative-method {dflash,dspark}` to enable speculative decoding (for MTP, prefer the unified entry `--speculative-method mtp`); see [Adding Speculative Decoding (DFlash / DSpark)](#adding-speculative-decoding-dflash--dspark).
 
@@ -213,6 +215,86 @@ msmodeling inference throughput-optimizer zai-org/GLM-5.2 \
 - The host link bandwidth comes from the DeviceProfile (A3 = 70 GB/s/die/direction theoretical peak); bandwidth-tier sensitivity requires profile variants.
 - Prefill layerwise offload uses code-level defaults for B/I (`B=2`, `I=0`).
 
+### 2.5 Capacity Planning Scenario
+
+Capacity planning answers the reverse question: **given a target QPS and SLO, how many devices are needed at minimum?** It stacks a linear extrapolation on top of the existing optimizer results and does not change the optimizer's own search logic — the same command with and without `--target-qps` follows the same simulation path, and the former only adds the minimum-device conclusion.
+
+Passing `--target-qps` triggers the mode. It can be combined with PD aggregation, PD disaggregation, and PD ratio.
+
+#### Aggregation Mode
+
+```bash
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 1024 \
+    --output-length 512 \
+    --ttft-limit 500 \
+    --tpot-limit 50 \
+    --target-qps 1000
+```
+
+#### PD Disaggregation Mode
+
+When combined with `--disagg`, **exactly one** phase SLO must be given; it selects the phase the extrapolation is based on:
+
+```bash
+# Prefill phase
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 2048 \
+    --output-length 512 \
+    --disagg \
+    --ttft-limit 500 \
+    --target-qps 500
+
+# Decode phase
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 2048 \
+    --output-length 512 \
+    --disagg \
+    --tpot-limit 50 \
+    --target-qps 500
+```
+
+#### PD Ratio Mode
+
+```bash
+# Fixed devices per instance
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 3500 \
+    --output-length 1500 \
+    --enable-optimize-prefill-decode-ratio \
+    --prefill-devices-per-instance 4 \
+    --decode-devices-per-instance 2 \
+    --ttft-limit 500 \
+    --tpot-limit 50 \
+    --target-qps 500
+
+# Auto-search devices per instance: omit --prefill-devices-per-instance / --decode-devices-per-instance
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --input-length 3500 \
+    --output-length 1500 \
+    --enable-optimize-prefill-decode-ratio \
+    --ttft-limit 500 \
+    --tpot-limit 50 \
+    --target-qps 500
+```
+
+#### Constraints
+
+- `--target-qps` must be positive; passing it triggers capacity planning mode.
+- `--num-devices` becomes optional:
+  - When given, capacity planning runs the optimizer once at exactly that device count; the value also caps the devices-per-instance budgets of PD ratio auto-search.
+  - When omitted, the starting budget is derived from the device profile's `comm_grid` and **every** power-of-2 budget up to the `comm_grid` capacity is searched, with a full optimizer run per budget; the results are merged and the global minimum device count is reported. Per-die QPS is not monotonic in device count (a larger budget can expose a better parallel structure), so there is no early exit. The number of budgets is bounded — for example the A3 `comm_grid` capacity is 768, giving 8 budgets.
+  - A value above the device `comm_grid` capacity is reported as infeasible instead of running a doomed optimizer pass.
+- When combined with `--disagg`, exactly one of `--ttft-limit` / `--tpot-limit` must be given; supplying both or neither fails explicitly rather than silently switching to the aggregation simulation path.
+- PD ratio auto-search enumerates every P/D devices-per-instance pair (`p_budgets × d_budgets`), so the number of combinations grows quadratically with the number of budgets. The budgets come from the device `comm_grid`, not from `--tp-sizes` — TP describes the parallel structure *inside* an instance, and an instance's device count is of the order of its product (`TP × PP`). Use `--prefill-devices-per-instance` / `--decode-devices-per-instance` for exact control.
+- Search dimensions such as `--tp-sizes` / `--pp-sizes` / `--ep-sizes` keep their meaning under capacity planning: they select the parallel structure searched *within* each instance.
+- Capacity planning uses only the first `--device`; passing several logs a warning.
+
 ## 3 Result Information
 
 The script outputs performance metrics (throughput, TTFT, TPOT, concurrency, and mode-specific fields such as QPS or PD ratio). Example:
@@ -342,6 +424,45 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --batch-range 1 256
 ```
 
+### 3.2 Capacity Planning Result
+
+With `--target-qps`, the capacity planning summary is printed before the standard optimizer tables:
+
+```text
+****************************************************************************************************
+  Capacity Planning Result
+  --------------------------------------------------------------------------------------------------
+  Target QPS:  1000.00 req/s
+  SLO:         TTFT <= 500 ms, TPOT <= 50 ms
+  --------------------------------------------------------------------------------------------------
+  Minimum Devices: 64
+  Achieved QPS:     1008.00 req/s
+  Per-Die QPS:      15.75 req/s
+  Replicas Needed:  8
+  Per-Replica Dies: 8
+  Parallel:         TP=8 | PP=1 | DP=1
+  Batch Size:       64
+  TTFT:             320.00 ms
+  TPOT:             42.00 ms
+  --------------------------------------------------------------------------------------------------
+  推算对比表 (按总卡数升序, 同卡数取单卡QPS最高)
+  ...
+****************************************************************************************************
+```
+
+| Field | Meaning |
+| --- | --- |
+| `Minimum Devices` | Minimum total device count meeting the target QPS and SLO |
+| `Achieved QPS` | Request QPS actually reached by the minimum-device configuration; never below the target |
+| `Per-Die QPS` | Request QPS per device, used to compare configurations with the same device count |
+| `Replicas Needed` | Number of instances (replicas) required |
+| `Per-Replica Dies` | Devices occupied by each instance |
+| `Parallel` / `Batch Size` / `TTFT` / `TPOT` | Parallel strategy and performance metrics of the best configuration |
+
+In PD ratio mode the summary instead reports `Topology` (as `xPyD`), `P QPS`, `D QPS` and `PD Ratio`, and the comparison table lists the total device count and per-device QPS of each (P, D) pair.
+
+When nothing is feasible the summary prints `No feasible configuration found under the given constraints.` and the log explains why (the model does not fit, no configuration meets the SLO, or every budget exceeds the device `comm_grid` capacity).
+
 ## 4 Parameters
 
 ```bash
@@ -404,6 +525,11 @@ Service Options:
                         TTFT constraints under which to search for the best throughput. None means no constraint. (default: None)
   --tpot-limits TPOT_LIMITS
                         TPOT constraints under which to search for the best throughput. None means no constraint. (default: None)
+  --target-qps TARGET_QPS
+                        Target request QPS (req/s). When set, triggers capacity planning mode: the tool searches for the minimum device count that meets
+                        this QPS under the given SLO. If --num-devices is also set, it controls the TP search width; otherwise the device count is
+                        auto-derived: every power-of-2 budget from the device profile's comm_grid seed up to its capacity is searched and the results are
+                        merged, so the reported minimum is global across those budgets.
   --max-batched-tokens MAX_BATCHED_TOKENS
                         Max batched tokens for one prefill or mixed prefill/decode step. (default: 8192)
   --prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE
@@ -491,6 +617,7 @@ The main parameters are described as follows:
 | --pp-layer-partitions | Model & Quantization Options | Optional | Explicitly specifies per-stage layer partitions for PP.<br>1. Type: Str (JSON list of lists).<br>2. Format: e.g. `'[[31,30],[16,15,15,15]]'`; each inner list length must equal its `pp_size`, and the sum of all inner-list elements must equal the model's `num_hidden_layers` (DeepSeek-V3.1 has 61 layers: 31+30=61, 16+15+15+15=61). Inner lists are auto-matched to their `pp_size` by length.<br>3. Default: `None`; uses balanced partitioning (remainder placed on earlier stages, avoiding the last stage carrying both norm + lm_head).<br>4. Only effective for PP>1. |
 | --ttft-limits                           | Service Options | Optional | Specifies the TTFT constraint under which to search for the best throughput.<br>1. Type: Float.<br>2. Value range: positive, in ms.<br>3. Default: `None`, meaning no TTFT limit. |
 | --tpot-limits                           | Service Options | Optional | Specifies the TPOT constraint under which to search for the best throughput.<br>1. Type: Float.<br>2. Value range: positive, in ms.<br>3. Default: `None`, meaning no TPOT limit. |
+| --target-qps                            | Service Options | Optional | Specifies the target request QPS (req/s). When set, capacity planning mode is triggered: the minimum device count meeting that QPS under the given SLO is derived.<br>1. Type: Float.<br>2. Value range: positive.<br>3. Default: `None`.<br>4. For how it interacts with `--num-devices`, and the exactly-one-phase-SLO rule under `--disagg`, see [2.5 Capacity Planning Scenario](#25-capacity-planning-scenario). |
 | --max-batched-tokens                    | Service Options | Optional | Specifies the maximum number of batched tokens for one prefill or mixed prefill/decode step.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: 8192. |
 | --batch-range                           | Service Options | Optional | Specifies the batch size search range.<br>1. Type: List[Int].<br>2. Format: `[min max]` or `[max]`.<br>3. Default: `None`. When `min` is not specified, the search starts from 1. When `max` is not specified, no upper limit is set. |
 | --serving-cost                          | Service Options | Optional | Specifies the serving cost for cost-related metric calculation.<br>1. Type: Float.<br>2. Value range: non-negative.<br>3. Default: 0. |
@@ -636,3 +763,32 @@ PD ratio mode uses QPS (Queries Per Second) as the primary metric for matching p
   `Allocated D QPS = D instances * D QPS`
 
   `Balanced QPS = min(Allocated P QPS, Allocated D QPS)`
+
+
+### 5.3 How the Minimum Device Count Is Calculated in Capacity Planning
+
+Capacity planning reuses the optimizer results: it runs the optimizer at candidate device counts to obtain the per-instance request QPS, then extrapolates linearly to the minimum device count that meets the target QPS.
+
+- **Aggregation / PD disaggregation**:
+
+  Derive the per-instance request QPS, then scale by the number of instances:
+
+  - Per-instance request QPS:
+    - Aggregation: `per_replica_qps = token/s ÷ output_length ÷ dp_size`
+    - PD disaggregation prefill: `per_replica_qps = concurrency ÷ prefill_phase_makespan_ms × 1000`
+    - PD disaggregation decode: `per_replica_qps = concurrency ÷ (tpot × output_length) × 1000`
+  - Instances required: `replicas_needed = ceil(target_qps ÷ per_replica_qps)`
+  - Total devices: `total_gpus = replicas_needed × per_replica_gpus`
+  - Per-device QPS: `per_die_qps = per_replica_qps ÷ per_replica_gpus`
+
+  Here `per_replica_gpus` is the device count of one instance (normally `num_devices ÷ dp_size` in aggregation/disaggregation). When EP spans several DP replicas (`num_devices ÷ dp_size < ep_size ≤ num_devices`), the whole instance is the replication unit, so `per_replica_gpus = num_devices` and `per_replica_qps` is no longer divided by `dp_size`.
+
+- **PD ratio**: the P and D sides scale independently and the achieved QPS is the smaller of the two:
+
+  - `p_inst = ceil(target_qps ÷ p_qps)`, `d_inst = ceil(target_qps ÷ d_qps)`
+  - `total_gpus = p_inst × p_dev + d_inst × d_dev`
+  - `achieved_qps = min(p_inst × p_qps, d_inst × d_qps)`
+
+- **Ranking**: rows are sorted by `total_gpus` ascending and, for equal device counts, by `per_die_qps` descending; the first row is the minimum-device configuration and the comparison table lists every candidate in the same order.
+
+> The extrapolation keeps full precision and rounds only when rendering. Rounding the per-instance QPS to two decimals before extrapolating scales the error by the number of instances: 0.014 req/s per instance against a target of 1 req/s needs 72 instances, so the correct result is 1.008 req/s where a rounded computation reports 0.72 req/s.
