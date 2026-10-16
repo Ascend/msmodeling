@@ -31,6 +31,24 @@ def _(
     pass
 
 
+@register_tensor_cast_op("mimo_v2_reshape_and_cache", mutates_args=("kv_cache",))
+def _(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    qk_head_dim: int,
+    v_head_dim: int,
+) -> None:
+    """Write asymmetric MiMo V2 K/V rows into one packed cache.
+
+    The physical cache stores ``[K | V]`` in its last dimension because K and V
+    use different head dimensions.  This meta operator only records the semantic
+    cache write; the performance model accounts for the valid K and V payloads.
+    """
+    pass
+
+
 @register_tensor_cast_op("siso_reshape_and_cache", mutates_args=("kv_cache",))
 def _(
     key: torch.Tensor,
@@ -80,6 +98,38 @@ def _(
         seq_len: (batch_size,), the length of each request including both computed tokens and newly scheduled tokens
     """
     return torch.empty_like(query).contiguous()
+
+
+@register_tensor_cast_op("mimo_v2_attention")
+def _(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    block_table: Optional[torch.Tensor],
+    query_start_loc: Optional[torch.Tensor],
+    seq_lens: Optional[torch.Tensor],
+    query_lens: Optional[torch.Tensor],
+    qk_head_dim: int,
+    v_head_dim: int,
+    sinks: Optional[torch.Tensor],
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Fused MiMo V2 attention with asymmetric QK and V head dimensions."""
+    if qk_head_dim <= 0 or v_head_dim <= 0:
+        raise ValueError("MiMo V2 attention head dimensions must be positive")
+    if query.shape[-1] % qk_head_dim != 0:
+        raise ValueError("MiMo V2 query width must be divisible by qk_head_dim")
+    num_query_heads = query.shape[-2] if query.ndim == 4 else query.shape[-1] // qk_head_dim
+    if sinks is not None and (sinks.ndim != 1 or sinks.shape[0] != num_query_heads):
+        raise ValueError(
+            "MiMo V2 attention sink count must match local query heads, "
+            f"got {tuple(sinks.shape)} for {num_query_heads} heads"
+        )
+    output_shape = (*query.shape[:-1], num_query_heads * v_head_dim)
+    if query.ndim == 4:
+        output_shape = (*query.shape[:-1], v_head_dim)
+    return torch.empty(output_shape, dtype=out_dtype, device=query.device).contiguous()
 
 
 @register_tensor_cast_op("attention_quant")

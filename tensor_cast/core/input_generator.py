@@ -577,6 +577,17 @@ def _is_v4_model(model) -> bool:
     return False
 
 
+def _is_mimo_v2_flash_model(model) -> bool:
+    """Return True when the model uses MiMo V2's asymmetric K/V cache rows."""
+    for config in (
+        getattr(getattr(model, "model_config", None), "hf_config", None),
+        getattr(model, "text_config", None),
+    ):
+        if config is not None and getattr(config, "model_type", None) == "mimo_v2_flash":
+            return True
+    return False
+
+
 def _get_glm5_indexshare_config(model):
     orig_mod = getattr(model, "_orig_mod", None)
     for candidate in (model, orig_mod):
@@ -1003,6 +1014,22 @@ def kv_cache_excluded_layer_indices(model) -> set[int]:
     return excluded
 
 
+def _shard_kv_heads(total_kv_heads: int, tensor_parallel_size: int) -> int:
+    """Return the number of KV heads owned by one tensor-parallel rank."""
+    if total_kv_heads >= tensor_parallel_size:
+        if total_kv_heads % tensor_parallel_size != 0:
+            raise ValueError(
+                f"total_kv_heads {total_kv_heads} is not divisible by tensor_parallel_size {tensor_parallel_size}"
+            )
+        return total_kv_heads // tensor_parallel_size
+
+    if tensor_parallel_size % total_kv_heads != 0:
+        raise ValueError(
+            f"tensor_parallel_size {tensor_parallel_size} is not divisible by total_kv_heads {total_kv_heads}"
+        )
+    return 1
+
+
 def _get_kv_cache_info(
     model,
     num_blocks: int,
@@ -1092,11 +1119,7 @@ def _get_kv_cache_info(
             # target model's KV layout for draft layers.
             draft_kv_heads = int(draft_hf.num_key_value_heads)
             draft_head_dim = int(getattr(draft_hf, "head_dim", draft_hf.hidden_size // draft_hf.num_attention_heads))
-            if draft_kv_heads >= parallel_config.tensor_parallel_size:
-                kv_heads = exact_division(draft_kv_heads, parallel_config.tensor_parallel_size)
-            else:
-                assert parallel_config.tensor_parallel_size % draft_kv_heads == 0
-                kv_heads = 1
+            kv_heads = _shard_kv_heads(draft_kv_heads, parallel_config.tensor_parallel_size)
             kv_cache_by_layers[i] = torch.empty(
                 [2, layer_num_blocks, block_size, kv_heads, draft_head_dim],
                 dtype=kvcache_dtype,
@@ -1152,16 +1175,41 @@ def _get_kv_cache_info(
                     dtype=kvcache_dtype,
                     device="meta",
                 )
+        elif _is_mimo_v2_flash_model(model):
+            pattern = model.text_config.hybrid_layer_pattern
+            if not pattern:
+                raise ValueError("MiMo V2 hybrid_layer_pattern must not be empty")
+            is_swa = bool(pattern[i % len(pattern)])
+            if is_swa:
+                total_kv_heads = int(model.text_config.swa_num_key_value_heads)
+                qk_head_dim = int(model.text_config.swa_head_dim)
+                v_head_dim = int(model.text_config.swa_v_head_dim)
+            else:
+                total_kv_heads = int(model.text_config.num_key_value_heads)
+                qk_head_dim = int(model.text_config.head_dim)
+                v_head_dim = int(model.text_config.v_head_dim)
+
+            kv_heads = _shard_kv_heads(total_kv_heads, parallel_config.tensor_parallel_size)
+
+            # MiMo uses D_qk != D_v. Store one exact-size packed [K | V]
+            # row instead of padding V to D_qk in a conventional [2, ...] cache.
+            kv_cache_by_layers[i] = torch.empty(
+                [
+                    1,
+                    num_blocks,
+                    block_size,
+                    kv_heads,
+                    qk_head_dim + v_head_dim,
+                ],
+                dtype=kvcache_dtype,
+                device="meta",
+            )
         else:
             # Shape: [2 (K/V), num_blocks, block_size, num_heads, head_dim]
-            if model.text_config.num_key_value_heads >= parallel_config.tensor_parallel_size:
-                kv_heads = exact_division(
-                    model.text_config.num_key_value_heads,
-                    parallel_config.tensor_parallel_size,
-                )
-            else:
-                assert parallel_config.tensor_parallel_size % model.text_config.num_key_value_heads == 0
-                kv_heads = 1
+            kv_heads = _shard_kv_heads(
+                int(model.text_config.num_key_value_heads),
+                parallel_config.tensor_parallel_size,
+            )
 
             kv_cache_by_layers[i] = torch.empty(
                 [

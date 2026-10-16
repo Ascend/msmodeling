@@ -34,6 +34,7 @@ from tensor_cast.core.input_generator import (
     _resolve_sparse_attention_indexer_cache_width,
     _resolve_sparse_attention_kv_cache_width,
     _resolve_v4_kv_cache_size,
+    _shard_kv_heads,
     generate_image_inputs,
     generate_inputs,
     generate_inputs_varlen,
@@ -57,6 +58,26 @@ from tensor_cast.pipeline_parallel import (
 )
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.model import TransformerModel
+
+
+def test_shard_kv_heads_partitions_heads_across_tp_ranks():
+    assert _shard_kv_heads(total_kv_heads=8, tensor_parallel_size=2) == 4
+
+
+def test_shard_kv_heads_replicates_head_across_tp_ranks():
+    assert _shard_kv_heads(total_kv_heads=4, tensor_parallel_size=8) == 1
+
+
+@pytest.mark.parametrize(
+    ("total_kv_heads", "tensor_parallel_size", "message"),
+    [
+        (6, 4, "total_kv_heads 6 is not divisible by tensor_parallel_size 4"),
+        (4, 6, "tensor_parallel_size 6 is not divisible by total_kv_heads 4"),
+    ],
+)
+def test_shard_kv_heads_rejects_non_divisible_layout(total_kv_heads, tensor_parallel_size, message):
+    with pytest.raises(ValueError, match=message):
+        _shard_kv_heads(total_kv_heads, tensor_parallel_size)
 
 
 def _fake_mtp_input_model(num_mtp_tokens=2):

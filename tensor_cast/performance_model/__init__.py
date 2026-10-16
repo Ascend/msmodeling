@@ -398,6 +398,20 @@ def _(
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mimo_v2_reshape_and_cache.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    assert len(op_invoke_info.args) == 6
+    key = op_invoke_info.args[0]
+    value = op_invoke_info.args[1]
+    kv_cache = op_invoke_info.args[2]
+
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={2})
+    properties.memory_write_bytes += bytes_of_tensor(key, kv_cache.dtype) + bytes_of_tensor(value, kv_cache.dtype)
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.siso_reshape_and_cache.default)
 def _(
     op_invoke_info: OpInvokeInfo,
@@ -848,6 +862,65 @@ def _(
         query, query_lens, request_total_seq_lens
     )
     return _attention_properties_helper(op_invoke_info, query, key, request_total_seq_lens, query_lens, query.dtype)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mimo_v2_attention.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    assert len(op_invoke_info.args) == 12
+    query, key, value = op_invoke_info.args[:3]
+    block_table = op_invoke_info.args[4]
+    request_total_seq_lens = op_invoke_info.args[6]
+    query_lens = op_invoke_info.args[7]
+    qk_head_dim = int(op_invoke_info.args[8])
+    v_head_dim = int(op_invoke_info.args[9])
+    sinks = op_invoke_info.args[10]
+    out_dtype = op_invoke_info.args[11]
+    query_lens, request_total_seq_lens = _normalize_query_lens_and_request_total_seq_lens(
+        query, query_lens, request_total_seq_lens
+    )
+
+    if query.ndim == 4:
+        assert block_table is None, "4D query implies no KV cache; block_table must be None"
+        batch_size, query_len_per_seq, num_q_heads, actual_qk_head_dim = query.size()
+        if actual_qk_head_dim != qk_head_dim:
+            raise ValueError("MiMo V2 query head dimension does not match qk_head_dim")
+        key_len_per_seq = key.size(1)
+        context_len_product_sum = batch_size * query_len_per_seq * key_len_per_seq
+    else:
+        if query.size(-1) % qk_head_dim != 0:
+            raise ValueError("MiMo V2 query width must be divisible by qk_head_dim")
+        num_q_heads = query.size(-1) // qk_head_dim
+        if _tensor_value_unavailable(request_total_seq_lens) or _tensor_value_unavailable(query_lens):
+            context_len_product_sum = _attention_context_sum_from_metadata(query, key, block_table)
+        else:
+            context_len_product_sum = torch.sum(
+                query_lens.to(request_total_seq_lens.dtype) * request_total_seq_lens
+            ).item()
+
+    bmm1_ops = context_len_product_sum * num_q_heads * qk_head_dim * 2
+    bmm2_ops = context_len_product_sum * num_q_heads * v_head_dim * 2
+    sink_columns = 1 if sinks is not None else 0
+    softmax_elements = context_len_product_sum + _query_token_count(query) * sink_columns
+    softmax_ops = softmax_elements * num_q_heads * 4
+
+    if block_table is None:
+        properties = op_invoke_info.get_memory_access_properties()
+    else:
+        properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={1, 2})
+        kv_row_elements = key.size(-2) * (qk_head_dim + v_head_dim)
+        if _tensor_value_unavailable(request_total_seq_lens):
+            batch_size = int(block_table.size(0))
+            max_seq_len = int(block_table.size(1) * key.size(1))
+            cache_tokens = batch_size * max_seq_len
+        else:
+            cache_tokens = torch.sum(request_total_seq_lens).item()
+        properties.memory_read_bytes += cache_tokens * bytes_of_elements(kv_row_elements, key.dtype)
+
+    properties.compute_ops.setdefault(query.dtype, OpInvokeInfo.ComputeOps()).mma_ops = bmm1_ops + bmm2_ops
+    properties.compute_ops.setdefault(out_dtype, OpInvokeInfo.ComputeOps()).gp_ops = softmax_ops
+    return properties
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.attention_quant.default)

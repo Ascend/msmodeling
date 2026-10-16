@@ -35,7 +35,7 @@ from transformers.modeling_outputs import (
     MoeModelOutputWithPast,
 )
 from transformers.modeling_rope_utils import dynamic_rope_update, ROPE_INIT_FUNCTIONS
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     auto_docstring,
@@ -115,6 +115,7 @@ def eager_attention_forward(
     scaling: float,
     dropout: float = 0.0,
     sinks: Optional[torch.Tensor] = None,
+    **kwargs,
 ):
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
@@ -362,7 +363,9 @@ class MiMoV2Attention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        attention_interface: Callable = eager_attention_forward
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -374,6 +377,7 @@ class MiMoV2Attention(nn.Module):
             scaling=self.scaling,
             # position_ids=position_ids,
             sinks=self.attention_sink_bias,
+            **kwargs,
         )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()

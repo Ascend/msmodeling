@@ -202,6 +202,12 @@ def flash_attention_forward(
         query, key, value = (x.transpose(1, 2) for x in (query, key, value))
         num_tokens = query.shape[0] * query.shape[1]
         query, key, value = (x.reshape(num_tokens, -1) for x in (query, key, value))
+    # Preserve model-specific head widths after Q/K/V are flattened. MiMo V2
+    # exposes v_head_dim because D_qk and D_v differ; ordinary attention
+    # implementations do not receive these private values.
+    if hasattr(module, "v_head_dim"):
+        kwargs["_tensor_cast_qk_head_dim"] = module.head_dim
+        kwargs["_tensor_cast_v_head_dim"] = module.v_head_dim
     # return (attn_output, attn_weights) while we ignore attn_weights
     return self_attn.forward(
         query,
