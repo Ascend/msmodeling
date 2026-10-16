@@ -26,7 +26,7 @@ from cli.registry.modules import get_spec
 from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
-VERSION = "2.9.13"
+VERSION = "2.9.14"
 TITLE = I18nText("吞吐优化", "Throughput Optimizer")
 RUNNER = "ParallelRunner"
 
@@ -79,6 +79,13 @@ OPTION_SOURCE_REGISTRY = {
 
 # Cross-field validators (UI metadata)
 VALIDATOR_UI = {
+    "targetQpsNumDevicesSemantics": {
+        "fields": ["target-qps", "num-devices"],
+        "message": I18nText(
+            "设置 target-qps 且未显式指定 num-devices 时，num-devices 由设备 comm_grid 自动推导",
+            "With target-qps set and num-devices not explicitly provided, num-devices is derived from the device comm_grid",
+        ),
+    },
     "validParallelCombo": {
         "fields": ["tp-sizes", "ep-sizes", "moe-dp-sizes", "num-devices"],
         "message": I18nText(
@@ -515,6 +522,11 @@ UI: dict[str, UIFieldProps] = {
         group={'zh': '搜索', 'en': 'Search'},
         control='select',
     ),
+    # CLI-only for now: --target-qps switches the optimizer into capacity
+    # planning, whose summary/推算对比表 output the Web UI result views cannot
+    # render yet (ThroughputOptimizerResult dispatches on aggregation / disagg /
+    # pd_ratio only), so the field stays off the form until that lands.
+    "target-qps": UIFieldProps(hidden=True),
     "dump-original-results": UIFieldProps(
         label=I18nText('导出原始结果', 'Dump Original Results'),
         tooltip=I18nText('导出原始优化结果。', 'Export original optimization results.'),
