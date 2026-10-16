@@ -172,3 +172,71 @@ def test_cast_validation_rejects_double_tensors_on_ascend():
 
     assert not result.valid
     assert any("DOUBLE tensors are not replayable" in reason for reason in result.reasons)
+
+
+def test_add_validation_accepts_broadcast_and_scalar_rows():
+    broadcast = _row(
+        "1,24,6144;1,24,6144",
+        "1,24,6144",
+        "DT_BF16;DT_BF16",
+        "ND;ND",
+    )
+    scalar_second = _row(
+        "1,24,6144;",
+        "1,24,6144",
+        "DT_BF16;DT_BF16",
+        "ND;ND",
+    )
+    rank_widening = _row(
+        "2,1;2,1",
+        "2,1",
+        "FLOAT;FLOAT",
+        "ND;ND",
+    )
+
+    assert validate_replay_row("Add", broadcast).valid
+    assert validate_replay_row("Add", scalar_second).valid
+    assert validate_replay_row("Add", rank_widening).valid
+
+
+def test_add_validation_rejects_wrong_broadcast_output():
+    result = validate_replay_row(
+        "Add",
+        _row("1,6,6144;1,6,6144", "6,6144", "DT_BF16;DT_BF16", "ND;ND"),
+    )
+
+    assert not result.valid
+    assert any("Add output shape" in reason for reason in result.reasons)
+
+
+def test_add_validation_rejects_non_broadcastable_inputs():
+    result = validate_replay_row(
+        "Add",
+        _row("2,3;4,5", "2,3", "FLOAT;FLOAT", "ND;ND"),
+    )
+
+    assert not result.valid
+    assert any("not broadcastable" in reason for reason in result.reasons)
+
+
+def test_add_validation_rejects_issue510_scalar_grid_rows():
+    """Issue #510: reject scalar-grid contradictory rows.
+
+    `1,N,1;`->`(N,1)` grid rows (scalar-broadcast output recorded as the
+    non-broadcast result) and the rank-collapsed `1,1;`->`1` row must fail
+    validation so the generator refuses to write them.
+    """
+    for inputs, outputs in (
+        ("1,1,1;", "1,1"),
+        ("1,2,1;", "2,1"),
+        ("1,4097,1;", "4097,1"),
+        ("1,65536,1;", "65536,1"),
+        ("1,3584,6144;1,3584,6144", "3584,6144"),
+        ("1,1;", "1"),
+    ):
+        result = validate_replay_row(
+            "Add",
+            _row(inputs, outputs, "FLOAT;FLOAT", "ND;ND"),
+        )
+        assert not result.valid, (inputs, outputs)
+        assert any("Add output shape" in reason for reason in result.reasons), (inputs, outputs)

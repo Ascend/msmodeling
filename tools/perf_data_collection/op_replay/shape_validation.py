@@ -157,6 +157,31 @@ def _validate_mul(
     return errors
 
 
+def _validate_add(
+    inputs: list[tuple[int, ...] | None],
+    outputs: list[tuple[int, ...] | None],
+) -> list[str]:
+    errors: list[str] = []
+    tensors = _present(inputs)
+    result_tensors = _present(outputs)
+    if len(tensors) not in {1, 2}:
+        return [f"Add replay expects one tensor plus a scalar or two tensors, got {len(tensors)}"]
+    if len(result_tensors) != 1:
+        return [f"Add replay expects exactly one output tensor, got {len(result_tensors)}"]
+
+    if len(tensors) == 2:
+        expected = _broadcast_shape(tensors[0], tensors[1])
+        if expected is None:
+            return [f"Add inputs are not broadcastable: {tensors[0]} and {tensors[1]}"]
+    else:
+        # Single tensor plus a scalar slot: torch.add(x, scalar) returns
+        # x.shape, so the recorded output must equal the tensor input.
+        expected = tensors[0]
+    if result_tensors[0] != expected:
+        errors.append(f"Add output shape must be {expected}, got {result_tensors[0]}")
+    return errors
+
+
 def _validate_fill(
     inputs: list[tuple[int, ...] | None],
     outputs: list[tuple[int, ...] | None],
@@ -285,6 +310,7 @@ def _validate_kv_rmsnorm_rope_cache(
 
 
 KERNEL_VALIDATORS = {
+    "Add": _validate_add,
     "Fill": _validate_fill,
     "Mul": _validate_mul,
     "KvRmsNormRopeCache": _validate_kv_rmsnorm_rope_cache,
