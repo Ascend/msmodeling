@@ -945,10 +945,9 @@ def kv_cache_excluded_layer_indices(model) -> set[int]:
     parallel stage validation and layer-indexed forward), but these layers do
     not own a real paged KV cache. Counting their placeholders inflates both
     ``kv_cache_bytes`` and ``kv_cache_per_token`` and is the root cause of
-    ``device_memory_available_gb == 0`` (see
-    docs/RFC/fix_memory_available_zero_port_zh.md). Centralising the judgement
-    here keeps every consumer (``_get_kv_cache_info`` and ``ModelRunner``) on a
-    single, consistent accounting scope.
+    ``device_memory_available_gb == 0``. Centralising the judgement here keeps
+    every consumer (``_get_kv_cache_info`` and ``ModelRunner``) on a single,
+    consistent accounting scope.
 
     Kimi K3 hybrid attention follows the same principle: KDA layers
     (``KimiDeltaAttention``, ~69/93 layers) use a recurrent state, not a paged

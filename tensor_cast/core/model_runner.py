@@ -294,7 +294,7 @@ class ModelRunner:
     ) -> tuple[float, float, str, float, float]:
         """Peak/KV accounting for decode sparse KV offload.
 
-        (RFC docs/RFC/rfc_kv_cache_offloading_*). When decode offload is enabled
+        (Wiki RFC ``rfc_kv_cache_offloading_en.md``). When decode offload is enabled
         and this is a decode step, the main KV lives on host: drop it from the
         device peak, add the top-k hot buffer, and compute the per-step miss-row
         H2D transfer time. Otherwise return the inputs unchanged with
@@ -411,7 +411,7 @@ class ModelRunner:
     ) -> tuple[float, float, str, float, float]:
         """Peak/KV/transfer accounting for prefill layerwise KV offload.
 
-        (RFC docs/RFC/rfc_kv_cache_offloading_*). On a prefill step with offload
+        (Wiki RFC ``rfc_kv_cache_offloading_en.md``). On a prefill step with offload
         ON, only ``ratio = (I + min(B, N-I)) / N`` of the main KV stays on device
         (B shared physical buffers round-robin across N layers); the rest is on
         host. Drop the offloaded share from device peak so the optimizer's OOM
@@ -957,7 +957,7 @@ class ModelRunnerMetrics:
     pipeline_profile: Optional[PipelineProfile] = None
     profiling_source_times_s: Dict[str, float] = field(default_factory=dict)
     profiling_miss_reasons: Dict[str, int] = field(default_factory=dict)
-    # KV cache offload substrate (RFC docs/RFC/rfc_kv_cache_offloading_*).
+    # KV cache offload substrate (Wiki RFC ``rfc_kv_cache_offloading_en.md``).
     # Populated by Phase 1/2 when offload is active; 0 / "none" otherwise.
     offload_mode: str = "none"  # "none" | "decode" | "prefill"
     host_kv_pool_gb: float = 0.0

@@ -24,8 +24,10 @@ msmodeling optix 寻优的唯一用户入口，覆盖三种意图：
 ## Agent 决策与参数来源
 
 > **前置**：`knowledge/` 是 git submodule，内容承载于 `Ascend/msmodeling.wiki` 仓 main 分支。
-> 若该目录为空，先在本仓根目录执行
-> `git submodule update --init .agents/skills/optix-assistant/knowledge`，再开始任何模式。
+> Wiki 同时承载设计文档；为避免把与 OptiX 无关的文档拉入 agent 上下文，禁止直接初始化该
+> submodule。若目录为空，在本仓根目录执行
+> `python .agents/skills/optix-assistant/scripts/init_knowledge.py`。该入口使用 partial clone 和
+> sparse checkout，只检出 OptiX 知识目录，并严格对齐主仓锁定的 Wiki commit。
 
 `knowledge/` 参与提方向、选参数和失败诊断。方法卡提供机制、适用前提、组合约束与推荐起点；
 案例提供配置参考，运行结果提供实测依据，均不能替代方法正文的适用性核对。

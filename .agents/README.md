@@ -289,7 +289,7 @@ Microbench Run Script 生成器——从 profiling CSV 生成可在 NPU 上重�
 | File | Purpose |
 | ---- | ------- |
 | `profiling_database_lifecycle/SKILL.md` | 各阶段入口、命令、handoff、失败处理和交付要求 |
-| `../docs/design/profiling_database_lifecycle.md` | 生命周期流程、最低可用条件和阶段职责 |
+| [Wiki design/profiling_database_lifecycle.md](https://gitcode.com/Ascend/msmodeling.wiki/blob/main/design/profiling_database_lifecycle.md) | 生命周期流程、最低可用条件和阶段职责 |
 
 ### Quick start
 

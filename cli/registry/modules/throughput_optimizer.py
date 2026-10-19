@@ -387,7 +387,7 @@ ENABLE_OPTIMIZE_PREFILL_DECODE_RATIO = Param(
     cli_help="Enable PD ratio optimization mode",
 )
 
-# KV Cache Offload Options (RFC docs/RFC/rfc_kv_cache_offloading_*)
+# KV Cache Offload Options (Wiki RFC ``rfc_kv_cache_offloading_en.md``)
 ENABLE_DECODE_KV_OFFLOAD = Param(
     name="enable-decode-kv-offload",
     data_type="boolean",
@@ -395,7 +395,7 @@ ENABLE_DECODE_KV_OFFLOAD = Param(
     cli_action="store_true",
     group="KV Cache Offload Options",
     cli_help="Enable Decode sparse KV cache offload: move the device main KV to host, "
-    "keep only indexer + a top-k hot buffer on device (RFC docs/RFC/rfc_kv_cache_offloading_*).",
+    "keep only indexer + a top-k hot buffer on device (Wiki RFC rfc_kv_cache_offloading_en.md).",
 )
 
 DECODE_OFFLOAD_BUFFER_MULTIPLIER = Param(
@@ -440,7 +440,7 @@ ENABLE_PREFILL_KV_OFFLOAD = Param(
     cli_action="store_true",
     group="KV Cache Offload Options",
     cli_help="Enable Prefill layerwise KV cache offload: N layers share B physical NPU "
-    "buffers, the rest of the main KV lives on host (RFC docs/RFC/rfc_kv_cache_offloading_*).",
+    "buffers, the rest of the main KV lives on host (Wiki RFC rfc_kv_cache_offloading_en.md).",
 )
 
 

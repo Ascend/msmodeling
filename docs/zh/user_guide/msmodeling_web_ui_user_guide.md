@@ -837,7 +837,7 @@ jobs: 8
 如果你要修改 Web UI，建议先阅读设计文档：
 
 ```text
-docs/design/web_ui_refactor_design.md
+https://gitcode.com/Ascend/msmodeling.wiki/blob/main/design/web_ui_refactor_design.md
 ```
 
 ### 9.1 架构概览

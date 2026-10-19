@@ -17,7 +17,7 @@ any fx pattern or AscendC kernel first. The user names an op sequence (e.g.
 to print the fused latency / TPS.
 
 This skill is the user-facing layer of the Fusion Plugin Framework
-(`docs/RFC/rfc_manual_fusion_eval_en.md`). It contains **no executable code** —
+(`https://gitcode.com/Ascend/msmodeling.wiki/blob/main/RFC/rfc_manual_fusion_eval_en.md`). It contains **no executable code** —
 it guides you (the agent) to produce a protocol-compliant plugin. The Loader,
 Validator, and Python API are repo-side Python (`tensor_cast/plugins/`,
 `tensor_cast/plugin_framework/`).

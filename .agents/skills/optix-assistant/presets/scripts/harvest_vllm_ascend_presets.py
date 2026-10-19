@@ -18,7 +18,7 @@
 
 Fetches model pages from ``docs.vllm.com.cn`` and parses each page's ``vllm
 serve`` command blocks / ``export`` env lines / headings into a structured
-preset draft (see ``docs/design/vllm-ascend-preset-catalog-design.md``).
+preset draft (see ``presets/README.md`` for the catalog design and review contract).
 
 Design notes
 ------------

@@ -7,7 +7,7 @@
 架构设计与方案背景请参见：
 
 ```text
-docs/design/model_adaptation_efficiency_design.md
+https://gitcode.com/Ascend/msmodeling.wiki/blob/main/design/model_adaptation_efficiency_design.md
 ```
 
 ## 1. 适用范围

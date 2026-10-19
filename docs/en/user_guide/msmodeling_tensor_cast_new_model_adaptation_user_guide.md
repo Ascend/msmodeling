@@ -16,7 +16,7 @@ guide's outputs.
 Use the design document for architecture and rationale:
 
 ```text
-docs/design/model_adaptation_efficiency_design.md
+https://gitcode.com/Ascend/msmodeling.wiki/blob/main/design/model_adaptation_efficiency_design.md
 ```
 
 ## 1. Scope

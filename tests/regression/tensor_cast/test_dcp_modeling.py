@@ -22,7 +22,7 @@ Covers M1 (config-layer ``dcp_size`` plumbing + validation, incl. the GQA-only
 V4/SFA caches), and M2-compute/M3 (decode detection incl. MTP, GQA
 attention cost invariance under DCP, MLA all_gather Q + ``seq_lens / dcp`` KV
 sharding, and the fp32 ``output + lse`` all_to_all merge).
-See ``docs/RFC/rfc_context_parallel_dcp_*.md``.
+See Wiki RFC ``rfc_context_parallel_dcp_en.md``.
 """
 
 from unittest.mock import MagicMock, patch

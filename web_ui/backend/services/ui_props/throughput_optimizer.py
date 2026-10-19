@@ -661,7 +661,7 @@ UI: dict[str, UIFieldProps] = {
         group={'zh': 'MTP', 'en': 'MTP'},
         control='number',
     ),
-    # KV Cache Offload Options (RFC docs/RFC/rfc_kv_cache_offloading_*)
+    # KV Cache Offload Options (Wiki RFC ``rfc_kv_cache_offloading_en.md``)
     "enable-decode-kv-offload": UIFieldProps(
         label=I18nText('启用 Decode 稀疏 KV Offload', 'Enable Decode Sparse KV Offload'),
         tooltip=I18nText(

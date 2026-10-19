@@ -11,8 +11,8 @@
 | 优先级 | 文档 / 目录 | 角色 | 性质 |
 |:---:|------|------|------|
 | 1 | `spec/` | 项目正式规范（**最高权威**） | 规范源 |
-| 2 | `docs/RFC/` | 设计提案（先于代码，经评审合入） | 规范源（设计层） |
-| 3 | `docs/design/` | 实现设计（RFC 落地细节） | 规范源（实现层） |
+| 2 | RFC Issue | 新设计提案、讨论与收口记录 | 规范源（设计层） |
+| 3 | [Wiki `RFC/`、`design/`](https://gitcode.com/Ascend/msmodeling.wiki/tree/main) | 已迁移的过程性设计文档及特殊归档 | 历史参考 |
 | 4 | `CONTRIBUTING.md` | 人类贡献规范（环境、commit、PR、测试、代码风格） | 规范源（流程层） |
 | 5 | `AGENTS.md` | AI agent 入口（项目概览 + skill 索引 + 指向 spec/） | 入口 |
 | 6 | `CLAUDE.md` | Claude Code adapter（指向 AGENTS.md + spec/） | 入口（adapter） |
@@ -45,7 +45,7 @@ AI agent 在执行任务时，应按以下顺序确认事实：
 |------|------|
 | spec/ 与入口文件（AGENTS.md / CLAUDE.md / README.md）冲突 | 以 `spec/` 为准；入口文件视作过期，应在本 PR 或后续 PR 修正 |
 | spec/ 与 `CONTRIBUTING.md` 冲突 | 以 `spec/` 为准；`CONTRIBUTING.md` 视作过期，应修正 |
-| spec/ 与 `docs/RFC/` 冲突 | 以更高优先级方为准；若 RFC 是更新提案，应走 RFC 合入流程更新 spec/ |
+| spec/ 与 RFC Issue 冲突 | 以更高优先级方为准；若 RFC 已评审通过，应通过 PR 同步更新 spec/ |
 | spec/ 与 skill SKILL.md 冲突 | 以 `spec/` 为准；skill 视作过期，应修正 |
 | spec/ 与实际代码冲突 | **代码是事实但不是权威**——判断哪方过期，修正过期方；若修正 spec/，需走 RFC |
 | 入口文件之间冲突（如 AGENTS.md 与 CLAUDE.md） | 以 `AGENTS.md` 为准（CLAUDE.md 是 adapter，仅转发） |
@@ -55,8 +55,8 @@ AI agent 在执行任务时，应按以下顺序确认事实：
 | 文档类型 | 何时写 | 位置 | 评审要求 |
 |------|------|------|------|
 | **spec/** | 项目不变量、强制规范、工作流定义、治理规则 | `spec/{子目录}/{name}.md` | 必须经 PR 评审合入，修改需新 PR |
-| **RFC** | 新功能/新架构/破坏性变更的设计提案 | `docs/RFC/rfc_{name}_zh.md` 或 `rfc_{name}_en.md` | 必须经 RFC 评审，合入后相关 spec 应同步更新 |
-| **design** | RFC 落地的实现细节、模块划分、接口设计 | `docs/design/{name}_design.md` | 评审同 PR，是 RFC 与代码之间的桥梁 |
+| **RFC** | 新功能/新架构/破坏性变更的设计提案 | 使用 `.gitcode/ISSUE_TEMPLATE/510-RFC.yml` 创建 Issue | 必须在 Issue 中评审并记录收口结论，完成后相关 spec 应同步更新 |
+| **design** | RFC 落地的实现细节、模块划分、接口设计 | 对应 RFC/Feature Issue 与实现 PR | 与实现共同评审；确有特殊归档需求时再归档至 Wiki |
 | **skill** | 可重复执行的任务流程（含触发词、步骤、产出） | `.agents/skills/{name}/SKILL.md` | 遵循 [Skill 开发规范](../../AGENTS.md) |
 
 **经验法则**：
@@ -105,6 +105,6 @@ spec/
 | `AGENTS.md` | SIG「文档与Skill」chair | skill 新增/移除、项目结构变化、spec 目录变化 |
 | `CONTRIBUTING.md` | SIG「测试与基础设施」+「文档与Skill」 | 流程变更、环境变更、规范变更 |
 | `.agents/skills/` | 各 skill 对应 SIG | skill 流程变更 |
-| `docs/RFC/` | RFC 提出者 | 新设计提案 |
+| Wiki `RFC/`、`design/` | 文档归档者 | 历史文档迁移或确认存在特殊归档需求 |
 
 > **SIG 路由**：文件归属哪个 SIG 检视，由 [`sig_ownership.json`](../../.agents/skills/sig-review/sig_ownership.json) 最长前缀匹配决定。本文件归 SIG「文档与Skill」。

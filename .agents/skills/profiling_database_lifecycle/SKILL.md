@@ -13,7 +13,7 @@ metadata:
 
 ## 目标
 
-按 [`profiling_database_lifecycle.md`](../../../docs/design/profiling_database_lifecycle.md)
+按 [`profiling_database_lifecycle.md`](https://gitcode.com/Ascend/msmodeling.wiki/blob/main/design/profiling_database_lifecycle.md)
 执行一次可追溯的数据库更新。本 Skill 只编排已有 Skill、脚本和测试，不复制轴密度、采集、查询或异常检测算法。
 
 开始前确认仓库根目录、Git 分支、设备与软件版本、基线数据库、候选数据库、目标 workload 和报告目录。能从仓库读取的信息直接读取；

@@ -474,7 +474,7 @@ class MtpConfig:
 
 @dataclasses.dataclass
 class DflashConfig:
-    """Unified Dflash draft modeling config (see docs/RFC/rfc_dflash_unified_modeling_zh.md)."""
+    """Unified Dflash draft modeling config; see Wiki RFC ``rfc_dflash_support_zh.md``."""
 
     dflash_block_size: int = 8
     num_draft_layers: int = 6
@@ -510,7 +510,7 @@ class DflashConfig:
 
 @dataclasses.dataclass
 class DsparkConfig:
-    """DSpark modeling config (see docs/RFC/rfc_dspark_tensorcast_modeling_zh.md).
+    """DSpark modeling config; see Wiki RFC ``rfc_throughoutput_dflash-dspark_suppport.md``.
 
     Structural draft fields mirror Dflash; Markov/Confidence are DSpark-only.
     """

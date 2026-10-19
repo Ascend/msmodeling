@@ -1188,4 +1188,4 @@ stderr 并退出 `1`。
 ```
 
 完整设计和真实 msprof 目标接口见
-[独立算子 msprof Microbenchmark RFC](../../docs/RFC/rfc_standalone_msprof_operator_microbench_zh.md)。
+[独立算子 msprof Microbenchmark RFC](https://gitcode.com/Ascend/msmodeling.wiki/blob/main/RFC/rfc_standalone_msprof_operator_microbench_zh.md)。

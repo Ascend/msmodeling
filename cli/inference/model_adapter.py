@@ -447,7 +447,7 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
 
 
 def main() -> None:
-    # See docs/RFC/rfc_uv_dependency_management_en.md: dependency versions are
+    # See Wiki RFC ``rfc_uv_dependency_management_en.md``: dependency versions are
     # governed by pyproject.toml/uv.lock, so the old runtime check_dependencies
     # hook is intentionally not called here.
     parser, command_parsers = _build_parser()

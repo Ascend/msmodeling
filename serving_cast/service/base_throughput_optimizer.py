@@ -519,7 +519,7 @@ class BaseThroughputOptimizer(ABC):
         self._cache_forward_latency_record(key, self._build_forward_latency_record(metrics))
 
     def _build_forward_latency_record(self, metrics: ModelRunnerMetrics) -> ForwardLatencyRecord:
-        # offload fields are ModelRunnerMetrics fields (RFC docs/RFC/rfc_kv_cache_offloading_*).
+        # offload fields are ModelRunnerMetrics fields (Wiki RFC ``rfc_kv_cache_offloading_en.md``).
         # fold_offload_transfer_time_ms is the shared phase-aware fold-in
         # (prefill: transfer overlaps compute -> max; decode: serial -> "+");
         # its getattr/isinstance contract keeps this robust to lightweight

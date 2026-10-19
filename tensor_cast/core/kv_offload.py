@@ -1,7 +1,7 @@
 """KV cache offload performance modeling helpers.
 
 Implements the cost/benefit math for the KV cache offload strategies described
-in ``docs/RFC/rfc_kv_cache_offloading_*`` (aligned with upstream vLLM RFC #48203
+in Wiki RFC ``rfc_kv_cache_offloading_en.md`` (aligned with upstream vLLM RFC #48203
 and the vllm-ascend layerwise + sparse KV cache offloading design):
 
 * **Decode sparse offload**: the device main KV is moved to host; only an
@@ -152,7 +152,7 @@ def fold_offload_transfer_time_ms(
     Single source of truth for the phase-aware fold-in shared by
     ``base_throughput_optimizer._build_forward_latency_record``, the disagg
     single-shape branch, the disagg variable-chunk loop and the agg chunked
-    prefill loop (RFC ``docs/RFC/rfc_kv_cache_offloading_*``):
+    prefill loop (Wiki RFC ``rfc_kv_cache_offloading_en.md``):
 
     - prefill layerwise offload: transfer overlaps compute ->
       ``max(base_latency_ms, transfer_ms)``;

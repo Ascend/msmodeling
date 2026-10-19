@@ -26,7 +26,7 @@ Kimi K3 (``model_type="kimi_k3"``) is a 2.8T VL model with:
 
 All patches are gated by ``model_type == "kimi_k3"`` and isolated to this
 file. The adaptation follows the design document at
-``docs/design/kimi_k3_adaptation_design.md`` and reuses patterns from
+Wiki design ``kimi_k3_adaptation_design.md`` and reuses patterns from
 ``kimi_k25.py`` (VL framework, MLA RoPE patch, MoE stub) and
 ``qwen3_next.py`` (decomposed linear-attention routing, meta mask patch).
 

@@ -27,7 +27,7 @@ paths, pilcrows, embedded env quotes) and infer low-risk metadata (concise
 name, aliases, weight-format quantization). Everything a human must eyeball is
 reported, never silently dropped.
 
-See ``presets/README.md`` and ``docs/design/vllm-ascend-preset-catalog-design.md``.
+See ``presets/README.md`` for the catalog design and review contract.
 """
 
 import argparse

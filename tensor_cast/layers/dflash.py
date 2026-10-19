@@ -17,7 +17,7 @@
 """Dflash unified draft modeling for TensorCast.
 
 Draft = builtin Qwen3Config + Qwen3DFlash layers + TC attention + KV injection.
-Does not reuse target MLA import. See docs/RFC/rfc_dflash_unified_modeling_zh.md.
+Does not reuse target MLA import. See Wiki RFC ``rfc_dflash_support_zh.md``.
 """
 
 from __future__ import annotations

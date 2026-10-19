@@ -123,4 +123,4 @@ python tools/perf_data_collection/start_microbench.py `
 
 Shape 网格生成不执行 NPU 实测，新增行的耗时为 0。A3 replay、coverage、插值误差和 text_generate B2B 仍需单独验收。
 
-详细设计见 [查询驱动的 Shape 网格生成设计](../../docs/design/query_driven_shape_grid_generation.md)。
+详细设计见 [查询驱动的 Shape 网格生成设计](https://gitcode.com/Ascend/msmodeling.wiki/blob/main/design/query_driven_shape_grid_generation.md)。

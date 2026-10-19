@@ -52,4 +52,5 @@ spec/
 - 面向 canonical repository 的最终 PR 必须完成 openLiBing CI，日志通过 `gitcode-pipeline-analyzer` 分析。
 - 默认使用 `guided` 模式；`autonomous` 必须由用户明确授权。
 - 没有证据不得推进状态，没有独立检视不得把作者自检表述为审批。
-- 强制规则写入 `spec/`，架构提案写入 `docs/RFC/`，实现设计写入 `docs/design/`。
+- 强制规则写入 `spec/`；新设计提案使用 [RFC Issue 模板](../.gitcode/ISSUE_TEMPLATE/510-RFC.yml)，
+  在 Issue 中完成讨论与收口。Wiki `RFC/`、`design/` 仅归档已迁移的过程性设计文档及有特殊归档需求的存量文档。

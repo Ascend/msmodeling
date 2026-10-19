@@ -20,7 +20,7 @@ Provides the plugin loader that imports user fusion plugins and lets them
 self-register fx patterns / virtual ops / performance properties into the
 existing tensor_cast global tables. The main inference flow stays unchanged.
 
-See docs/RFC/rfc_manual_fusion_eval_zh.md (Plugin Mode) for the design.
+See Wiki RFC ``rfc_manual_fusion_eval_zh.md`` (Plugin Mode) for the design.
 """
 
 from typing import List

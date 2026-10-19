@@ -23,7 +23,7 @@ This module is the single source of truth for the catalog schema:
 - Pure ``validate_presets()`` used by unit tests.
 - CLI entry: exit non-zero if any ``error``-level issue is found.
 
-See ``docs/design/vllm-ascend-preset-catalog-design.md`` for the data model.
+See ``presets/README.md`` for the data model and review contract.
 """
 
 import argparse

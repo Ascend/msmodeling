@@ -17,7 +17,7 @@
 """DSpark draft modeling for TensorCast (G5: isolated from dflash.py).
 
 Reuses DFlash backbone via import/composition; adds Markov/Confidence sequential
-sampling. See docs/RFC/rfc_dspark_tensorcast_modeling_zh.md.
+sampling. See Wiki RFC ``rfc_throughoutput_dflash-dspark_suppport.md``.
 """
 
 from __future__ import annotations

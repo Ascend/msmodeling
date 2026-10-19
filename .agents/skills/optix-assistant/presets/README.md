@@ -4,7 +4,7 @@
 `docs.vllm.com.cn` 离线收割官方验证过的 `vllm serve` 配置，供 `optix-assistant`
 运行时本地查询（**agent 从不直接抓网页**）。
 
-完整设计见 `docs/design/vllm-ascend-preset-catalog-design.md`。
+目录设计、收集流程和评审约束以本文为准。
 
 ---
 

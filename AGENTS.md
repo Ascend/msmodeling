@@ -258,9 +258,9 @@ MindStudio-Modeling/
 ├── .loop/memory/lessons.md
 ├── spec/
 ├── docs/
-│   ├── RFC/
-│   ├── design/
-│   └── ai-native/
+│   ├── ai-native/
+│   ├── en/
+│   └── zh/
 ├── scripts/ai/
 ├── tensor_cast/
 ├── serving_cast/
@@ -270,3 +270,12 @@ MindStudio-Modeling/
 ├── CLAUDE.md
 └── CONTRIBUTING.md
 ```
+
+原 `docs/RFC/` 与 `docs/design/` 中的过程性文档已归档至
+[`Ascend/msmodeling.wiki`](https://gitcode.com/Ascend/msmodeling.wiki/tree/main)；新设计通过 RFC Issue 提交，
+Wiki 仅用于历史文档或特殊归档。
+
+Wiki `main` 每次发生已授权更新时，必须在同一次交付中把
+`.agents/skills/optix-assistant/knowledge` gitlink 同步到经过评审的 Wiki commit；`.gitmodules` 的
+`branch = main` 不会自动推进 gitlink。同步后使用 OptiX 知识库初始化器检出并执行 `--check-only`，确认主仓锁定的
+commit 与本地知识库一致。

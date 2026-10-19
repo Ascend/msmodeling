@@ -396,7 +396,7 @@ def _set_if(d: dict, key: str, value: Any) -> None:
 # bundle). image_generate is registry-complete (23 Params + ui_props) but
 # CLI-only: web_ui/backend/runners/registry.py has no ImageGenerateRunner
 # adapter, so exposing a form would submit jobs that cannot execute.
-# Wiring it up needs a runner adapter first (see docs/design/rfc_gap_analysis.md).
+# Wiring it up needs a runner adapter first.
 BUNDLED_MODULES = ("text_generate", "throughput_optimizer", "video_generate")
 
 

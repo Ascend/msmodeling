@@ -200,7 +200,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 prefill_ttft_sum_ms = 0.0
                 for batch_result, completed_requests in chunk_results:
                     chunk_latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000
-                    # KV offload (RFC docs/RFC/rfc_kv_cache_offloading_*): fold the
+                    # KV offload (Wiki RFC ``rfc_kv_cache_offloading_en.md``): fold the
                     # transfer cost into chunked prefill via the shared phase-aware
                     # helper (same semantics as _build_forward_latency_record).
                     chunk_latency_ms = fold_offload_transfer_time_ms(
@@ -256,7 +256,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             else:
                 batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
                 latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000 + optimizer_data.serving_cost
-                # KV offload (RFC docs/RFC/rfc_kv_cache_offloading_*): this branch reads raw
+                # KV offload (Wiki RFC ``rfc_kv_cache_offloading_en.md``): this branch reads raw
                 # execution time instead of the offload-aware ForwardLatencyRecord, so the
                 # offload transfer cost must be folded here with the shared phase-aware
                 # helper (decode miss-row H2D is serial -> "+"; prefill layerwise round

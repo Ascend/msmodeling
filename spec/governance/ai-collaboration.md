@@ -11,7 +11,9 @@ GitCode，但不能替代维护者承担授权、审批和最终质量责任。
 - `CLAUDE.md`：Claude 适配器，仅转发到 `AGENTS.md` 和本规范。
 - `.agents/skills/`：任务执行能力，不是项目规则源。
 - `spec/`：强制规则。
-- `docs/RFC/`、`docs/design/`：架构和实现设计。
+- [RFC Issue 模板](../../.gitcode/ISSUE_TEMPLATE/510-RFC.yml)：新设计提案及其讨论、收口记录。
+- 项目 Wiki 的 [`RFC/`](https://gitcode.com/Ascend/msmodeling.wiki/tree/main/RFC) 与
+  [`design/`](https://gitcode.com/Ascend/msmodeling.wiki/tree/main/design)：已迁移的过程性设计文档及特殊归档。
 
 客户端适配文件不得复制整套规则。发生冲突时以 `spec/` 为准。
 

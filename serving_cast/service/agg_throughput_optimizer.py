@@ -248,7 +248,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         breakdown_weight_totals = {}
         for batch_result, completed_requests in chunk_results:
             prefill_last_latency = self._select_latency_s(batch_result.execution_time_s) * 1000
-            # KV offload (RFC docs/RFC/rfc_kv_cache_offloading_*): chunked prefill
+            # KV offload (Wiki RFC ``rfc_kv_cache_offloading_en.md``): chunked prefill
             # must pay the layerwise round trip with the same overlap semantics
             # as _build_forward_latency_record (shared phase-aware fold helper:
             # prefill transfer overlaps compute -> max; decode misses are serial

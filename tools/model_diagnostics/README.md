@@ -9,7 +9,7 @@ Theory Spec 校验语义算子是否完整以及 Tensor shape/dtype 是否一致
 1. 使用 Run Profile 运行一次诊断或导出 HTML 报告；
 2. 为一类新模型编写 Spec、复用 Theory fragment，并补充端到端测试。
 
-架构背景与设计理由见 [设计文档](../../docs/design/model_diagnostics_design.md)。本文只描述
+架构背景与设计理由见 [设计文档](https://gitcode.com/Ascend/msmodeling.wiki/blob/main/design/model_diagnostics_design.md)。本文只描述
 当前代码已经支持的使用方式和字段契约。
 
 ## 1. 目录与职责

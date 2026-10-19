@@ -48,7 +48,7 @@
 
 ## 开源协议与合规
 
-msModeling 采用 [木兰宽松许可证 第2版（Mulan PSL v2）](http://license.coscl.org.cn/MulanPSL2) 开源。
+msModeling 采用 [木兰宽松许可证 第2版（Mulan PSL v2）](docs/zh/legal/LICENSE) 开源。
 
 - 提交的**所有代码内容必须尊重业界开源规范及 License 要求**，确保知识产权合规。
 - **贡献者许可协议 (CLA)**：参与项目贡献前，个人贡献应签署个人 CLA，公司贡献应签署企业 CLA。
@@ -385,7 +385,8 @@ PR 提交后，openLiBing 会在 PR 评论区反馈门禁流水线。AI 必须�
 | 核心功能代码 | `tensor_cast/`、`serving_cast/`、`cli/` 等 | 项目主体功能模块 |
 | 第三方开发插件 / 非主体功能 | `contrib/` | 所有非主体功能代码及第三方开发的插件应合入此目录 |
 | 测试用例 | `tests/` | UT、ST、Skill 评测等 |
-| 文档 | `docs/` | 使用说明、RFC 设计文档、专项文档等 |
+| 用户文档 | `docs/` | 安装、快速入门、用户指南、用例和专项文档等 |
+| 历史 RFC 与设计归档 | [项目 Wiki](https://gitcode.com/Ascend/msmodeling.wiki/tree/main) | 已迁移的过程性设计文档及有特殊归档需求的存量文档 |
 | 工具脚本 | `tools/` | 辅助工具和脚本 |
 | AI Agent Skills | `.agents/skills/` | Claude Code skills，随代码版本管理 |
 
@@ -490,7 +491,11 @@ Signed-off-by: Zhang San <zhangsan@example.com>
 - 架构性重构
 - 性能模型的重大变更
 
-RFC 文档放置于 `docs/RFC/` 目录。提交 RFC 后，请在 Issue 或 Discussion 中通知相关 Reviewer 参与评审。
+新设计提案应使用 [RFC Issue 模板](.gitcode/ISSUE_TEMPLATE/510-RFC.yml) 创建 Issue，设计讨论、评审意见与
+收口结论均在该 Issue 中留痕。项目 Wiki 的
+[`RFC/`](https://gitcode.com/Ascend/msmodeling.wiki/tree/main/RFC) 和
+[`design/`](https://gitcode.com/Ascend/msmodeling.wiki/tree/main/design) 仅用于归档本次从主仓迁移的过程性设计文档，
+以及后续确有特殊归档需求的存量文档，不作为新设计提案入口。
 
 ---
 

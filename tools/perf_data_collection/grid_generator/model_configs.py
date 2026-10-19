@@ -20,7 +20,7 @@ Each entry describes the key architectural parameters needed to derive
 all operator shapes. Used by `generate_shape_grid.py --target-models ...`
 to prune the GEMM (N,K) cartesian product to only model-relevant pairs.
 
-Reference: docs/RFC/rfc_performance_database_collection_tooling_zh.md.
+Reference: Wiki RFC ``rfc_performance_database_collection_tooling_zh.md``.
 """
 
 from __future__ import annotations

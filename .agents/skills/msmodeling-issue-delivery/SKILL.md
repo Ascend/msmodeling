@@ -39,7 +39,7 @@ metadata:
 2. 核验正式 Issue 是否仍开放、是否已有闭环 PR、canonical `master` 是否已包含实现。
 3. 输出需求分析：范围、非目标、验收、依赖、风险和待确认项。
 4. guided 模式下等待批准；autonomous 模式必须存在已记录的明确授权。
-5. 输出方案设计和文件级计划；架构变更写 RFC，具体设计写 `docs/design/`。
+5. 输出方案设计和文件级计划；新设计通过 RFC Issue 承载讨论与收口。Wiki `RFC/`、`design/` 仅用于历史或特殊归档。
 6. 从最新 canonical `master` 在个人 Fork 的本地副本创建非 master 分支；所有角色都必须 push 到 Fork source repository，禁止在 canonical repository 直接创建或推送开发分支。
 7. 按计划实现，每完成一项立即验证，不批量假定完成。
 8. 执行受影响 pytest、pre-commit、安全检查和必要构建。

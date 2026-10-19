@@ -33,7 +33,7 @@ from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
 class TestKimiK3(unittest.TestCase):
     """Unit tests for Kimi K3 model simulation.
 
-    Test conditions based on §5.3 of ``docs/design/kimi_k3_adaptation_design.md``:
+    Test conditions based on §5.3 of Wiki design ``kimi_k3_adaptation_design.md``:
       - W4A8_DYNAMIC quantization (expert + non-expert linear)
       - DP4 / TP16 / EP64 with 64 devices
       - ``enable_multistream`` compilation config
