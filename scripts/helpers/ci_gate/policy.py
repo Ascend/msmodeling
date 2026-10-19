@@ -268,9 +268,11 @@ def _validate_loaded_exemptions(repo_root: Path, policy: CiGatePolicy, doc: Gate
             exemption_files.append(file_part)
     collected_nodes: frozenset[str] = frozenset()
     if exemption_files:
-        from scripts.helpers.common.pytest_runner import collect_all_test_node_ids
+        from scripts.helpers.common.pytest_runner import collect_all_test_node_ids, collect_test_node_ids
 
         collected_nodes = frozenset(collect_all_test_node_ids(exemption_files))
+        if _missing_test_exemption_nodes(repo_root, doc, discovery, collected_nodes):
+            collected_nodes = collected_nodes | frozenset(collect_test_node_ids(exemption_files, marker="npu"))
     for entry in doc.exemptions.tests:
         for raw in entry.symbols:
             msg = _validate_test_exemption_collectible(
@@ -283,6 +285,19 @@ def _validate_loaded_exemptions(repo_root: Path, policy: CiGatePolicy, doc: Gate
                 errors.append(f"{policy_label}: {msg}")
     if errors:
         raise ConfigError("\n".join(errors))
+
+
+def _missing_test_exemption_nodes(
+    repo_root: Path,
+    doc: GatePolicyDoc,
+    discovery: TestDiscovery,
+    collected_nodes: frozenset[str],
+) -> bool:
+    for entry in doc.exemptions.tests:
+        for raw in entry.symbols:
+            if _validate_test_exemption_collectible(repo_root, raw, discovery, collected_nodes=collected_nodes):
+                return True
+    return False
 
 
 def _parse_test_exemption_id(raw: str) -> str:

@@ -24,7 +24,9 @@ import pytest
 
 from scripts.helpers.common.pytest_runner import (
     PYTEST_IGNORE_ADDOPTS,
+    _parse_collect_only_node_ids,
     _parse_not_found_node_ids,
+    _parse_plugin_node_ids,
     _run_collect_only,
     build_pytest_cmd,
     collect_all_test_node_ids,
@@ -86,18 +88,68 @@ def test_collect_test_node_ids_empty_targets_returns_empty_tuple() -> None:
 def test_collect_all_test_node_ids_skips_marker_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_stdout = "tests/smoke/test_a.py::test_foo\n"
+    fake_stdout = (
+        "tests/regression/cli/test_generate_comm_microbench.py: 2\n"
+        "tests/regression/cli/test_generate_comm_microbench.py::test_plain\n"
+        "tests/regression/cli/test_generate_comm_microbench.py"
+        "::test_run_bench_kernel_no_sync_returns_positive_duration\n"
+    )
     captured: list[list[str]] = []
+    envs: list[dict[str, str] | None] = []
 
-    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
+    def _fake_run(cmd: list[str], **kw: object) -> FakeCompleted:
         captured.append(cmd)
+        env = kw.get("env")
+        envs.append(env if isinstance(env, dict) else None)
         return FakeCompleted(0, fake_stdout, "")
 
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-q -m 'not npu and not nightly and not network'")
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw23")
+    monkeypatch.setenv("COV_CORE_DATAFILE", ".coverage.worker")
     monkeypatch.setattr("scripts.helpers.common.pytest_runner.subprocess.run", _fake_run)
-    result = collect_all_test_node_ids(["tests/smoke"])
-    assert result == ("tests/smoke/test_a.py::test_foo",)
-    pytest_idx = captured[0].index("pytest")
-    assert "not npu" not in captured[0][pytest_idx:]
+    npu_node = (
+        "tests/regression/cli/test_generate_comm_microbench.py::test_run_bench_kernel_no_sync_returns_positive_duration"
+    )
+    result = collect_all_test_node_ids(["tests/regression/cli/test_generate_comm_microbench.py"])
+    assert result == (
+        "tests/regression/cli/test_generate_comm_microbench.py::test_plain",
+        npu_node,
+    )
+    cmd = captured[0]
+    pytest_idx = cmd.index("pytest")
+    assert "-qq" in cmd
+    assert "no:cov" in cmd
+    assert "no:xdist" in cmd
+    assert "scripts.helpers.common.pytest_collect_ids" in cmd
+    marker_idx = cmd.index("-m", pytest_idx + 1)
+    assert cmd[marker_idx + 1] == "npu or not npu"
+    assert envs[0] is not None
+    assert envs[0].get("MSMODELING_COLLECT_NODE_IDS")
+    assert "PYTEST_ADDOPTS" not in envs[0]
+    assert "PYTEST_XDIST_WORKER" not in envs[0]
+    assert "COV_CORE_DATAFILE" not in envs[0]
+
+
+def test_collect_all_test_node_ids_keeps_parameter_ids_with_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node_id = "tests/regression/cli/test_demo.py::test_case[hello world]"
+
+    def _fake_run(_cmd: list[str], **kw: object) -> FakeCompleted:
+        env = kw.get("env")
+        assert isinstance(env, dict)
+        with open(env["MSMODELING_COLLECT_NODE_IDS"], "w", encoding="utf-8") as handle:
+            handle.write(f"/repo/{node_id}\n")
+        return FakeCompleted(0, "tests/regression/cli/test_demo.py: 1\n", "")
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner.subprocess.run", _fake_run)
+    assert collect_all_test_node_ids(["tests/regression/cli/test_demo.py"]) == (node_id,)
+
+
+def test_parse_plugin_node_ids_keeps_spaces_and_stdout_fallback_uses_first_token() -> None:
+    node_id = "tests/a.py::test_case[hello world]"
+    assert _parse_plugin_node_ids(f"{node_id}\n") == (node_id,)
+    assert _parse_collect_only_node_ids(f"{node_id} extra\n") == ("tests/a.py::test_case[hello",)
 
 
 def test_run_collect_only_returns_completed_process(
@@ -171,7 +223,11 @@ def test_filter_collectable_node_ids_exit_zero_summary_stdout_returns_all_target
 
     def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
         del cmd
-        return FakeCompleted(0, "========================= 2 tests collected in 0.01s =========================\n", "")
+        return FakeCompleted(
+            0,
+            "========================= 2 tests collected in 0.01s =========================\n",
+            "",
+        )
 
     monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
     result = filter_collectable_node_ids((valid_a, valid_b), marker="not npu")

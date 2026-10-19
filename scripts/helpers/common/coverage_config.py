@@ -18,7 +18,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sqlite3
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from scripts.helpers._paths import REPO_ROOT
@@ -27,6 +30,27 @@ from scripts.helpers.common.pytest_runner import xdist_worker_args
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+_COVERAGE_SCHEMA_TABLES = frozenset({"coverage_schema", "meta", "file", "context", "line_bits", "arc", "tracer"})
+
+
+def corrupt_coverage_files(paths: Sequence[Path]) -> tuple[Path, ...]:
+    """Return coverage SQLite files that are unreadable or missing required tables."""
+    damaged: list[Path] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
+                rows = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+                tables = {str(row[0]) for row in rows}
+        except sqlite3.Error:
+            damaged.append(path)
+            continue
+        if not _COVERAGE_SCHEMA_TABLES.issubset(tables):
+            damaged.append(path)
+    return tuple(damaged)
 
 
 def product_roots(repo_root: Path | None = None) -> tuple[str, ...]:

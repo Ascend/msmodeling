@@ -72,7 +72,7 @@ from scripts.helpers.ci_gate.rules import (
 from scripts.helpers.ci_gate.test_map_query import prune_deleted_sources
 from scripts.helpers.common._logging import log_env_audit, setup_logger
 from scripts.helpers.common.ast_utils import ShadowWarning, collect_shadow_warnings
-from scripts.helpers.common.coverage_config import cov_pytest_args
+from scripts.helpers.common.coverage_config import corrupt_coverage_files, cov_pytest_args
 from scripts.helpers.common.coverage_symbol_check import load_coverage_data
 from scripts.helpers.common.pytest_runner import (
     build_pytest_cmd,
@@ -364,6 +364,8 @@ def _run_pytest(
         run_targets = targets
         collected = _collected_count_for_targets(targets, marker=marker)
 
+    if use_cov and not cov_append:
+        _clear_coverage_artifacts()
     extra_args = cov_pytest_args(cov_context=True, append=cov_append) if use_cov else ()
     cmd = build_pytest_cmd(
         sys.executable,
@@ -374,6 +376,24 @@ def _run_pytest(
     )
     logger.info("Running pytest: %s", shlex.join(cmd))
     return _execute_pytest(cmd).returncode
+
+
+def _clear_coverage_artifacts() -> None:
+    """Drop coverage data files before a new collection.
+
+    A later wave passes ``cov_append=True`` and must keep the file written by the
+    first coverage wave.
+    """
+    logger = logging.getLogger("ci_gate")
+    for path in _coverage_artifact_paths():
+        if not path.is_file():
+            continue
+        path.unlink()
+        logger.info("Removed stale coverage data file: %s", path.name)
+
+
+def _coverage_artifact_paths() -> tuple[Path, ...]:
+    return (REPO_ROOT / ".coverage", *sorted(REPO_ROOT.glob(".coverage.*")))
 
 
 def _execute_pytest(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -525,12 +545,12 @@ def _log_change_summary(logger: logging.Logger, changes: ChangeSet, cfg: Config)
     )
 
 
-def _run_execution_waves(
-    logger: logging.Logger,
+def _run_all_waves(
     execution: ExecutionPlan,
     *,
     use_cov: bool,
-) -> tuple[int, str | None]:
+) -> tuple[int, tuple[str, ...], tuple[Path, ...]]:
+    """Run every wave once and report the first pytest failure."""
     for wave_index, wave in enumerate(execution.waves):
         pytest_code = _run_pytest(
             list(wave.targets),
@@ -538,14 +558,36 @@ def _run_execution_waves(
             use_cov=use_cov,
             cov_append=use_cov and wave_index > 0,
         )
-        if pytest_code != 0:
-            failed_nodes = wave.targets if not execution.full_suite else ()
-            _log_pytest_failure(logger, full_suite=execution.full_suite, failed_nodes=failed_nodes)
-            return pytest_code, _pytest_failure_user_message(
-                full_suite=execution.full_suite,
-                failed_nodes=failed_nodes,
-            )
-    return 0, None
+        if pytest_code == 0:
+            continue
+        damaged = corrupt_coverage_files(_coverage_artifact_paths()) if use_cov else ()
+        failed_nodes = wave.targets if not execution.full_suite else ()
+        return pytest_code, failed_nodes, damaged
+    return 0, (), ()
+
+
+def _run_execution_waves(
+    logger: logging.Logger,
+    execution: ExecutionPlan,
+    *,
+    use_cov: bool,
+) -> tuple[int, str | None]:
+    """Run the plan, restarting once when coverage SQLite data is corrupt."""
+    pytest_code, failed_nodes, damaged = _run_all_waves(execution, use_cov=use_cov)
+    if pytest_code != 0 and damaged:
+        logger.warning(
+            "Coverage data is corrupt (%s); restarting coverage waves once",
+            ", ".join(path.name for path in damaged),
+        )
+        _clear_coverage_artifacts()
+        pytest_code, failed_nodes, _damaged = _run_all_waves(execution, use_cov=use_cov)
+    if pytest_code == 0:
+        return 0, None
+    _log_pytest_failure(logger, full_suite=execution.full_suite, failed_nodes=failed_nodes)
+    return pytest_code, _pytest_failure_user_message(
+        full_suite=execution.full_suite,
+        failed_nodes=failed_nodes,
+    )
 
 
 def _soft_mapping_exit_code(

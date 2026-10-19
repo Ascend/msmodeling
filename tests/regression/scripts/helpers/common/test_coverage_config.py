@@ -19,10 +19,13 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+from pathlib import Path
 
 import pytest
 
 from scripts.helpers.common.coverage_config import (
+    corrupt_coverage_files,
     cov_pytest_args,
     product_roots,
     pytest_xdist_args,
@@ -74,6 +77,32 @@ def test_cov_args_both_context_and_append() -> None:
     args = cov_pytest_args(cov_context=True, append=True)
     assert "--cov-context=test" in args
     assert "--cov-append" in args
+
+
+def test_corrupt_coverage_files_detects_unreadable_and_incomplete_schema(tmp_path: Path) -> None:
+    garbage = tmp_path / ".coverage.worker"
+    incomplete = tmp_path / ".coverage"
+    healthy = tmp_path / ".coverage.healthy"
+    missing = tmp_path / ".coverage.missing"
+    garbage.write_bytes(b"not sqlite")
+    with sqlite3.connect(incomplete) as connection:
+        connection.execute("CREATE TABLE coverage_schema (version integer)")
+    with sqlite3.connect(healthy) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE coverage_schema (id integer);
+            CREATE TABLE meta (id integer);
+            CREATE TABLE file (id integer);
+            CREATE TABLE context (id integer);
+            CREATE TABLE line_bits (id integer);
+            CREATE TABLE arc (id integer);
+            CREATE TABLE tracer (id integer);
+            """
+        )
+
+    damaged = corrupt_coverage_files((garbage, incomplete, healthy, missing))
+
+    assert damaged == (garbage, incomplete)
 
 
 def test_pytest_xdist_args_default_uses_cpu_count(monkeypatch: pytest.MonkeyPatch) -> None:

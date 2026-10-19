@@ -494,6 +494,41 @@ def test_load_gate_policy_batches_test_exemption_pytest_collection(
     }
 
 
+def test_load_gate_policy_recollects_missing_exemptions_with_npu_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    write_repo_file(repo, "tests/regression/cli/test_a.py", "def test_npu():\n    pass\n")
+    _write_ci_policy(
+        repo,
+        test_exemptions=[
+            {
+                "symbols": ["tests/regression/cli/test_a.py::test_npu"],
+                "reason": "x",
+                "applicant": "a",
+                "approver": "fangkai",
+                "deadline": "2026-06-30",
+            }
+        ],
+    )
+    npu_calls: list[tuple[tuple[str, ...], str]] = []
+
+    def _collect_all(_targets: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+        return ()
+
+    def _collect_npu(targets: tuple[str, ...] | list[str], *, marker: str) -> tuple[str, ...]:
+        npu_calls.append((tuple(targets), marker))
+        return tuple(f"{target}::test_npu" for target in targets)
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner.collect_all_test_node_ids", _collect_all)
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner.collect_test_node_ids", _collect_npu)
+    _load_gate_policy_cached.cache_clear()
+    policy = load_gate_policy(repo)
+    assert npu_calls == [(("tests/regression/cli/test_a.py",), "npu")]
+    assert {entry.test_id for entry in policy.test_exemptions} == {"tests/regression/cli/test_a.py::test_npu"}
+
+
 def test_load_gate_policy_custom_test_discovery_validates_collectible_paths(
     tmp_path: Path,
 ) -> None:
