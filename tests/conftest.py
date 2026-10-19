@@ -19,7 +19,7 @@ Pytest hooks for the test suite.
 
 Hub access: default online. Set ``MSMODELING_OFFLINE=1`` to enable
 ``HF_HUB_OFFLINE`` / ``TRANSFORMERS_OFFLINE`` / ``HF_DATASETS_OFFLINE``.
-See tests/README.md and docs/design/ut_refactor.md.
+See tests/README.md.
 
 After the session ends, optionally remove hub weight shards under the repo-local
 ``.msmodeling_cache`` while keeping config and Python sources.
@@ -73,21 +73,43 @@ def pytest_collection_modifyitems(items) -> None:
             item.add_marker(nightly)
 
 
-@pytest.fixture(autouse=True)
-def remap_registered_hub_ids_for_wave_a(request, monkeypatch):
-    """Load vendored configs for registered Hub ids unless the test is marked network."""
-    if request.node.get_closest_marker("network"):
-        return
+@pytest.fixture(autouse=True, scope="session")
+def _remap_registered_hub_ids_session():
+    """Rewrite Hub ids before module fixtures build models.
+
+    The function-scoped hook below runs too late for module-scoped fixtures and
+    ``unittest`` class setup. ``TransformerModel`` also passes the raw Hub id to
+    ``AutoModelConfigLoader.load_config``, which never builds a ``UserInputConfig``.
+    """
     from tensor_cast.core.user_config import UserInputConfig
-    from tests.helpers.model_assets import resolve_offline_model_id
+    from tensor_cast.transformers.utils import AutoModelConfigLoader
+    from tests.helpers.model_assets import resolve_offline_model_id, wrap_load_config
 
     original = UserInputConfig.__post_init__
+    original_load_config = AutoModelConfigLoader.load_config
 
     def _post_init(self):
         self.model_id = resolve_offline_model_id(self.model_id)
         original(self)
 
-    monkeypatch.setattr(UserInputConfig, "__post_init__", _post_init)
+    UserInputConfig.__post_init__ = _post_init
+    AutoModelConfigLoader.load_config = wrap_load_config(original_load_config)
+    yield
+    UserInputConfig.__post_init__ = original
+    AutoModelConfigLoader.load_config = original_load_config
+
+
+@pytest.fixture(autouse=True)
+def remap_registered_hub_ids_for_wave_a(request):
+    """Keep the original Hub id for tests marked ``network``."""
+    if request.node.get_closest_marker("network") is None:
+        yield
+        return
+    from tests.helpers.model_assets import set_offline_hub_remap
+
+    set_offline_hub_remap(False)
+    yield
+    set_offline_hub_remap(True)
 
 
 _REPO_CACHE = Path.cwd() / ".msmodeling_cache"

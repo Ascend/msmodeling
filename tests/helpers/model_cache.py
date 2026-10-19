@@ -46,6 +46,7 @@ from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.transformers.model import TransformerModel
 from tensor_cast.transformers.utils import AutoModelConfigLoader
+from tests.helpers.model_assets import resolve_offline_model_id
 
 _HF_CONFIG_CACHE: dict[str, object] = {}
 _BUILT_MODEL_CACHE: dict[tuple, TransformerModel] = {}
@@ -79,10 +80,15 @@ def user_config_build_cache_key(user_config: UserInputConfig) -> tuple:
 
 
 def get_hf_config(model_id: str):
-    """Return a deepcopy of the session-cached Hugging Face config for ``model_id``."""
-    if model_id not in _HF_CONFIG_CACHE:
-        _HF_CONFIG_CACHE[model_id] = AutoModelConfigLoader().load_config(model_id)
-    return copy.deepcopy(_HF_CONFIG_CACHE[model_id])
+    """Return a deepcopy of the session-cached Hugging Face config for ``model_id``.
+
+    Registered Hub ids load the vendored config directory. Callers that pass the
+    Hub id directly, including module-scoped fixtures, never reach the Hub.
+    """
+    resolved = resolve_offline_model_id(model_id)
+    if resolved not in _HF_CONFIG_CACHE:
+        _HF_CONFIG_CACHE[resolved] = AutoModelConfigLoader().load_config(resolved)
+    return copy.deepcopy(_HF_CONFIG_CACHE[resolved])
 
 
 def get_built_model(user_config: UserInputConfig) -> TransformerModel:

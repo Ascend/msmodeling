@@ -59,11 +59,31 @@ _VENDORED_PREPROCESSOR_DIRS: dict[str, str] = {
 }
 
 
+_offline_hub_remap_enabled = True
+
+
+def set_offline_hub_remap(enabled: bool) -> None:
+    """Allow ``@pytest.mark.network`` tests to keep the original Hub id."""
+    global _offline_hub_remap_enabled
+    _offline_hub_remap_enabled = enabled
+
+
 def resolve_offline_model_id(model_id: str) -> str:
     """Rewrite a registered Hub id to its vendored config directory."""
+    if not _offline_hub_remap_enabled:
+        return model_id
     if model_id in _VENDORED_MODEL_CONFIG_DIRS:
         return vendored_model_config_path(model_id)
     return model_id
+
+
+def wrap_load_config(load_config):
+    """Rewrite registered Hub ids before ``AutoModelConfigLoader.load_config``."""
+
+    def _load_config(self, model_id, *args, **kwargs):
+        return load_config(self, resolve_offline_model_id(model_id), *args, **kwargs)
+
+    return _load_config
 
 
 def vendored_model_config_path(model_id: str) -> str:

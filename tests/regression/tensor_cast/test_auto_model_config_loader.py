@@ -33,6 +33,12 @@ from tensor_cast.transformers import utils
 from tensor_cast.transformers.utils import AutoModelConfigLoader
 
 
+@pytest.fixture(autouse=True)
+def _keep_explicit_hub_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assert the Hub id passed to ``load_config`` is the id ``AutoConfig`` sees."""
+    monkeypatch.setattr("tests.helpers.model_assets._offline_hub_remap_enabled", False)
+
+
 def test_load_config_remote_code_converts_real_model_type(monkeypatch) -> None:
     calls: list[dict] = []
 
