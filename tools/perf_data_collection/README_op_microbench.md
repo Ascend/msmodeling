@@ -1107,6 +1107,994 @@ Python API 返回 INT64 索引，standalone 校验会识别该协议差异，不
 }
 ```
 
+
+### `AddAiCore`
+
+Add 的 AI_CORE 采集变体，复用 Add 回放逻辑（torch.add）。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "AddAiCore",
+  "replay_row": {
+    "Input Shapes": "\"1,1536;1536\"",
+    "Input Data Types": "DT_BF16;DT_BF16",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1,1536\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `AddRmsNormDynamicQuant`
+
+融合 AddRmsNorm + 动态量化，走 torch.ops.npu.npu_add_rms_norm_dynamic_quant（签名对齐 vLLM-Ascend norm_quant_fusion_pass）。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "AddRmsNormDynamicQuant",
+  "replay_row": {
+    "Input Shapes": "\"1,7168;1,7168;7168;7168\"",
+    "Input Data Types": "DT_BF16;DT_BF16;DT_BF16;DT_BF16",
+    "Input Formats": "ND;ND;ND;ND",
+    "Output Shapes": "\"1,7168;1,7168;1,7168;1;1\"",
+    "Output Data Types": "INT8;INT8;DT_BF16;FLOAT;FLOAT",
+    "Output Formats": "ND;ND;ND;ND;ND"
+  }
+}
+```
+
+### `AddRmsNormDynamicQuantAiCore`
+
+AddRmsNormDynamicQuant 的 AI_CORE 采集变体。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "AddRmsNormDynamicQuantAiCore",
+  "replay_row": {
+    "Input Shapes": "\"1,7168;1,7168;7168;7168\"",
+    "Input Data Types": "DT_BF16;DT_BF16;DT_BF16;DT_BF16",
+    "Input Formats": "ND;ND;ND;ND",
+    "Output Shapes": "\"1,7168;1,7168;1,7168;1;1\"",
+    "Output Data Types": "INT8;INT8;DT_BF16;FLOAT;FLOAT",
+    "Output Formats": "ND;ND;ND;ND;ND"
+  }
+}
+```
+
+### `AsStrided`
+
+torch.as_strided，size 使用记录的输出 shape，stride 取连续布局，offset 取 0。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "AsStrided",
+  "replay_row": {
+    "Input Shapes": "\"12288;3;3;1\"",
+    "Input Data Types": "DT_BF16;INT64;INT64;INT64",
+    "Input Formats": "ND;ND;ND;ND",
+    "Output Shapes": "\"16,4,128\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `AsStridedAiCore`
+
+AsStrided 的 AI_CORE 采集变体。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "AsStridedAiCore",
+  "replay_row": {
+    "Input Shapes": "\"12288;3;3;1\"",
+    "Input Data Types": "DT_BF16;INT64;INT64;INT64",
+    "Input Formats": "ND;ND;ND;ND",
+    "Output Shapes": "\"16,4,128\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `BatchMatMulNd`
+
+ND 批量矩阵乘，复用 BatchMatMulV2 回放逻辑（torch.matmul）。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "BatchMatMulNd",
+  "replay_row": {
+    "Input Shapes": "\"16,1,128;16,128,512\"",
+    "Input Data Types": "DT_BF16;DT_BF16",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"16,1,512\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `BroadcastTo`
+
+torch.Tensor.expand 到记录的输出 shape 后 contiguous 物化；第一槽可为标量。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "BroadcastTo",
+  "replay_row": {
+    "Input Shapes": "\"12,1,64;3\"",
+    "Input Data Types": "DT_BF16;INT64",
+    "Input Formats": "NCL;ND",
+    "Output Shapes": "\"12,16,64\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "NCL"
+  }
+}
+```
+
+### `ClipByValueV2`
+
+torch.clamp(input, min=1, max=1)，min/max 标量槽回放为常量边界。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "ClipByValueV2",
+  "replay_row": {
+    "Input Shapes": "\"1;;\"",
+    "Input Data Types": "INT64;INT64;INT64",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "INT64",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `ConcatD`
+
+torch.cat，拼接维度从输入/输出 shape 推断。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "ConcatD",
+  "replay_row": {
+    "Input Shapes": "\"102,6144;102,6144\"",
+    "Input Data Types": "DT_BF16;DT_BF16",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"102,12288\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `Cumsum`
+
+torch.cumsum，针对记录的一维行取 dim=0。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Cumsum",
+  "replay_row": {
+    "Input Shapes": "\"8;1\"",
+    "Input Data Types": "INT64;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"8\"",
+    "Output Data Types": "INT64",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `Equal`
+
+torch.eq，空槽行按 Tensor 与标量 1 比较。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Equal",
+  "replay_row": {
+    "Input Shapes": "\"1;\"",
+    "Input Data Types": "FLOAT;FLOAT",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `FloorDiv`
+
+torch.floor_divide，空槽行按标量除法回放。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "FloorDiv",
+  "replay_row": {
+    "Input Shapes": "\"1;\"",
+    "Input Data Types": "INT64;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "INT64",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `FloorMod`
+
+torch.remainder。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "FloorMod",
+  "replay_row": {
+    "Input Shapes": "\"1;1\"",
+    "Input Data Types": "INT32;INT32",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "INT32",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `GatherElements`
+
+torch.gather（沿最后一维），索引在 build 阶段转为 int64。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "GatherElements",
+  "replay_row": {
+    "Input Shapes": "\"2,65;1,1\"",
+    "Input Data Types": "INT32;INT32",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1,1\"",
+    "Output Data Types": "INT32",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `GatherElementsV2`
+
+torch.gather（沿最后一维），索引在 build 阶段转为 int64。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "GatherElementsV2",
+  "replay_row": {
+    "Input Shapes": "\"1,1584;1,1\"",
+    "Input Data Types": "INT32;INT32",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1,1\"",
+    "Output Data Types": "INT32",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `GatherV2AiCore`
+
+GatherV2 的 AI_CORE 采集变体，复用 GatherV2 回放逻辑。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "GatherV2AiCore",
+  "replay_row": {
+    "Input Shapes": "\"16160,7168;1;1\"",
+    "Input Data Types": "DT_BF16;INT64;INT64",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"1,7168\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `GatherV3`
+
+torch.index_select（沿 dim 0），对应 GatherV3 记录的行。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "GatherV3",
+  "replay_row": {
+    "Input Shapes": "\"81920,128;16;1\"",
+    "Input Data Types": "DT_BF16;INT64;INT64",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"16,128\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `Greater`
+
+torch.gt，空槽行按 Tensor 与标量 1 比较。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Greater",
+  "replay_row": {
+    "Input Shapes": "\"1;\"",
+    "Input Data Types": "INT64;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `GreaterEqual`
+
+torch.ge，空槽行按 Tensor 与标量 1 比较。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "GreaterEqual",
+  "replay_row": {
+    "Input Shapes": "\"1;\"",
+    "Input Data Types": "INT64;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `GroupedMatmulSwigluQuantV2`
+
+W4A8 分组 GEMM + SwiGlu + 量化的融合算子，走 npu_grouped_matmul_swiglu_quant_v2，weight 以逻辑 (groups, K, N) int8 转 FRACTAL_NZ。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "GroupedMatmulSwigluQuantV2",
+  "replay_row": {
+    "Input Shapes": "\"209,6144;209;32;32,64,384,16,64;32,4096;32,4096\"",
+    "Input Data Types": "INT8;FLOAT;INT64;DT_INT4;UINT64;FLOAT",
+    "Input Formats": "ND;ND;ND;FRACTAL_NZ;ND;ND",
+    "Output Shapes": "\"209,2048;209\"",
+    "Output Data Types": "INT8;FLOAT",
+    "Output Formats": "ND;ND"
+  }
+}
+```
+
+### `IndexFill`
+
+torch.index_fill，index/value 槽未记录值，按单个 index/value 回放。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "IndexFill",
+  "replay_row": {
+    "Input Shapes": "\"1,3;;\"",
+    "Input Data Types": "INT32;INT64;INT32",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"1,3\"",
+    "Output Data Types": "INT32",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `IndexPutV2`
+
+torch.index_put，重建 (input, indices, values)。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "IndexPutV2",
+  "replay_row": {
+    "Input Shapes": "\"272;1;1;1;1\"",
+    "Input Data Types": "INT32;INT32;INT64;INT64;INT32",
+    "Input Formats": "ND;ND;ND;ND;ND",
+    "Output Shapes": "\"272\"",
+    "Output Data Types": "INT32",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `LayerNormV3WithImplMode`
+
+LayerNormV3 的 impl-mode 采集变体，复用 LayerNormV3 回放逻辑。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "LayerNormV3WithImplMode",
+  "replay_row": {
+    "Input Shapes": "\"102,128;128;128\"",
+    "Input Data Types": "FLOAT;FLOAT;FLOAT",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"102,128;102,1;102,1\"",
+    "Output Data Types": "FLOAT;FLOAT;FLOAT",
+    "Output Formats": "ND;ND;ND"
+  }
+}
+```
+
+### `Less`
+
+torch.lt，空槽行按 Tensor 与标量 1 比较。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Less",
+  "replay_row": {
+    "Input Shapes": "\"1,3;\"",
+    "Input Data Types": "INT64;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1,3\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `LessAiCore`
+
+Less 的 AI_CORE 采集变体。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "LessAiCore",
+  "replay_row": {
+    "Input Shapes": "\"1;\"",
+    "Input Data Types": "INT64;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `Log`
+
+torch.log。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Log",
+  "replay_row": {
+    "Input Shapes": "\"1,129280\"",
+    "Input Data Types": "FLOAT",
+    "Input Formats": "ND",
+    "Output Shapes": "\"1,129280\"",
+    "Output Data Types": "FLOAT",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `LogicalAnd`
+
+torch.logical_and。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "LogicalAnd",
+  "replay_row": {
+    "Input Shapes": "\"1,3;1,3\"",
+    "Input Data Types": "BOOL;BOOL",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1,3\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `LogicalAndAiCore`
+
+LogicalAnd 的 AI_CORE 采集变体。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "LogicalAndAiCore",
+  "replay_row": {
+    "Input Shapes": "\"102;102\"",
+    "Input Data Types": "BOOL;BOOL",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"102\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `LogicalNot`
+
+torch.logical_not。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "LogicalNot",
+  "replay_row": {
+    "Input Shapes": "\"102\"",
+    "Input Data Types": "BOOL",
+    "Input Formats": "ND",
+    "Output Shapes": "\"102\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `LogicalNotAiCore`
+
+LogicalNot 的 AI_CORE 采集变体。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "LogicalNotAiCore",
+  "replay_row": {
+    "Input Shapes": "\"1\"",
+    "Input Data Types": "BOOL",
+    "Input Formats": "ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `MaskedFillAiCore`
+
+MaskedFill 的 AI_CORE 采集变体，value 槽为标量。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "MaskedFillAiCore",
+  "replay_row": {
+    "Input Shapes": "\"1,7168;1,1;\"",
+    "Input Data Types": "DT_BF16;BOOL;DT_BF16",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"1,7168\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `MulAiCore`
+
+Mul 的 AI_CORE 采集变体，复用 Mul 回放逻辑。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "MulAiCore",
+  "replay_row": {
+    "Input Shapes": "\"1;\"",
+    "Input Data Types": "INT64;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "INT64",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `Muls`
+
+torch.mul，单输入行按 Tensor 乘标量 1 回放。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Muls",
+  "replay_row": {
+    "Input Shapes": "\"256,6144\"",
+    "Input Data Types": "DT_BF16",
+    "Input Formats": "ND",
+    "Output Shapes": "\"256,6144\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `Neg`
+
+torch.neg。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Neg",
+  "replay_row": {
+    "Input Shapes": "\"1,129280\"",
+    "Input Data Types": "FLOAT",
+    "Input Formats": "ND",
+    "Output Shapes": "\"1,129280\"",
+    "Output Data Types": "FLOAT",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `NotEqual`
+
+torch.ne，空槽行按 Tensor 与标量 1 比较。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "NotEqual",
+  "replay_row": {
+    "Input Shapes": "\"1;\"",
+    "Input Data Types": "INT64;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "BOOL",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `Pack`
+
+torch.stack(inputs, dim=0)。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Pack",
+  "replay_row": {
+    "Input Shapes": "\"12,16,129;12,16,129\"",
+    "Input Data Types": "FLOAT;FLOAT",
+    "Input Formats": "NCL;NCL",
+    "Output Shapes": "\"2,12,16,129\"",
+    "Output Data Types": "FLOAT",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `PadV3AiCore`
+
+PadV3 的 AI_CORE 采集变体，paddings 从输入/输出 shape 差值推断。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "PadV3AiCore",
+  "replay_row": {
+    "Input Shapes": "\"1,256;4;\"",
+    "Input Data Types": "DT_BF16;INT32;DT_BF16",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"8,256\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `RealDiv`
+
+torch.div，支持广播除法。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "RealDiv",
+  "replay_row": {
+    "Input Shapes": "\"1,129280;1,1\"",
+    "Input Data Types": "FLOAT;FLOAT",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1,129280\"",
+    "Output Data Types": "FLOAT",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `ReduceSum`
+
+torch.sum，归约维度从记录的输出 shape 推断。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "ReduceSum",
+  "replay_row": {
+    "Input Shapes": "\"1,3;1\"",
+    "Input Data Types": "FLOAT;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "FLOAT",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `RepeatInterleave`
+
+torch.repeat_interleave(input, repeats)，repeats 在 build 阶段转为 int64。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "RepeatInterleave",
+  "replay_row": {
+    "Input Shapes": "\"256;256\"",
+    "Input Data Types": "INT32;INT32",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1622\"",
+    "Output Data Types": "INT32",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `ScatterElementsV2`
+
+torch.scatter(input, 0, index, source)，索引在 build 阶段转为 int64。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "ScatterElementsV2",
+  "replay_row": {
+    "Input Shapes": "\"340;1;1\"",
+    "Input Data Types": "INT32;INT32;INT32",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"340\"",
+    "Output Data Types": "INT32",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `SelectV2`
+
+torch.where(condition, x, y)，空槽的 x/y 回放为 0 维标量张量。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "SelectV2",
+  "replay_row": {
+    "Input Shapes": "\"102,1;;102,6144\"",
+    "Input Data Types": "BOOL;DT_BF16;DT_BF16",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"102,6144\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `Sub`
+
+torch.sub，空槽行按 Tensor 减标量 1 回放。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Sub",
+  "replay_row": {
+    "Input Shapes": "\"1;\"",
+    "Input Data Types": "INT32;INT32",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"1\"",
+    "Output Data Types": "INT32",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `SubAiCore`
+
+Sub 的 AI_CORE 采集变体。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "SubAiCore",
+  "replay_row": {
+    "Input Shapes": "\"102;102\"",
+    "Input Data Types": "INT64;INT64",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "\"102\"",
+    "Output Data Types": "INT64",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `TensorMoveAiCore`
+
+TensorMove 的 AI_CORE 采集变体，复用 TensorMove 回放逻辑。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "TensorMoveAiCore",
+  "replay_row": {
+    "Input Shapes": "\"102,6144\"",
+    "Input Data Types": "DT_BF16",
+    "Input Formats": "ND",
+    "Output Shapes": "\"102,6144\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `Tile`
+
+torch.tile，multiples 从输入/输出 shape 推断。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "Tile",
+  "replay_row": {
+    "Input Shapes": "\"16,2,64;3\"",
+    "Input Data Types": "DT_BF16;INT64",
+    "Input Formats": "NCL;ND",
+    "Output Shapes": "\"16,2,128\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `TransData`
+
+FRACTAL_NZ → ND 数据排布转换，走 torch_npu.npu_format_cast(input, ND)。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "TransData",
+  "replay_row": {
+    "Input Shapes": "\"192,128,16,32\"",
+    "Input Data Types": "INT8",
+    "Input Formats": "FRACTAL_NZ",
+    "Output Shapes": "\"2048,6144\"",
+    "Output Data Types": "INT8",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `TransposeAiCore`
+
+Transpose 的 AI_CORE 采集变体，复用 Transpose 回放逻辑（转置维度从 shape 推断）。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "TransposeAiCore",
+  "replay_row": {
+    "Input Shapes": "\"16,4,512;3\"",
+    "Input Data Types": "DT_BF16;INT64",
+    "Input Formats": "NCHW;ND",
+    "Output Shapes": "\"4,16,512\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "NCHW"
+  }
+}
+```
+
+### `ZerosLike`
+
+torch.zeros_like。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "ZerosLike",
+  "replay_row": {
+    "Input Shapes": "\"2,1\"",
+    "Input Data Types": "INT64",
+    "Input Formats": "ND",
+    "Output Shapes": "\"2,1\"",
+    "Output Data Types": "INT64",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `_triton_rope`
+
+vLLM-Ascend MHA Triton RoPE（rope_forward_triton），cos_sin_cache 单槽携带 rope_dim。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "_triton_rope",
+  "replay_row": {
+    "Input Shapes": "\"28736,4,128;28736,1,128;81920,128\"",
+    "Input Data Types": "DT_BF16;FLOAT;DT_BF16",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"28736,4,128;28736,1,128\"",
+    "Output Data Types": "DT_BF16;FLOAT",
+    "Output Formats": "ND;ND"
+  }
+}
+```
+
+### `AscendQuantV2Aicore`
+
+AscendQuantV2 的 AI_CORE 采集变体，复用 AscendQuantV2 回放逻辑（torch_npu.npu_quantize）。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "AscendQuantV2Aicore",
+  "replay_row": {
+    "Input Shapes": "\"1,1536;1536;1536\"",
+    "Input Data Types": "DT_BF16;DT_BF16;DT_BF16",
+    "Input Formats": "ND;ND;ND",
+    "Output Shapes": "\"1,1536\"",
+    "Output Data Types": "INT8",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `DequantSwigluQuant`
+
+反量化 + SwiGlu + 量化融合算子，走 npu_dequant_swiglu_quant（keyword-only 参数，quant_mode=1）。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "DequantSwigluQuant",
+  "replay_row": {
+    "Input Shapes": "\"18,4096;4096;18;;;;1\"",
+    "Input Data Types": "INT32;FLOAT;FLOAT;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;INT64",
+    "Input Formats": "ND;ND;ND;NULL;NULL;NULL;ND",
+    "Output Shapes": "\"18,2048;18\"",
+    "Output Data Types": "INT8;FLOAT",
+    "Output Formats": "ND;ND"
+  }
+}
+```
 ## JSON 结果示例
 
 使用仓库当前示例数据时，关键结果类似下面这样：

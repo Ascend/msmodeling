@@ -184,7 +184,90 @@ ADAPTERS = {
         target_op_types=("TransposeBatchMatMul", "BatchMatMulV2", "BatchMatMul"),
     ),
     "_triton_rope_siso": _replay_spec("_triton_rope_siso", "vllm_ascend.ops.triton.rope.rope_forward_triton_siso"),
+    "_triton_rope": _replay_spec("_triton_rope", "vllm_ascend.ops.triton.rope.rope_forward_triton"),
     "mla_preprocess_0_mix_aic": _replay_spec("mla_preprocess_0_mix_aic", "torch.ops._C_ascend.mla_preprocess"),
+    # --- Elementwise / structural torch-native adapters ---
+    "Sub": _replay_spec("Sub", "torch.sub"),
+    "SubAiCore": _replay_spec("SubAiCore", "torch.sub"),
+    "Equal": _replay_spec("Equal", "torch.eq"),
+    "NotEqual": _replay_spec("NotEqual", "torch.ne"),
+    "Greater": _replay_spec("Greater", "torch.gt"),
+    "GreaterEqual": _replay_spec("GreaterEqual", "torch.ge"),
+    "Less": _replay_spec("Less", "torch.lt"),
+    "LessAiCore": _replay_spec("LessAiCore", "torch.lt"),
+    "FloorDiv": _replay_spec("FloorDiv", "torch.floor_divide"),
+    "RealDiv": _replay_spec("RealDiv", "torch.div"),
+    "FloorMod": _replay_spec("FloorMod", "torch.remainder"),
+    "LogicalAnd": _replay_spec("LogicalAnd", "torch.logical_and"),
+    "LogicalAndAiCore": _replay_spec("LogicalAndAiCore", "torch.logical_and"),
+    "LogicalNot": _replay_spec("LogicalNot", "torch.logical_not"),
+    "LogicalNotAiCore": _replay_spec("LogicalNotAiCore", "torch.logical_not"),
+    "Log": _replay_spec("Log", "torch.log"),
+    "Neg": _replay_spec("Neg", "torch.neg"),
+    "Muls": _replay_spec("Muls", "torch.mul"),
+    "ZerosLike": _replay_spec("ZerosLike", "torch.zeros_like"),
+    "MulAiCore": _replay_spec("MulAiCore", "torch.mul", target_op_types=("MulAiCore", "Mul")),
+    "BatchMatMulNd": _replay_spec(
+        "BatchMatMulNd", "torch.matmul", target_op_types=("BatchMatMulNd", "BatchMatMulV2")
+    ),
+    "ConcatD": _replay_spec("ConcatD", "torch.cat"),
+    "Pack": _replay_spec("Pack", "torch.stack"),
+    "BroadcastTo": _replay_spec("BroadcastTo", "torch.Tensor.expand"),
+    "SelectV2": _replay_spec("SelectV2", "torch.where"),
+    "ClipByValueV2": _replay_spec("ClipByValueV2", "torch.clamp"),
+    "Tile": _replay_spec("Tile", "torch.tile"),
+    "RepeatInterleave": _replay_spec("RepeatInterleave", "torch.repeat_interleave"),
+    "ReduceSum": _replay_spec("ReduceSum", "torch.sum"),
+    "Cumsum": _replay_spec("Cumsum", "torch.cumsum"),
+    "GatherElements": _replay_spec("GatherElements", "torch.gather"),
+    "GatherElementsV2": _replay_spec("GatherElementsV2", "torch.gather"),
+    "GatherV3": _replay_spec("GatherV3", "torch.index_select"),
+    "ScatterElementsV2": _replay_spec("ScatterElementsV2", "torch.scatter"),
+    "IndexFill": _replay_spec("IndexFill", "torch.index_fill"),
+    "IndexPutV2": _replay_spec("IndexPutV2", "torch.index_put"),
+    "AsStrided": _replay_spec("AsStrided", "torch.as_strided"),
+    "AsStridedAiCore": _replay_spec("AsStridedAiCore", "torch.as_strided"),
+    "TransData": _replay_spec("TransData", "torch_npu.npu_format_cast"),
+    # --- AI_CORE recording variants of existing adapters ---
+    "AddAiCore": _replay_spec("AddAiCore", "torch.add", target_op_types=("AddAiCore", "Add")),
+    "AscendQuantV2Aicore": _replay_spec(
+        "AscendQuantV2Aicore", "torch_npu.npu_quantize", target_op_types=("AscendQuantV2Aicore", "AscendQuantV2")
+    ),
+    "GatherV2AiCore": _replay_spec(
+        "GatherV2AiCore", "torch.nn.functional.embedding", target_op_types=("GatherV2AiCore", "GatherV2")
+    ),
+    "MaskedFillAiCore": _replay_spec(
+        "MaskedFillAiCore", "torch.Tensor.masked_fill_", target_op_types=("MaskedFillAiCore", "MaskedFill")
+    ),
+    "PadV3AiCore": _replay_spec("PadV3AiCore", "torch.nn.functional.pad", target_op_types=("PadV3AiCore", "PadV3")),
+    "TensorMoveAiCore": _replay_spec(
+        "TensorMoveAiCore", "torch.Tensor.copy_", target_op_types=("TensorMoveAiCore", "TensorMove")
+    ),
+    "TransposeAiCore": _replay_spec(
+        "TransposeAiCore", "torch.transpose(...).contiguous", target_op_types=("TransposeAiCore", "Transpose")
+    ),
+    "LayerNormV3WithImplMode": _replay_spec(
+        "LayerNormV3WithImplMode", "torch.native_layer_norm", target_op_types=("LayerNormV3WithImplMode", "LayerNormV3")
+    ),
+    # --- Fused adapters ---
+    "AddRmsNormDynamicQuant": _replay_spec(
+        "AddRmsNormDynamicQuant",
+        "torch.ops.npu.npu_add_rms_norm_dynamic_quant",
+        is_composite=True,
+    ),
+    "AddRmsNormDynamicQuantAiCore": _replay_spec(
+        "AddRmsNormDynamicQuantAiCore",
+        "torch.ops.npu.npu_add_rms_norm_dynamic_quant",
+        is_composite=True,
+    ),
+    "DequantSwigluQuant": _replay_spec(
+        "DequantSwigluQuant", "torch_npu.npu_dequant_swiglu_quant", is_composite=True
+    ),
+    "GroupedMatmulSwigluQuantV2": _replay_spec(
+        "GroupedMatmulSwigluQuantV2",
+        "torch_npu.npu_grouped_matmul_swiglu_quant_v2",
+        is_composite=True,
+    ),
 }
 
 

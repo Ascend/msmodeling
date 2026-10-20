@@ -794,7 +794,7 @@ def test_cli_lists_supported_and_excluded_operators(
 
     assert return_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["supported_operators"]) == 45
+    assert len(payload["supported_operators"]) == len(adapters.ADAPTERS)
     assert payload["request_mode"] == "replay_row"
     assert payload["excluded_multi_card_operators"] == ["DispatchFFNCombine"]
 
@@ -813,7 +813,7 @@ def test_direct_script_entrypoint_lists_supported_operators() -> None:
 
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
-    assert len(payload["supported_operators"]) == 45
+    assert len(payload["supported_operators"]) == len(adapters.ADAPTERS)
 
 
 def test_cli_describes_uniform_csv_row_contract(
