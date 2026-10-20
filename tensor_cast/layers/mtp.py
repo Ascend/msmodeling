@@ -89,11 +89,74 @@ class BailingV3MultiTokenPredictorLayer(torch.nn.Module):
         return hidden_states
 
 
+class HcStreamMultiTokenPredictorLayer(MultiTokenPredictorLayer):
+    """MTP layer for HC models whose decoder blocks own their HC sublayers.
+
+    GLM-5.3's decoder layers stream ``[B,S,Hc,D]`` through the block and
+    manage the hyper-connection pre/post mixing internally (attn_hc/ffn_hc),
+    exactly like the main model: expand the projected hidden state at
+    entry (pure view expand, mirroring Glm5NextTextModel.forward) and
+    reduce with the parameter-free ``mhc_head`` op before lm_head.
+    """
+
+    def __init__(self, hf_config, mtp_block: torch.nn.Module):
+        super().__init__(hf_config, mtp_block)
+        attn_hc = getattr(mtp_block, "attn_hc", None)
+        ffn_hc = getattr(mtp_block, "ffn_hc", None)
+        # Same source chain as _resolve_mtp_layer_cls so the routed
+        # layer never disagrees with the mult it was selected with:
+        # block HC submodules first, then the block itself, then the
+        # HF config fallback.
+        hc_mult = (
+            getattr(attn_hc, "hc_mult", None)
+            or getattr(ffn_hc, "hc_mult", None)
+            or getattr(mtp_block, "hc_mult", None)
+            or getattr(hf_config, "hc_mult", 1)
+        )
+        self.hc_mult = int(hc_mult or 1)
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        position_embeddings: Optional[torch.Tensor] = None,
+        mtp_input_ids: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
+        del mtp_input_ids
+        inputs_embeds = self.emb_norm(inputs_embeds)
+        previous_hidden_states = self.hidden_norm(previous_hidden_states)
+
+        hidden_states = self.linear_proj(torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
+
+        if self.hc_mult > 1:
+            hidden_states = hidden_states.unsqueeze(2).expand(-1, -1, self.hc_mult, -1).contiguous()
+
+        hidden_states = self.mtp_block(
+            hidden_states,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+
+        if self.hc_mult > 1:
+            hidden_states = torch.ops.tensor_cast.mhc_head(hidden_states)
+
+        return hidden_states
+
+
 def _resolve_mtp_layer_cls(hf_config, mtp_block):
     """Select the appropriate MTP layer class based on HC (Hyper-Connection) config.
 
     V4 models have hc_mult > 1 and require HyperConnectedMultiTokenPredictorLayer
     to expand [B,S,D] -> [B,S,Hc,D] before the MTP block and reduce after.
+    Blocks that own their hyper-connection sublayers (e.g. GLM-5.3's
+    Glm5NextTextDecoderLayer with attn_hc/ffn_hc) stream [B,S,Hc,D]
+    through the block, so they use HcStreamMultiTokenPredictorLayer:
+    same expand at entry, parameter-free mhc_head reduction at exit.
     V3/V3.2 models use the base MultiTokenPredictorLayer.
     """
     # Remote-code model classes are loaded from a dynamic module, so matching
@@ -101,8 +164,23 @@ def _resolve_mtp_layer_cls(hf_config, mtp_block):
     if type(mtp_block).__name__ == "BailingMoeV3MTPLayer":
         return BailingV3MultiTokenPredictorLayer
 
-    hc_mult = int(getattr(mtp_block, "hc_mult", None) or getattr(hf_config, "hc_mult", 1) or 1)
+    # Same source chain as HcStreamMultiTokenPredictorLayer.__init__
+    # (attn_hc -> ffn_hc -> block -> config): a model may declare the
+    # multiplier only on its HC submodules, and the routed layer must
+    # never disagree with the mult it was selected with (PR !1000 review).
+    attn_hc = getattr(mtp_block, "attn_hc", None)
+    ffn_hc = getattr(mtp_block, "ffn_hc", None)
+    hc_mult = int(
+        getattr(attn_hc, "hc_mult", None)
+        or getattr(ffn_hc, "hc_mult", None)
+        or getattr(mtp_block, "hc_mult", None)
+        or getattr(hf_config, "hc_mult", 1)
+        or 1
+    )
     if hc_mult > 1:
+        block_owns_hc = isinstance(attn_hc, torch.nn.Module) or isinstance(ffn_hc, torch.nn.Module)
+        if block_owns_hc:
+            return HcStreamMultiTokenPredictorLayer
         # Import here to avoid circular dependency at module level.
         from .deepseek_v4 import HyperConnectedMultiTokenPredictorLayer
 

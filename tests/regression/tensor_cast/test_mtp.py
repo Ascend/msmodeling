@@ -15,6 +15,7 @@
 # -------------------------------------------------------------------------
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,6 +24,7 @@ from parameterized import parameterized
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.layers.deepseek_v4 import HyperConnectedMultiTokenPredictorLayer
 from tensor_cast.layers.mtp import (
+    HcStreamMultiTokenPredictorLayer,
     MultiTokenPredictorLayer,
     _build_position_embeddings,
     _find_text_rotary_emb,
@@ -45,13 +47,99 @@ from .test_common import (
 
 class TestResolveMtpLayerCls(unittest.TestCase):
     def test_v3_style_returns_base_layer(self):
-        hf_config = MagicMock(hc_mult=1)
-        mtp_block = MagicMock(hc_mult=None)
+        # Real namespaces, not MagicMock: auto-generated mock
+        # attributes would poison the hc_mult fallback chain
+        # (int(mock) == 0).
+        hf_config = SimpleNamespace(hc_mult=1)
+        mtp_block = SimpleNamespace(hc_mult=None)
         assert _resolve_mtp_layer_cls(hf_config, mtp_block) is MultiTokenPredictorLayer
 
     def test_v4_hc_mult_returns_hyper_connected_layer(self):
-        mtp_block = MagicMock(hc_mult=4)
-        assert _resolve_mtp_layer_cls(MagicMock(), mtp_block) is HyperConnectedMultiTokenPredictorLayer
+        mtp_block = SimpleNamespace(hc_mult=4)
+        assert _resolve_mtp_layer_cls(SimpleNamespace(), mtp_block) is HyperConnectedMultiTokenPredictorLayer
+
+    def test_block_with_own_hc_sublayers_returns_hc_stream_layer(self):
+        class _HcSublayer(torch.nn.Module):
+            def __init__(self, mult):
+                super().__init__()
+                self.hc_mult = mult
+
+        class _Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn_hc = _HcSublayer(4)
+                self.ffn_hc = _HcSublayer(4)
+
+        mtp_block = _Block()
+        assert _resolve_mtp_layer_cls(MagicMock(hc_mult=4), mtp_block) is HcStreamMultiTokenPredictorLayer
+
+    def test_hc_stream_layer_expands_entry_and_reduces_exit(self):
+        class _HcSublayer(torch.nn.Module):
+            def __init__(self, mult):
+                super().__init__()
+                self.hc_mult = mult
+
+        class _Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn_hc = _HcSublayer(4)
+                self.ffn_hc = _HcSublayer(4)
+                self.seen_shape = None
+
+            def forward(self, hidden_states, **kwargs):
+                self.seen_shape = tuple(hidden_states.shape)
+                return hidden_states
+
+        block = _Block()
+        hf_config = SimpleNamespace(hidden_size=8, rms_norm_eps=1e-5)
+        layer = HcStreamMultiTokenPredictorLayer(hf_config, block)
+        assert layer.hc_mult == 4
+
+        hidden_states = torch.randn(2, 3, 8)
+        output = layer(hidden_states, torch.zeros(2, 3, dtype=torch.long), hidden_states)
+
+        # Block receives HC-expanded streams; the layer returns the
+        # parameter-free mhc_head reduction back to [B, S, D].
+        assert block.seen_shape == (2, 3, 4, 8)
+        assert tuple(output.shape) == (2, 3, 8)
+
+    def test_hc_stream_layer_falls_back_to_block_and_config_mult(self):
+        # HC submodules without an exposed hc_mult must not silently
+        # degrade the layer's mult: the fallback chain mirrors
+        # _resolve_mtp_layer_cls (block attrs, then HF config).
+        class _Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn_hc = torch.nn.Module()
+                self.ffn_hc = torch.nn.Module()
+                self.hc_mult = None
+
+        hf_config = SimpleNamespace(hidden_size=8, rms_norm_eps=1e-5, hc_mult=4)
+
+        assert HcStreamMultiTokenPredictorLayer(hf_config, _Block()).hc_mult == 4
+
+    def test_resolve_routes_on_submodule_mult_when_block_and_config_lack_it(self):
+        # A model may declare the multiplier only on its HC
+        # submodules: the routing decision must read the same
+        # source chain as HcStreamMultiTokenPredictorLayer.__init__
+        # (PR !1000 review), otherwise the block is routed to the
+        # base layer and receives unexpanded [B,S,D] streams.
+        class _HcSublayer(torch.nn.Module):
+            def __init__(self, mult):
+                super().__init__()
+                self.hc_mult = mult
+
+        class _Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn_hc = _HcSublayer(4)
+                self.ffn_hc = _HcSublayer(1)
+
+        mtp_block = _Block()
+        assert _resolve_mtp_layer_cls(SimpleNamespace(), mtp_block) is HcStreamMultiTokenPredictorLayer
+        # The routed layer reports the same mult it routed on.
+        layer = HcStreamMultiTokenPredictorLayer(SimpleNamespace(hidden_size=8, rms_norm_eps=1e-5), mtp_block)
+        assert layer.hc_mult == 4
 
 
 class TestRotaryEmbeddingSignature(unittest.TestCase):
