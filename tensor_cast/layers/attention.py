@@ -53,9 +53,11 @@ def is_dcp_decode_batch(
     batching produces) fails this predicate and turns DCP off for the entire
     batch, including its decode requests. This is intentional and matches how
     MsModeling scores DCP: the Prefill and Decode paths are modeled as *separate*
-    steps (the throughput optimizer emits prefill-only and decode-only configs,
-    with ``is_prefill`` forcing ``dcp=1`` on the Prefill phase), so benefit is
-    measured on pure-decode steps and no per-request decode mask is needed.
+    steps (the throughput optimizer emits prefill-only and decode-only configs;
+    Prefill candidates may carry the searched DCP size for KV-capacity
+    accounting — production P instances enable DCP — while this predicate keeps
+    the prefill attention itself DCP-off), so benefit is measured on pure-decode
+    steps and no per-request decode mask is needed.
     Refining this to a request-granular mask is a deferred non-goal
     (rfc_context_parallel_dcp §1.3 #8).
     """

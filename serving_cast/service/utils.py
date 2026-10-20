@@ -791,6 +791,7 @@ def build_pp_search_candidates(
     pp_layer_partitions: list[list[int] | str] | None = None,
     dcp_sizes: list[int] | None = None,
     enforce_ep_domain: bool = False,
+    collapse_dcp_to_largest: bool = False,
 ) -> list[ParallelSearchCandidate]:
     """Enumerate PP-aware parallel search candidates with stage-local arithmetic.
 
@@ -800,6 +801,20 @@ def build_pp_search_candidates(
     and partition constraints. Combinations that violate stage-local
     divisibility or exceed ``num_hidden_layers`` are filtered; malformed PP
     sizes and partitions raise ``ValueError``.
+
+    ``collapse_dcp_to_largest`` (PR !984 review rounds 2-3): when
+    True, collapse the dcp dimension per **tp** to the largest dcp
+    that this tp can carry (``tp % dcp == 0``; dcp=1 fallback keeps
+    every tp alive) at zero candidate blow-up, without silently
+    dropping tp values that cannot divide a global ``max(dcp)``.
+    The capacity factor (``dcp_kv_token_capacity_factor``)
+    MULTIPLIES per-card KV tokens (MLA: factor == dcp), so the
+    largest dcp is the LOOSEST (most optimistic) capacity: it
+    mirrors a P instance that enables its largest searched DCP
+    (the conservative dcp=1 bound stays visible on the decode
+    side). Callers pass the **full** searched dcp list together
+    with this flag (Prefill: DCP only affects KV-capacity
+    accounting, see ``is_dcp_decode_batch``).
 
     ``enforce_ep_domain`` (issue #456): when True, EP-enabled candidates must
     additionally satisfy EP token-domain conservation (``ep * moe_dp == tp * dp``,
@@ -891,7 +906,16 @@ def build_pp_search_candidates(
             # Invariant product for the EP-domain check, hoisted out of the
             # ep/moe_dp inner loops (review note on PR #894).
             token_domain = tp * dp
-            for dcp in dcp_list_pp:
+            # Tightest-capacity DCP collapse, per tp (PR !984 review
+            # round 2): a tp that cannot divide the global max(dcp) must
+            # keep its candidates (fall back to 1) instead of being
+            # silently dropped by the ``tp % dcp`` filter below.
+            if collapse_dcp_to_largest:
+                valid_dcps = [d for d in dcp_list_pp if tp % d == 0]
+                dcp_iter = [max(valid_dcps)] if valid_dcps else [1]
+            else:
+                dcp_iter = dcp_list_pp
+            for dcp in dcp_iter:
                 if tp % dcp != 0:
                     continue
                 for ep in ep_list_pp:

@@ -351,6 +351,58 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["profiling_result"], "hybrid")
         self.assertEqual(row["profiling_misses"], "outside_axis_boundary x3")
 
+    def test_chunked_prefill_ttft_anchors_on_first_cohort_not_drain(self):
+        """Multi-wave chunked prefill reports the no-queue first-cohort chain as TTFT.
+
+        Production engines inject requests continuously (closed loop / rate-limited
+        arrival), so a request does not queue behind the drain of the whole candidate
+        batch — the O(concurrency) drain average over-states TTFT against production.
+        Mirrors the PP>1 wave-1 anchor in _evaluate_pp_wave: TTFT = serving_cost +
+        sum of each chunk's first-wave latency, while the phase makespan keeps every
+        wave (TTFT no-queue anchor and throughput saturated anchor intentionally
+        model different physics).
+        """
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=3,
+            input_length=10,
+            output_length=16,
+            max_batched_tokens=4,
+            serving_cost=2,
+        )
+        captured_calls = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            captured_calls.append((concurrency, query_len, seq_len))
+
+            class DummyMetrics:
+                # Latency varies with the chunk's query_len: 5ms for query 4, 3ms for query 2.
+                execution_time_s = {"analytic": 0.001 + 0.001 * (query_len or 0)}
+                device_memory_available_gb = 1.0
+                breakdowns = {}
+
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        row = result.get_summary_df().iloc[0]
+        # dp=4, concurrency=12, chunks (4,4) (4,8) (2,10): chunks 0-1 have
+        # wave_size=4 -> three 4-request waves each; the final chunk (query 2)
+        # has wave_size=8 -> waves of 8+4. First-cohort chain = serving(2) +
+        # 5 + 5 + 3; the drain average would read (8*35 + 4*38) / 12 = 36.0.
+        self.assertEqual(row["ttft"], 15.0)
+        self.assertEqual(row["prefill_phase_makespan_ms"], 38.0)
+        self.assertAlmostEqual(row["token/s"], 12 * 10 / 0.038, places=3)
+        self.assertEqual(row["prefill_num_chunks"], 3)
+        # Waves reuse the latency record of their chunk's first wave: one unique
+        # forward per distinct (wave_concurrency, query_len, seq_len) shape.
+        self.assertEqual(
+            captured_calls,
+            [(4, 4, 4), (4, 4, 8), (8, 2, 10), (4, 2, 10)],
+        )
+
     def test_chunked_prefill_passes_prefill_phase_to_every_forward(self):
         optimizer_data = OptimizerData(
             ttft_limits=1000,

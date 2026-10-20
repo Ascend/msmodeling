@@ -456,6 +456,19 @@ class ParallelRunner:
         if is_prefill and getattr(base_user_input, "speculative_method", None) not in ("dflash", "dspark"):
             mtp_token_sizes = [0]
             num_mtp_tokens_arg = 0
+        dcp_sizes_arg = getattr(self.args, "dcp_sizes", None)
+        # Prefill latency is unchanged by DCP (see is_dcp_decode_batch):
+        # collapse the dcp dimension per tp to its largest divisible
+        # value. The capacity factor MULTIPLIES per-card KV tokens
+        # (MLA: factor == dcp), so the largest searched dcp is the
+        # LOOSEST (most optimistic) capacity -- it matches a P
+        # instance that actually enables its largest searched DCP
+        # (e.g. the GLM-5.2-w4a8 production P YAML enables DCP=8);
+        # dcp=1 is the conservative bound and stays visible on the
+        # decode side. Per-tp collapse also keeps every tp alive
+        # instead of dropping tps that cannot divide a global
+        # max(dcp) (PR !984 review round 2 + round 3).
+        collapse_dcp = bool(is_prefill and dcp_sizes_arg and len(dcp_sizes_arg) > 1)
         candidates = build_pp_search_candidates(
             num_devices=target_devices,
             tp_sizes=self.args.tp_sizes,
@@ -466,9 +479,13 @@ class ParallelRunner:
             num_mtp_token_sizes=mtp_token_sizes,
             num_mtp_tokens=num_mtp_tokens_arg,
             pp_layer_partitions=getattr(self.args, "pp_layer_partitions", None),
-            # DCP is decode-only; prefill forces dcp_sizes=None (→ [1]).
-            dcp_sizes=None if is_prefill else getattr(self.args, "dcp_sizes", None),
+            # Prefill candidates carry the searched DCP for KV-capacity
+            # accounting (production P instances enable DCP); the attention
+            # predicate keeps DCP benefit on decode steps (see
+            # is_dcp_decode_batch), so prefill latency is unchanged by DCP.
+            dcp_sizes=dcp_sizes_arg,
             enforce_ep_domain=enforce_ep_domain,
+            collapse_dcp_to_largest=collapse_dcp,
         )
 
         total_combinations = len(candidates)
@@ -570,11 +587,24 @@ class ParallelRunner:
         )
         if is_prefill:
             mtp_list = [0]
-        # DCP applies to the Decode phase only and reuses TP devices (a contiguous
-        # sub-slice of the TP group), so it is constrained by ``tp % dcp == 0`` rather
-        # than by the device budget. Prefill is always run with dcp=1.
-        dcp_list = [1] if is_prefill else resolve_search_sizes(getattr(self.args, "dcp_sizes", None), target_devices, 1)
-        total_combinations = count_search_combinations(tp_list, ep_list, moe_dp_list, mtp_list) * len(dcp_list)
+        # DCP reuses TP devices (a contiguous sub-slice of the TP group), so it is
+        # constrained by ``tp % dcp == 0`` rather than by the device budget. Both
+        # phases search the dcp dimension: Prefill uses it for KV-capacity
+        # accounting (production P instances enable DCP), while DCP attention
+        # benefit stays decode-only (see is_dcp_decode_batch).
+        dcp_list = resolve_search_sizes(getattr(self.args, "dcp_sizes", None), target_devices, 1)
+        # Prefill latency is unchanged by DCP (see is_dcp_decode_batch), so
+        # expanding the dcp dimension would only multiply candidates with
+        # identical throughput. Collapse per tp to the largest dcp that tp
+        # can carry (dcp=1 fallback keeps every tp alive) at zero
+        # candidate blow-up, without silently dropping tps that cannot
+        # divide the global max (PR !984 review round 2). The largest
+        # dcp is the LOOSEST (most optimistic) per-card KV capacity --
+        # it mirrors a P instance running its largest searched DCP.
+        collapse_dcp = bool(is_prefill and len(dcp_list) > 1)
+        total_combinations = count_search_combinations(tp_list, ep_list, moe_dp_list, mtp_list) * (
+            1 if collapse_dcp else len(dcp_list)
+        )
         max_search_combinations = getattr(
             self.args,
             "max_search_combinations",
@@ -615,6 +645,11 @@ class ParallelRunner:
             # PP=1: tp * dp always equals target_devices; hoisted per review
             # note on PR #894.
             token_domain = target_devices
+            if collapse_dcp:
+                valid_dcps = [d for d in dcp_list if tp % d == 0]
+                dcp_iter = [max(valid_dcps)] if valid_dcps else [1]
+            else:
+                dcp_iter = dcp_list
             for ep in ep_list:
                 if target_devices % ep != 0:
                     continue
@@ -631,7 +666,7 @@ class ParallelRunner:
                     if enforce_ep_domain and not is_valid_ep_domain(ep, moe_dp, tp, dp, token_domain):
                         continue
                     for num_mtp_tokens in mtp_list:
-                        for dcp in dcp_list:
+                        for dcp in dcp_iter:
                             if tp % dcp != 0:
                                 continue
                             yield _build_user_input(tp=tp, ep=ep, moe_dp=moe_dp, num_mtp_tokens=num_mtp_tokens, dcp=dcp)
@@ -674,8 +709,9 @@ class ParallelRunner:
             overwrite_optimizer_data: Optimizer data for tasks.
             user_configs: Optional list of user configs. If None, use self._get_user_config().
             disagg_mode: Optional override for strategy selection.
-            is_prefill: When generating configs internally, force dcp=1 for the Prefill
-                phase (DCP is decode-only). Ignored when ``user_configs`` is provided.
+            is_prefill: Selects the phase whose candidates are generated; both
+                phases search the dcp dimension (Prefill uses DCP for KV-capacity
+                accounting only). Ignored when ``user_configs`` is provided.
             process_context: Multiprocessing context for ProcessPoolExecutor.
                 When ``None``, ProcessPoolExecutor uses ``mp.get_context("spawn")``.
                 Spawn avoids deadlocks when the parent already has threads
@@ -900,8 +936,9 @@ class ParallelRunner:
             overwrite_optimizer_data.tpot_limits = self.args.tpot_limits
         overwrite_optimizer_data.num_devices = devices_per_instance
 
-        # Get user configs for the specified device count. Prefill forces dcp=1
-        # (DCP is a decode-only optimization); Decode searches the dcp dimension.
+        # Get user configs for the specified device count. Both phases search the
+        # dcp dimension (Prefill for KV-capacity accounting; DCP attention benefit
+        # stays decode-only).
         user_configs = list(self._get_user_config(num_devices=devices_per_instance, is_prefill=is_prefill))
 
         if not user_configs:

@@ -484,8 +484,19 @@ class TestTaskRunner(unittest.TestCase):
         self.assertTrue(configs)
         self.assertTrue(all(config.dcp_size == 1 for config in configs))
 
-    def test_get_user_config_prefill_forces_dcp_one(self):
-        """Prefill phase ignores the dcp search space (DCP is decode-only)."""
+    def test_get_user_config_prefill_searches_dcp(self):
+        """Prefill carries the largest searched DCP for KV-capacity accounting.
+
+        Production P instances enable DCP, so the Prefill phase must carry a
+        searched DCP size (KV capacity shards via dcp_sharded_num_blocks /
+        dcp_kv_token_capacity_factor). The attention predicate stays decode-only
+        (is_dcp_decode_batch), so prefill latency is unchanged by DCP: expanding
+        the dcp dimension would only multiply identical-throughput candidates,
+        hence Prefill collapses to the largest searched value. NOTE: the
+        capacity factor MULTIPLIES per-card KV tokens, so the largest dcp is
+        the loosest (most optimistic) capacity -- it mirrors a P instance
+        running its largest searched DCP; dcp=1 stays visible on decode.
+        """
         self.args.tp_sizes = [4]
         self.args.dcp_sizes = [1, 2, 4]
         self.args.num_devices = 4
@@ -493,8 +504,42 @@ class TestTaskRunner(unittest.TestCase):
         task_runner = ParallelRunner(self.args)
         prefill_configs = list(task_runner._get_user_config(is_prefill=True))
         self.assertTrue(prefill_configs)
-        self.assertTrue(all(config.dcp_size == 1 for config in prefill_configs))
-        # Decode (default) does search the dcp dimension.
+        self.assertEqual(sorted({c.dcp_size for c in prefill_configs}), [4])
+
+    def test_get_user_config_prefill_dcp_survives_tp_not_dividing_max(self):
+        """Prefill dcp collapse must not drop tps that cannot divide max(dcp).
+
+        PR !984 review round 2: collapsing the prefill dcp list to a global
+        ``max(dcp)`` let the ``tp % dcp`` filter silently drop every prefill
+        candidate of a tp that cannot divide that max (e.g. tp=2 with
+        dcp=[1,2,4] collapsed to [4] produced an empty prefill search).
+        The per-tp collapse keeps every tp alive: each tp carries the
+        largest dcp it can divide, with dcp=1 as the fallback.
+        """
+        self.args.num_devices = 4
+        self.args.dcp_sizes = [1, 2, 4]
+
+        # Review example: tp=2 cannot divide max(dcp)=4 -> dcp falls back
+        # to 2, prefill candidates stay alive.
+        self.args.tp_sizes = [2]
+        task_runner = ParallelRunner(self.args)
+        prefill_configs = list(task_runner._get_user_config(is_prefill=True))
+        self.assertTrue(prefill_configs)
+        self.assertEqual(sorted({c.dcp_size for c in prefill_configs}), [2])
+        self.assertEqual({c.tp_size for c in prefill_configs}, {2})
+        # Decode still searches the full dcp dimension.
+        decode_configs = list(task_runner._get_user_config(is_prefill=False))
+        self.assertEqual(sorted({c.dcp_size for c in decode_configs}), [1, 2])
+
+        # Mixed tp list: each tp keeps its own largest dcp (2 -> 2, 4 -> 4).
+        self.args.tp_sizes = [2, 4]
+        task_runner = ParallelRunner(self.args)
+        prefill_configs = list(task_runner._get_user_config(is_prefill=True))
+        self.assertEqual(
+            sorted({(c.tp_size, c.dcp_size) for c in prefill_configs}),
+            [(2, 2), (4, 4)],
+        )
+        # Decode (default) searches the dcp dimension identically.
         decode_configs = list(task_runner._get_user_config(is_prefill=False))
         self.assertEqual(sorted({c.dcp_size for c in decode_configs}), [1, 2, 4])
 

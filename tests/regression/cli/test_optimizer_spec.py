@@ -486,3 +486,41 @@ def test_spec_parallel_expansion_matches_optimizer_candidates(tmp_path: Path, mo
         for candidate in expected
     }
     assert observed == expected_values
+
+
+def test_build_pp_search_candidates_prefill_dcp_collapse_per_tp() -> None:
+    """Prefill dcp collapse is per-tp (PR !984 review round 2).
+
+    A tp that cannot divide the global max(dcp) must keep its candidates
+    (its largest divisible dcp, dcp=1 fallback) instead of being silently
+    dropped by the ``tp % dcp`` filter.
+    """
+    collapsed = build_pp_search_candidates(
+        num_devices=4,
+        tp_sizes=[2, 4],
+        pp_sizes=None,
+        num_hidden_layers=8,
+        ep_sizes=[1],
+        moe_dp_sizes=[1],
+        dcp_sizes=[1, 2, 4],
+        collapse_dcp_to_largest=True,
+    )
+    assert {(c.tp_size, c.dcp_size) for c in collapsed} == {(2, 2), (4, 4)}
+
+    # Non-collapsed search still enumerates every (tp, dcp) pair.
+    expanded = build_pp_search_candidates(
+        num_devices=4,
+        tp_sizes=[2, 4],
+        pp_sizes=None,
+        num_hidden_layers=8,
+        ep_sizes=[1],
+        moe_dp_sizes=[1],
+        dcp_sizes=[1, 2, 4],
+    )
+    assert {(c.tp_size, c.dcp_size) for c in expanded} == {
+        (2, 1),
+        (2, 2),
+        (4, 1),
+        (4, 2),
+        (4, 4),
+    }
