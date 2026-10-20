@@ -515,8 +515,9 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             [(0, 2, 3), (0, 2, 2), (2, 0, 3), (2, 0, 3)],
         )
         self.assertEqual(metrics.ttft, 30.0)
-        self.assertEqual(metrics.tpot, 5.0)
+        self.assertEqual(metrics.tpot, 40.0 / 3)
         self.assertEqual(metrics.output_throughput, 150.0)
+        self.assertAlmostEqual(metrics.output_throughput / 3, 1000 * 2 / (3 * metrics.tpot))
         self.assertEqual(metrics.memory_left_gb, 7.0)
         self.assertEqual(metrics.prefill_memory_left_gb, 8.0)
         self.assertEqual(metrics.prefill_latency, 20.0)
@@ -892,6 +893,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             max_batched_tokens=3,
             num_devices=1,
             serving_cost=0,
+            tpot_limits=2.0,
             num_mtp_tokens=0,
             mtp_acceptance_rate=[],
         )
@@ -904,8 +906,35 @@ class TestAggThroughputOptimizer(unittest.TestCase):
 
         row = summary.get_summary_df().iloc[0]
         self.assertEqual(row["ttft"], 3.5)
-        self.assertEqual(row["tpot"], 1.0)
+        self.assertEqual(row["tpot"], 2.5)
         self.assertEqual(row["token/s"], 800.0)
+        self.assertEqual(row["token/s"] / 2, 1000.0 * 2 / (2 * row["tpot"]))
+        self.assertTrue(summary.check_early_stop_flag())
+
+    def test_chunked_single_token_tpot_includes_prefill_and_skips_decode(self):
+        optimizer_data = OptimizerData(
+            input_length=5,
+            output_length=1,
+            batch_size=1,
+            max_batched_tokens=3,
+            tpot_limits=14.0,
+        )
+        decode_calls = []
+
+        def fake_record(key, optimizer_data):
+            if key.is_decode:
+                decode_calls.append(key)
+            return ForwardLatencyRecord(5.0 if key.query_len == 3 else 10.0, 1.0, "")
+
+        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
+            summary = self.strategy.get_inference_info(optimizer_data)
+
+        row = summary.get_summary_df().iloc[0]
+        self.assertEqual(decode_calls, [])
+        self.assertEqual(row["ttft"], 15.0)
+        self.assertEqual(row["tpot"], 15.0)
+        self.assertAlmostEqual(row["token/s"], 1000.0 / 15.0, places=3)
+        self.assertTrue(summary.check_early_stop_flag())
 
 
 _agg_pp_profile = partial(_pp_profile, include_transfers=False)
@@ -949,7 +978,7 @@ class TestAggPipelineParallel(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertTrue(summary.get_pp_mixed_pd_overlap_approx())
 
-    def test_formula_keeps_prefill_steady_request_ttft_and_decode_interval_separate(self):
+    def test_pp_tpot_amortizes_prefill_and_matches_throughput(self):
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
         profile = _agg_pp_profile((2.0, 2.0))
         _, repeated = _pp_schedule_estimates(
@@ -976,15 +1005,49 @@ class TestAggPipelineParallel(unittest.TestCase):
 
         # Prefill ttft comes from the steady wave's request-level mean
         # (steady completions (0.03, 0.06) - start 0.0 -> 45.0ms), not the
-        # wave-1 makespan (60.0ms); decode tpot/interval stay the steady
-        # worst_tpot / measured_interval.
+        # wave-1 makespan (60.0ms). The service TPOT uses the same measured
+        # decode interval as throughput, including TTFT exactly once.
         expected_e2el = 45.0 + 50.0 * (4 - 1)
         self.assertEqual(row["ttft"], 45.0)
-        self.assertEqual(row["tpot"], 80.0)
+        self.assertEqual(row["tpot"], expected_e2el / 4)
         self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, places=2)
+        self.assertAlmostEqual(row["token/s"] / 4, 1000.0 * 2 / expected_e2el, places=2)
+
+    def test_pp_service_tpot_applies_to_slo_for_pp2_and_pp3(self):
+        from serving_cast.service.optimizer_summary import EARLY_STOP_TPOT_LIMIT
+
+        optimizer_data = OptimizerData(
+            input_length=4,
+            output_length=4,
+            batch_size=2,
+            max_batched_tokens=2048,
+            tpot_limits=85.0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        # The old decode-only TPOT is 80 ms and would pass this limit. Including
+        # TTFT makes the service TPOT (225 + 3 * 50) / 4 = 93.75 ms.
+        _, repeated = _pp_schedule_estimates(makespan_s=0.30, interval_s=0.05, worst_tpot_s=0.08)
+        for pp in (2, 3):
+            with self.subTest(pp=pp):
+                strategy = _make_pp_agg_strategy(dp=1, pp=pp, tp=1)
+                profile = _agg_pp_profile((2.0,) * pp)
+                with (
+                    patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)),
+                    patch(
+                        "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
+                        return_value=repeated,
+                    ),
+                ):
+                    summary = strategy.get_inference_info(optimizer_data)
+
+                row = summary.get_summary_df().iloc[0]
+                self.assertGreater(row["tpot"], optimizer_data.tpot_limits)
+                self.assertTrue(summary.check_early_stop_flag())
+                self.assertEqual(summary.get_early_stop_reason(), EARLY_STOP_TPOT_LIMIT)
 
     def test_pp_decode_applies_mtp_fold(self):
-        """PP>1 decode TPOT and throughput are folded by (accept+1) when MTP is enabled."""
+        """PP>1 service TPOT and throughput use the folded decode interval."""
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
         profile = _agg_pp_profile((2.0, 2.0))
         first_wave, repeated = _pp_schedule_estimates(
@@ -1017,17 +1080,16 @@ class TestAggPipelineParallel(unittest.TestCase):
 
         # fold = clamp(1.5, 0, 2) + 1 = 2.5
         fold = 2.5
-        expected_tpot = 80.0 / fold  # 32.0
         expected_interval_ms = 50.0 / fold  # 20.0
         # Prefill ttft is the steady-wave request-level mean (0.045s), and the
         # decode interval is folded by (accept+1).
         expected_e2el = 45.0 + expected_interval_ms * 3  # 105.0
         self.assertAlmostEqual(row["ttft"], 45.0, places=6)
-        self.assertAlmostEqual(row["tpot"], expected_tpot, places=6)
+        self.assertAlmostEqual(row["tpot"], expected_e2el / 4, places=6)
         self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, places=2)
 
     def test_pp_decode_applies_block_fold_dflash_and_dspark(self):
-        """PP>1 decode TPOT is folded by (clamp(accept, 0, block-1) + 1) for DFlash/DSpark."""
+        """PP>1 service TPOT uses the folded DFlash/DSpark decode interval."""
         for method, block_field, acceptance_field in (
             ("dflash", "dflash_block_size", "dflash_acceptance_length"),
             ("dspark", "dspark_block_size", "dspark_acceptance_length"),
@@ -1068,13 +1130,12 @@ class TestAggPipelineParallel(unittest.TestCase):
 
                 # fold = clamp(3.5, 0, 5) + 1 = 4.5
                 fold = 4.5
-                expected_tpot = 80.0 / fold
                 expected_interval_ms = 50.0 / fold
                 # Prefill ttft is the steady-wave request-level mean (0.045s).
                 expected_e2el = 45.0 + expected_interval_ms * 3
-                # summary rows round to 3 decimals; 80/4.5 is not exact
+                # Summary rows round to 3 decimals.
                 self.assertAlmostEqual(row["ttft"], 45.0, places=6)
-                self.assertAlmostEqual(row["tpot"], expected_tpot, delta=1e-2)
+                self.assertAlmostEqual(row["tpot"], expected_e2el / 4, delta=1e-2)
                 self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, delta=1e-1)
 
     def test_single_token_skips_decode_profile_schedule_and_oom(self):
@@ -1106,7 +1167,7 @@ class TestAggPipelineParallel(unittest.TestCase):
 
         row = summary.get_summary_df().iloc[0]
         self.assertEqual(decode_calls, [])
-        self.assertEqual(row["tpot"], 0.0)
+        self.assertEqual(row["tpot"], 5000.0)
         # Real scheduler on 2 microbatches x 2 stages (2.0s, no transfers):
         # steady wave completions (8.0, 10.0) - start 4.0 -> request-level
         # mean 5.0s (NOT the wave-1 makespan 6.0s).

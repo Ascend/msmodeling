@@ -23,6 +23,8 @@
 
 PD 混部针对 Prefill-Decode 合一的服务架构优化吞吐量，两个阶段运行在同一实例上。优化器会在所有可行的 TP（Tensor Parallelism，张量并行）与 DP（Data Parallelism，数据并行）配置中搜索，在 SLO 约束下找到最佳吞吐量。
 
+PD 混部报告的 TPOT 是**服务摊销 TPOT**：候选配置用于计算吞吐的端到端耗时除以输出 token 数，包含首 token 的 TTFT 开销。`--tpot-limit` 按此值筛选；它不同于相邻输出 token 的纯解码间隔。PP=1、PP>1 和分块 Prefill 都使用这一指标定义，具体端到端耗时由各自的调度模型估算。若输出长度为 `O`、并发数为 `C`、端到端耗时为 `E` 毫秒，则 `TPOT = E / O`，`QPS = C * 1000 / E = token/s / O`。从报告 TPOT 换算 QPS 时，不要再次加上 TTFT。PD 分离的 Decode TPOT 属于单独的解码阶段指标，不采用这里的服务摊销定义。
+
 #### 示例
 
 ```bash

@@ -680,10 +680,12 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             raise RuntimeError("Chunked prefill schedule replay ended before all requests finished.")
 
         ttft = first_token_time_sum / concurrency
-        tpot = 0 if remaining_decode_tokens == 0 else tpot_sum / concurrency
         output_throughput = (
             1000 * optimizer_data.output_length * concurrency / max_finish_time if max_finish_time > 0 else 0
         )
+        # Aggregation TPOT is the service time per output token, including prefill.
+        # Use the same completion time as throughput so the SLO and QPS agree.
+        tpot = max_finish_time / optimizer_data.output_length if max_finish_time > 0 else 0
 
         return _ChunkedAggMetrics(
             ttft=ttft,
@@ -887,10 +889,9 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         ttft = prefill_wave.prefill_request_ttft_s * 1000.0
 
         if remaining_decode_tokens == 0:
-            tpot = 0.0
             decode_latency = 0.0
             memory_left_gb = prefill_wave.memory_left_gb
-            output_throughput = 1000 * output_length * concurrency / ttft if ttft > 0 else 0.0
+            e2el = ttft
         else:
             decode_wave = self._evaluate_pp_wave(
                 batch_size,
@@ -909,13 +910,16 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             # configured the fold is a no-op (divides by 1), preserving baseline.
             decode_latency = self._fold_decode_latency_ms(repeated.worst_tpot_s * 1000.0, optimizer_data)
             decode_interval_ms = self._fold_decode_latency_ms(repeated.measured_interval_s * 1000.0, optimizer_data)
-            tpot = decode_latency
             e2el = ttft + decode_interval_ms * remaining_decode_tokens
-            output_throughput = 1000 * output_length * concurrency / e2el if e2el > 0 else 0.0
             memory_left_gb = min(
                 prefill_wave.memory_left_gb,
                 decode_wave.memory_left_gb,
             )
+
+        # Keep the worst decode interval in decode_latency for diagnostics. The
+        # aggregation SLO uses the same end-to-end service time as throughput.
+        tpot = e2el / output_length if e2el > 0 else 0.0
+        output_throughput = 1000 * output_length * concurrency / e2el if e2el > 0 else 0.0
 
         # PP wave evaluation does not track individual memory components;
         # only total/available/reserved are known at this level.
