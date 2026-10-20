@@ -274,8 +274,7 @@ def _build_validation(
     Returns:
         List of validation rule dicts.
     """
-    # Numeric range rules need type 'number' (or 'integer' — 'number' accepts both).
-    range_type = "number" if data_type in ("integer", "number") else None
+    range_type = data_type if data_type == "integer" else "number" if data_type == "number" else None
     # Array fields: type 'array' so required checks non-empty list (device multi-select).
     if data_type.endswith("[]"):
         range_type = "array"

@@ -480,6 +480,44 @@ class TestValidateCaseForModule:
         assert error is None
         assert fields is None
 
+    def test_throughput_max_concurrency_requires_positive_integer(self):
+        from services.case_validation import validate_case_for_module
+
+        from cli.registry.modules import get_spec
+
+        spec = get_spec("throughput_optimizer")
+        valid_params = _build_valid_params(spec)
+        for value in (1, "1", 1.0):
+            params = dict(valid_params, **{"max-concurrency": value})
+            error, _ = validate_case_for_module("throughput_optimizer", params, {"max-concurrency"})
+            assert error is None
+
+        for value in (0, -1, 1.5, float("nan"), float("inf"), True):
+            params = dict(valid_params, **{"max-concurrency": value})
+            error, fields = validate_case_for_module("throughput_optimizer", params, {"max-concurrency"})
+            assert error is not None
+            assert "Field 'max-concurrency'" in error
+            assert fields is None
+
+    def test_existing_integer_parameters_reject_fractional_numbers_without_changing_number_fields(self):
+        from cli.registry.modules import get_spec
+
+        from services.case_validation import validate_case_for_module
+
+        params = _build_valid_params(get_spec("text_generate"))
+        params["num-devices"] = 2.5
+        error, _ = validate_case_for_module("text_generate", params, {"num-devices"})
+        assert error is not None
+        assert "num-devices" in error
+
+        params["num-devices"] = 2.0
+        error, _ = validate_case_for_module("text_generate", params, {"num-devices"})
+        assert error is None
+
+        number_params = _build_valid_params(get_spec("throughput_optimizer"))
+        number_params["ttft-limit"] = 1.5
+        assert check_declarative(get_spec("throughput_optimizer"), number_params) is None
+
     def test_handles_type_coercion(self):
         """String numbers are coerced before validation."""
         params = {

@@ -26,7 +26,7 @@ from cli.registry.modules import get_spec
 from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
-VERSION = "2.9.14"
+VERSION = "2.9.15"
 TITLE = I18nText("吞吐优化", "Throughput Optimizer")
 RUNNER = "ParallelRunner"
 
@@ -466,6 +466,16 @@ UI: dict[str, UIFieldProps] = {
     "max-batched-tokens": UIFieldProps(
         label=I18nText('单步最大 token 数', 'Max Batched Tokens'),
         tooltip=I18nText('单步最大 token 数（>0，≤1e6）。', 'Maximum tokens per step (>0, ≤1e6).'),
+        default=None,
+        group={'zh': '约束', 'en': 'Constraints'},
+        control='number',
+    ),
+    "max-concurrency": UIFieldProps(
+        label=I18nText('并发请求上限', 'Maximum Request Concurrency'),
+        tooltip=I18nText(
+            '每个 Prefill 或 Decode 实例的请求并发上限。',
+            'Maximum simultaneous requests for each optimizer instance, including each Prefill or Decode phase.',
+        ),
         default=None,
         group={'zh': '约束', 'en': 'Constraints'},
         control='number',

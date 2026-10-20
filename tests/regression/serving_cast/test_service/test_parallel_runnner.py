@@ -95,6 +95,19 @@ class TestTaskRunner(unittest.TestCase):
         self.assertIsNone(task_runner.optimizer_data.input_length)
         self.assertIsNotNone(task_runner.optimizer_data.length_distribution)
 
+    def test_max_concurrency_is_copied_to_each_pd_phase(self):
+        self.args.max_concurrency = 10
+        task_runner = ParallelRunner(self.args)
+        task_runner._get_user_config = Mock(return_value=[Mock()])
+
+        with patch.object(task_runner, "_get_df_list", return_value=[]) as get_df_list:
+            task_runner._run_pd_phase(devices_per_instance=2, is_prefill=True)
+            task_runner._run_pd_phase(devices_per_instance=4, is_prefill=False)
+
+        phase_data = [call.kwargs["overwrite_optimizer_data"] for call in get_df_list.call_args_list]
+        self.assertEqual([data.num_devices for data in phase_data], [2, 4])
+        self.assertEqual([data.max_concurrency for data in phase_data], [10, 10])
+
     def test_optimizer_data_omits_dflash_fields_when_disabled(self):
         task_runner = ParallelRunner(self.args)
 

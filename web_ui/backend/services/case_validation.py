@@ -29,6 +29,7 @@ This module provides:
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any
 
@@ -69,7 +70,10 @@ def check_declarative(
 
         # Numeric range constraints (integer/number)
         if field.data_type in ("integer", "number"):
-            if not isinstance(val, (int, float)):
+            if field.data_type == "integer":
+                if isinstance(val, bool) or not isinstance(val, int):
+                    return f"Field '{field.name}' must be an integer, got {type(val).__name__}"
+            elif not isinstance(val, (int, float)):
                 return f"Field '{field.name}' must be a number, got {type(val).__name__}"
 
             if field.min is not None and val < field.min:
@@ -130,6 +134,10 @@ def coerce_scalar(field: Any, val: Any) -> Any:
         return None
     try:
         if field.data_type == "integer":
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, float) and (not math.isfinite(val) or not val.is_integer()):
+                return val
             return int(val)
         elif field.data_type == "number":
             return float(val)

@@ -241,6 +241,22 @@ class BaseThroughputOptimizer(ABC):
             elif len(batch_range) == 1:
                 right = batch_range[0]
 
+        if optimizer_data.max_concurrency is not None:
+            local_batch_limit = optimizer_data.max_concurrency // self.dp
+            if not batch_range:
+                right = local_batch_limit
+            else:
+                right = min(right, local_batch_limit)
+            if left > right:
+                logger.warning(
+                    "Skipping candidate: max_concurrency=%d with attention DP=%d leaves no batch size in range [%d, %d].",
+                    optimizer_data.max_concurrency,
+                    self.dp,
+                    left,
+                    right,
+                )
+                return None
+
         # early_stop
         optimizer_data.batch_size = left
         summary = self.get_inference_info(optimizer_data)
@@ -248,7 +264,7 @@ class BaseThroughputOptimizer(ABC):
             self._last_run_early_stop_reason = summary.get_early_stop_reason()
             return None
 
-        if not batch_range:
+        if not batch_range and optimizer_data.max_concurrency is None:
             # PP>1 must not use the two-point linear TTFT/TPOT extrapolation
             # across microbatch-count discontinuities (plan Task-4 Step 7):
             # schedule makespan/TPOT is not linear in batch size. Force the
@@ -496,7 +512,13 @@ class BaseThroughputOptimizer(ABC):
         with the existing search contract instead of introducing a second
         concurrency heuristic.
         """
-        probe_batch_size = max(batch_range) if batch_range else DEFAULT_MAX_BATCH_SIZE
+        if optimizer_data.max_concurrency is None:
+            probe_batch_size = max(batch_range) if batch_range else DEFAULT_MAX_BATCH_SIZE
+        else:
+            local_batch_limit = optimizer_data.max_concurrency // self.dp
+            if local_batch_limit < 1 or (batch_range and len(batch_range) == 2 and batch_range[0] > local_batch_limit):
+                raise ValueError("max_concurrency and batch_range leave no batch size for compile calibration.")
+            probe_batch_size = min(max(batch_range) if batch_range else local_batch_limit, local_batch_limit)
         concurrency = probe_batch_size * self.dp
         key = self._make_forward_shape_key(concurrency, optimizer_data, is_decode)
         request = RequestInfo(

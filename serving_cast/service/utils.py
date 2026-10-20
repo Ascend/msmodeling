@@ -126,6 +126,7 @@ class OptimizerData:
     ttft_limits: Optional[float] = None
     tpot_limits: Optional[float] = None
     max_batched_tokens: Optional[int] = None
+    max_concurrency: Optional[int] = None
     num_devices: Optional[int] = None
     serving_cost: Optional[float] = None
     num_mtp_tokens: Optional[int] = None

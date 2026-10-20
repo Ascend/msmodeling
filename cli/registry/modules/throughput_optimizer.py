@@ -236,6 +236,16 @@ MAX_BATCHED_TOKENS = Param(
     cli_help="Max batched tokens for one prefill or mixed prefill/decode step.",
 )
 
+MAX_CONCURRENCY = Param(
+    name="max-concurrency",
+    data_type="integer",
+    default=None,
+    min=1,
+    group="Service Options",
+    cli_metavar="<N>",
+    cli_help="Maximum simultaneous requests per optimizer instance.",
+)
+
 BATCH_RANGE = Param(
     name="batch-range",
     data_type="integer[]",
@@ -560,6 +570,7 @@ SPEC = ModuleSpec(
         TTFT_LIMIT,
         TPOT_LIMIT,
         MAX_BATCHED_TOKENS,
+        MAX_CONCURRENCY,
         BATCH_RANGE,
         SERVING_COST,
         DISAGGREGATION,

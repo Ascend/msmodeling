@@ -14,6 +14,7 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
+import io
 import re
 import sys
 import time
@@ -764,6 +765,17 @@ class TestCapacityPlanningArgSemantics(TestCase):
         ]
         with patch.object(sys, "argv", argv):
             return throughput_optimizer_module.arg_parse()
+
+    def test_max_concurrency_accepts_positive_integer_and_defaults_to_none(self):
+        self.assertEqual(self._parse_args(["--max-concurrency=10"]).max_concurrency, 10)
+        self.assertIsNone(self._parse_args([]).max_concurrency)
+
+    def test_max_concurrency_rejects_non_positive_and_non_integer_values(self):
+        for value in ("0", "-1", "1.5"):
+            stderr = io.StringIO()
+            with patch.object(sys, "stderr", stderr), self.assertRaises(SystemExit):
+                self._parse_args([f"--max-concurrency={value}"])
+            self.assertNotIn("unrecognized arguments", stderr.getvalue())
 
     def test_target_qps_without_num_devices_enables_auto_mode(self):
         args = self._parse_args(["--target-qps=1000"])

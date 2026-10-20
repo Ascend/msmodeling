@@ -119,6 +119,23 @@ class TestBuildNamespace:
         assert ns.model_id == "Qwen/Qwen3-32B"
         assert ns.num_devices == 1
 
+    def test_max_concurrency_maps_to_runner_namespace(self):
+        assert _build_namespace({"model-id": "m"}).max_concurrency is None
+        assert _build_namespace({"model-id": "m", "max-concurrency": "10"}).max_concurrency == 10
+
+    def test_max_concurrency_is_published_in_generated_form_schema(self):
+        from services.ui_props.throughput_optimizer import VERSION, generate_form_json
+
+        schema = generate_form_json()
+        field = next(field for field in schema["fields"] if field["id"] == "max-concurrency")
+        minimum = next(rule for rule in field["validation"] if rule["rule"] == "min")
+
+        assert schema["version"] == VERSION
+        assert field["dataType"] == "integer"
+        assert field["default"] is None
+        assert minimum["value"] == 1
+        assert minimum["type"] == "integer"
+
     def test_null_int_field_uses_default(self):
         """A present-but-null int field is coerced to its default."""
         ns = _build_namespace({"model-id": "m", "num-devices": None})

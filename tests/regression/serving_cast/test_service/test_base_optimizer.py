@@ -79,6 +79,7 @@ class TestBaseBackend(unittest.TestCase):
         self.mock_data_config.output_length = 64
         self.mock_data_config.ttft_limits = 1000
         self.mock_data_config.tpot_limits = 200
+        self.mock_data_config.max_concurrency = None
 
     def test_name_attribute(self):
         """Test that name attribute is set correctly"""
@@ -158,6 +159,179 @@ class TestBaseBackend(unittest.TestCase):
         # Verify that run_inference was called
         self.assertGreater(mock_get_inference_info.call_count, 0)
         self.assertIsNotNone(result)
+
+    def _summary_for_search_batch(self, data, dp, early_stop=False, early_stop_reason=None):
+        summary = Mock(spec=OptimizerSummary)
+        summary.check_early_stop_flag.return_value = early_stop
+        summary.get_early_stop_reason.return_value = early_stop_reason
+        summary.get_memory_info.return_value = None
+        summary.get_pp_mixed_pd_overlap_approx.return_value = False
+        summary.get_summary_df.return_value = pd.DataFrame(
+            [{"token/s": float(data.batch_size), "batch_size": data.batch_size, "concurrency": data.batch_size * dp}]
+        )
+        return summary
+
+    def test_run_without_cap_keeps_existing_exponential_search(self):
+        self.backend.dp = 2
+        attempted_batches = []
+
+        def evaluate(data):
+            attempted_batches.append(data.batch_size)
+            return self._summary_for_search_batch(
+                data,
+                self.backend.dp,
+                early_stop=data.batch_size > 512,
+            )
+
+        with patch.object(self.backend, "get_inference_info", side_effect=evaluate):
+            result = self.backend._run_once(OptimizerData(), [])
+
+        self.assertIn(512, attempted_batches)
+        self.assertIn(1024, attempted_batches)
+        self.assertEqual(result.get_summary_df()["concurrency"].max(), 1024)
+
+    def test_run_caps_uniform_batch_and_reports_actual_concurrency(self):
+        self.backend.dp = 4
+        attempted_batches = []
+
+        def evaluate(data):
+            attempted_batches.append(data.batch_size)
+            return self._summary_for_search_batch(data, self.backend.dp)
+
+        optimizer_data = OptimizerData(max_concurrency=10)
+        with patch.object(self.backend, "get_inference_info", side_effect=evaluate):
+            result = self.backend._run_once(optimizer_data, [])
+
+        self.assertTrue(attempted_batches)
+        self.assertLessEqual(max(attempted_batches), 2)
+        self.assertEqual(result.get_summary_df()["concurrency"].max(), 8)
+
+    def test_run_caps_single_and_two_value_batch_ranges(self):
+        self.backend.dp = 4
+        for batch_range in ([8], [1, 8]):
+            with self.subTest(batch_range=batch_range):
+                attempted_batches = []
+
+                def evaluate(data):
+                    attempted_batches.append(data.batch_size)
+                    return self._summary_for_search_batch(data, self.backend.dp)
+
+                optimizer_data = OptimizerData(max_concurrency=10)
+                with patch.object(self.backend, "get_inference_info", side_effect=evaluate):
+                    result = self.backend._run_once(optimizer_data, batch_range)
+
+                self.assertTrue(attempted_batches)
+                self.assertLessEqual(max(attempted_batches), 2)
+                self.assertLessEqual(result.get_summary_df()["concurrency"].max(), 8)
+
+    def test_run_skips_empty_cap_intersections_before_inference(self):
+        self.backend.dp = 4
+        for cap, batch_range in ((3, []), (10, [3, 8])):
+            with self.subTest(cap=cap, batch_range=batch_range):
+                optimizer_data = OptimizerData(max_concurrency=cap)
+                with (
+                    patch.object(self.backend, "get_inference_info") as get_inference_info,
+                    self.assertLogs("serving_cast.service.base_throughput_optimizer", "WARNING") as logs,
+                ):
+                    result = self.backend._run_once(optimizer_data, batch_range)
+
+                self.assertIsNone(result)
+                get_inference_info.assert_not_called()
+                self.assertTrue(any("Skipping" in message for message in logs.output))
+
+    def test_run_cap_uses_attention_dp_and_does_not_stop_at_default_probe(self):
+        self.backend.dp = 4
+        self.backend.pp = 2
+        self.backend.moe_dp = 8
+        self.backend.is_moe_model = True
+        attempted_batches = []
+
+        def evaluate(data):
+            attempted_batches.append(data.batch_size)
+            return self._summary_for_search_batch(data, self.backend.dp)
+
+        optimizer_data = OptimizerData(max_concurrency=2400)
+        with (
+            patch.object(self.backend, "get_inference_info", side_effect=evaluate),
+            patch.object(self.backend, "_estimate_right_boundary") as estimate,
+        ):
+            result = self.backend._run_once(optimizer_data, [])
+
+        self.assertGreater(max(attempted_batches), 512)
+        self.assertEqual(max(attempted_batches), 600)
+        self.assertEqual(result.get_summary_df()["concurrency"].max(), 2400)
+        estimate.assert_not_called()
+
+    def test_run_capped_linear_and_exponential_search_stay_within_cap(self):
+        self.backend.dp = 2
+        for strategy in ("exponential", "linear_exponential"):
+            with self.subTest(strategy=strategy):
+                attempted_batches = []
+
+                def evaluate(data):
+                    attempted_batches.append(data.batch_size)
+                    return self._summary_for_search_batch(data, self.backend.dp)
+
+                optimizer_data = OptimizerData(max_concurrency=10, concurrency_search_strategy=strategy)
+                with patch.object(self.backend, "get_inference_info", side_effect=evaluate):
+                    result = self.backend._run_once(optimizer_data, [])
+
+                self.assertTrue(attempted_batches)
+                self.assertLessEqual(max(attempted_batches), 5)
+                self.assertLessEqual(result.get_summary_df()["concurrency"].max(), 10)
+
+    def test_run_uses_same_cap_with_each_pd_attention_dp(self):
+        for phase_dp, expected_batch in ((2, 5), (4, 2)):
+            with self.subTest(phase_dp=phase_dp):
+                self.backend.dp = phase_dp
+                self.backend.moe_dp = 8
+                attempted_batches = []
+
+                def evaluate(data):
+                    attempted_batches.append(data.batch_size)
+                    return self._summary_for_search_batch(data, self.backend.dp)
+
+                optimizer_data = OptimizerData(max_concurrency=10)
+                with patch.object(self.backend, "get_inference_info", side_effect=evaluate):
+                    result = self.backend._run_once(optimizer_data, [])
+
+                self.assertEqual(max(attempted_batches), expected_batch)
+                self.assertEqual(result.get_summary_df()["concurrency"].max(), expected_batch * phase_dp)
+
+    def test_compile_calibration_probe_respects_cap(self):
+        self.backend.dp = 4
+        optimizer_data = OptimizerData(input_length=128, max_concurrency=10)
+        key = ForwardShapeKey(False, 8, 128, 128)
+        with patch.object(self.backend, "_make_forward_shape_key", return_value=key) as make_key:
+            result_key, request = self.backend.get_compile_calibration_probe(optimizer_data, [], is_decode=False)
+
+        self.assertEqual(result_key.model_concurrency, 8)
+        self.assertEqual(request.concurrency, 8)
+        make_key.assert_called_once_with(8, optimizer_data, False)
+
+    @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
+    def test_auto_max_batched_tokens_search_respects_cap(self, mock_get_inference_info):
+        self.backend.dp = 2
+        attempted = []
+
+        def evaluate(data):
+            attempted.append((data.max_batched_tokens, data.batch_size))
+            oom = data.max_batched_tokens == 400
+            return self._summary_for_search_batch(
+                data,
+                self.backend.dp,
+                early_stop=oom,
+                early_stop_reason=EARLY_STOP_PREFILL_OOM if oom else None,
+            )
+
+        mock_get_inference_info.side_effect = evaluate
+        optimizer_data = OptimizerData(input_length=100, max_batched_tokens=None, max_concurrency=8)
+        result = self.backend.run(optimizer_data, [])
+
+        self.assertIsNotNone(result)
+        self.assertEqual({tokens for tokens, _ in attempted}, {400, 200})
+        self.assertLessEqual(max(batch for _, batch in attempted), 4)
+        self.assertLessEqual(result.get_summary_df()["concurrency"].max(), 8)
 
     @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
     def test_run_propagates_memory_info_to_return_summary(self, mock_get_inference_info):

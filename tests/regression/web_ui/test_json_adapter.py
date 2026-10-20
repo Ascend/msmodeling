@@ -144,7 +144,7 @@ class TestBuildValidation:
         rules = _build_validation(p, "数字", "Number", data_type="integer")
         min_rule = [r for r in rules if r["rule"] == "min"][0]
         assert min_rule["value"] == 0
-        assert min_rule["type"] == "number"
+        assert min_rule["type"] == "integer"
         assert "≥ 0" in min_rule["message"]["zh"]
 
     def test_max_constraint(self):
@@ -153,7 +153,7 @@ class TestBuildValidation:
         rules = _build_validation(p, "数字", "Number", data_type="integer")
         max_rule = [r for r in rules if r["rule"] == "max"][0]
         assert max_rule["value"] == 100
-        assert max_rule["type"] == "number"
+        assert max_rule["type"] == "integer"
         assert "≤ 100" in max_rule["message"]["zh"]
 
     def test_exclusive_min(self):

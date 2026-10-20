@@ -145,6 +145,7 @@ class ParallelRunner:
             image_width=self.args.image_width,
             ttft_limits=self.args.ttft_limits,
             max_batched_tokens=max_batched_tokens,
+            max_concurrency=getattr(self.args, "max_concurrency", None),
             num_devices=self.args.num_devices,
             serving_cost=self.args.serving_cost,
             num_mtp_tokens=fixed_num_mtp_tokens,
