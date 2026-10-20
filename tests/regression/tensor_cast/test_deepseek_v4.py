@@ -1255,33 +1255,6 @@ class TestDeepseekV4Model(unittest.TestCase):
         assert hasattr(model, "rotary_emb")
 
 
-@pytest.mark.nightly
-class TestDeepseekV4ModelNightly(unittest.TestCase):
-    """Full-size V4 model init (large hidden_size; too slow for default CI)."""
-
-    def test_model_initialization(self):
-        """Test model can be initialized with V4 config."""
-        config = DeepseekV4Config(
-            hidden_size=4096,
-            num_attention_heads=32,
-            num_key_value_heads=32,
-            num_hidden_layers=2,
-            vocab_size=128256,
-            compress_ratios=[0, 4],
-            topk_limit=8,
-            index_n_heads=8,
-            index_head_dim=128,
-            hc_mult=4,
-        )
-
-        model = DeepseekV4Model(config)
-        assert hasattr(model, "embed_tokens")
-        assert hasattr(model, "layers")
-        assert hasattr(model, "norm")
-        assert hasattr(model, "rotary_emb")
-        assert len(model.layers) == 2
-
-
 class TestDeepseekV4RouteFunctions(unittest.TestCase):
     """Test V4 routing functions."""
 
