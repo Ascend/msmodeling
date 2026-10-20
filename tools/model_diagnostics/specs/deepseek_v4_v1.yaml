@@ -7,7 +7,6 @@ matches:
   model_types: [deepseek_v4]
 
 operator_aliases:
-  hc_pre_projection: mm
   o_group_projection: bmm
   q_a_projection: mm
   q_b_projection: mm

@@ -18,6 +18,7 @@ import contextlib
 import importlib
 import logging
 import os
+from pathlib import Path
 import torch
 
 from typing import List, Optional, Tuple
@@ -351,6 +352,15 @@ class AutoModelConfigLoader:
         model_id = source_info.model_id
         self.resolved_model_id = model_id
 
+        # DeepSeek V4.1 is not present in Transformers 5.13.1.  Detect a local
+        # checkpoint config before probing AutoConfig so the built-in parser is
+        # selected deterministically and remote-code loading is never required.
+        if remote_source == RemoteSource.huggingface:
+            builtin_v41 = self._load_local_builtin_deepseek_v41_config(model_id)
+            if builtin_v41 is not None:
+                self.is_transformers_natively_supported = False
+                return builtin_v41
+
         if remote_source == RemoteSource.modelscope:
             from modelscope import AutoConfig
         else:
@@ -382,6 +392,14 @@ class AutoModelConfigLoader:
         try:
             hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=False)
         except Exception:
+            # Transformers 5.13.1 raises for the V4.1 model type before it can
+            # construct a config object.  Inspect the raw config dictionary
+            # and route it through the builtin parser instead of loading
+            # untrusted remote Python code.
+            builtin_v41 = self._load_builtin_deepseek_v41_from_config_dict(AutoConfig, model_id)
+            if builtin_v41 is not None:
+                self.is_transformers_natively_supported = False
+                return builtin_v41
             hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 
             # TODO: Maybe add a config for user to set model_type
@@ -425,6 +443,51 @@ class AutoModelConfigLoader:
             raise ImportError(message) from error
         logger.info("Converting Transformers deepseek_v4 config to TensorCast builtin DeepseekV4Config.")
         return deepseek_v4_config_cls.from_dict(hf_config.to_dict())
+
+    @staticmethod
+    def _load_local_builtin_deepseek_v41_config(model_id: str) -> Optional[PretrainedConfig]:
+        path = os.fspath(model_id)
+        config_path = Path(path) / "config.json" if os.path.isdir(path) else Path(path)
+        if not config_path.is_file():
+            return None
+        try:
+            import json
+
+            with config_path.open(encoding="utf-8") as config_file:
+                config_dict = json.load(config_file)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(config_dict, dict) or config_dict.get("model_type") != "deepseek_v41":
+            return None
+        return AutoModelConfigLoader._load_builtin_deepseek_v41_from_dict(config_dict, config_path.parent)
+
+    @staticmethod
+    def _load_builtin_deepseek_v41_from_config_dict(auto_config, model_id: str) -> Optional[PretrainedConfig]:
+        try:
+            config_reader = getattr(auto_config, "get_config_dict", PretrainedConfig.get_config_dict)
+            config_dict, _ = config_reader(model_id)
+        except Exception:
+            return None
+        if not isinstance(config_dict, dict) or config_dict.get("model_type") != "deepseek_v41":
+            return None
+        return AutoModelConfigLoader._load_builtin_deepseek_v41_from_dict(config_dict, None)
+
+    @staticmethod
+    def _load_builtin_deepseek_v41_from_dict(config_dict: dict, config_root: Optional[Path]) -> PretrainedConfig:
+        try:
+            module = importlib.import_module(".builtin_model.deepseek_v41", package=__package__)
+            config_cls = getattr(module, "DeepseekV41Config")
+        except (ImportError, AttributeError) as error:
+            raise ImportError(
+                "DeepSeek V4.1 config was detected, but TensorCast builtin DeepseekV41Config could not be imported."
+            ) from error
+        if config_root is not None:
+            logger.info("Loading local DeepSeek V4.1 config through TensorCast builtin parser: %s", config_root)
+            config_dict = dict(config_dict)
+            config_dict["_name_or_path"] = str(config_root)
+        else:
+            logger.info("Loading DeepSeek V4.1 config through TensorCast builtin parser")
+        return config_cls.from_dict(config_dict)
 
     def _apply_hf_config_patches(self, hf_config: PretrainedConfig, model_id: str):
         model_type = getattr(hf_config, "model_type", None)

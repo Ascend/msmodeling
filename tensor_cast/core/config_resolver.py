@@ -23,6 +23,7 @@ import logging
 
 import torch
 
+from ..core.quantization.datatypes import QuantizeAttentionAction
 from ..core.user_config import UserInputConfig
 from ..layers.attention import AttentionTensorCast
 from ..layers.quant_linear import TensorCastQuantLinear
@@ -45,6 +46,14 @@ from ..transformers.custom_model_registry import (
 from ..transformers.utils import AutoModelConfigLoader
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_text_config(hf_config):
+    """Return a nested text config when the HF config exposes one."""
+    get_text_config = getattr(hf_config, "get_text_config", None)
+    if callable(get_text_config):
+        return get_text_config()
+    return getattr(hf_config, "text_config", hf_config)
 
 
 def _resolve_model_dtype(hf_config) -> torch.dtype:
@@ -183,9 +192,41 @@ class ConfigResolver:
         self.update_mla_config(
             enable_dsa_cp=self.user_input.enable_sequence_parallel and self._has_dsa_structure(),
         )
+        model_type = str(getattr(self.hf_config, "model_type", ""))
+        speculative_method = self.user_input.speculative_method
+        if (
+            model_type == "deepseek_v41"
+            and self.user_input.quantize_attention_action != QuantizeAttentionAction.DISABLED
+        ):
+            raise ValueError(
+                "DeepSeek V4.1-Flash does not support --quantize-attention-action. "
+                "Its CSA2 sparse attention keeps BF16 compute/output semantics while "
+                "using fixed FP8 window KV and FP4 compressed/index KV storage."
+            )
+        if model_type == "deepseek_v41" and int(self.user_input.num_mtp_tokens or 0) > 0:
+            raise ValueError(
+                "DeepSeek V4.1-Flash does not support the generic MTP path. "
+                "Use --speculative-method dspark to enable its native DSpark draft model."
+            )
+        if model_type == "deepseek_v41" and speculative_method == "dflash":
+            raise ValueError(
+                "DeepSeek V4.1-Flash does not currently support the generic DFlash draft model. "
+                "Use --speculative-method dspark to enable its native DSpark draft model."
+            )
         self.update_mtp_config(num_mtp_tokens=self.user_input.num_mtp_tokens)
+        if (
+            model_type == "deepseek_v41"
+            and speculative_method == "dspark"
+            and not self.user_input.num_speculative_tokens_explicit
+        ):
+            text_config = _resolve_text_config(self.hf_config)
+            native_n = int(getattr(text_config, "dspark_block_size", 0) or 0)
+            if native_n > 0:
+                self.user_input.num_speculative_tokens = native_n
+                if self.user_input.decode:
+                    self.user_input.query_len = native_n + 1
         draft_block = self.user_input.draft_block_size()
-        if self.user_input.speculative_method == "dspark" and draft_block >= 2:
+        if speculative_method == "dspark" and draft_block >= 2:
             self.update_dspark_config(
                 dspark=True,
                 dspark_block_size=draft_block,
@@ -196,7 +237,7 @@ class ConfigResolver:
                 markov_rank=int(self.user_input.dspark_markov_rank),
                 markov_head_type=str(self.user_input.dspark_markov_head or "vanilla"),
             )
-        elif self.user_input.speculative_method == "dflash" and draft_block >= 2:
+        elif speculative_method == "dflash" and draft_block >= 2:
             self.update_dflash_config(
                 dflash=True,
                 dflash_block_size=draft_block,
@@ -379,11 +420,29 @@ class ConfigResolver:
 
         from tensor_cast.layers.dspark import apply_cli_overrides_to_dspark_config
 
+        text_config = _resolve_text_config(self.hf_config)
+        # Only supported native DSpark adapters own these defaults. A positive
+        # num_nextn_predict_layers on another model may describe generic MTP.
+        native_dspark = getattr(text_config, "model_type", None) in ("deepseek_v41", "deepseek_v41_text")
+        native_layers = int(getattr(text_config, "num_nextn_predict_layers", 0) or 0) if native_dspark else 0
+        native_target_ids = ()
+        if native_dspark:
+            native_target_ids = getattr(text_config, "dspark_target_layer_ids", None) or getattr(
+                text_config, "excluded_dspark_layer_ids", ()
+            )
+        has_native_draft = native_layers > 0 and bool(native_target_ids)
         cli_block_size = int(dspark_block_size) if int(dspark_block_size or 0) >= 2 else None
-        initial_block = cli_block_size if cli_block_size is not None else 8
+        # Native dspark_block_size counts proposals, while DsparkConfig includes
+        # the anchor. resolve() already passes an explicitly resolved block.
+        native_tokens = int(getattr(text_config, "dspark_block_size", 0) or 0) if has_native_draft else 0
+        initial_block = (
+            cli_block_size if cli_block_size is not None else (native_tokens + 1 if native_tokens > 0 else 8)
+        )
         scfg = DsparkConfig(
             dspark_block_size=initial_block,
-            num_draft_layers=int(num_draft_layers) if int(num_draft_layers or 0) > 0 else 6,
+            num_draft_layers=(
+                int(num_draft_layers) if int(num_draft_layers or 0) > 0 else (native_layers if has_native_draft else 6)
+            ),
             dspark_acceptance_length=float(dspark_acceptance_length),
             draft_model_config_path=draft_model_config_path,
             context_length=int(context_length or 0),
@@ -392,11 +451,17 @@ class ConfigResolver:
             enable_confidence_head=bool(enable_confidence_head),
             confidence_head_with_markov=bool(confidence_head_with_markov),
         )
-        apply_cli_overrides_to_dspark_config(
-            scfg,
-            cli_block_size=cli_block_size,
-            cli_num_draft_layers=int(num_draft_layers) if int(num_draft_layers or 0) > 0 else None,
-        )
+        if has_native_draft:
+            scfg.aux_hidden_state_layer_ids = list(native_target_ids)
+            scfg.sliding_window = int(getattr(text_config, "sliding_window", 128) or 128)
+        # The generic builtin file must not overwrite the native architecture.
+        # Explicit config files and CLI overrides retain their existing path.
+        if not has_native_draft or draft_model_config_path is not None:
+            apply_cli_overrides_to_dspark_config(
+                scfg,
+                cli_block_size=cli_block_size,
+                cli_num_draft_layers=int(num_draft_layers) if int(num_draft_layers or 0) > 0 else None,
+            )
         self.model_config.dspark_config = scfg
 
     def update_hf_config(self, enable_repetition: bool = False, num_hidden_layers_override: int = 0):

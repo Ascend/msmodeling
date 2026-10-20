@@ -29,8 +29,24 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.helpers.model_assets import vendored_model_config_path
 from tensor_cast.transformers import utils
 from tensor_cast.transformers.utils import AutoModelConfigLoader
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_model_type"),
+    [
+        ("Qwen/Qwen3-32B", "qwen3"),
+        ("deepseek-ai/DeepSeek-V3.1", "deepseek_v3"),
+        ("deepseek-ai/DeepSeek-V4.1-Flash", "deepseek_v41"),
+    ],
+)
+def test_load_local_config_only_routes_deepseek_v41_to_builtin(model_id, expected_model_type) -> None:
+    config = AutoModelConfigLoader().load_config(vendored_model_config_path(model_id))
+
+    assert config is not None
+    assert config.model_type == expected_model_type
 
 
 @pytest.fixture(autouse=True)

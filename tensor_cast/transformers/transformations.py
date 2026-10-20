@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from .model import ModelWrapperBase
 
 from .. import config
+from ..core.quantization.config import create_linear_quant_config
+from ..core.quantization.datatypes import QuantizeLinearAction
 from ..layers import (
     COLWISE_LINEAR,
     PARALLEL_EMBEDDING,
@@ -48,8 +50,8 @@ from ..layers.mla import MultiheadLatentAttentionBase, tp_plan_module_path, tp_p
 from ..layers.moe_layer import MoELayer, ParallelMoELayer
 from ..layers.quant_linear import QuantLinearBase
 from ..layers.rotary_embedding import CachingRotaryEmb
-from ..model_config import config_has_draft_spec
-from ..quantize_utils import quantize_linear_modules
+from ..model_config import QuantConfig, config_has_draft_spec
+from ..quantize_utils import QuantGranularity, quantize_linear_modules
 from .custom_model_registry import (
     get_language_layers,
     get_model_profile,
@@ -240,6 +242,13 @@ def maybe_enable_dspark(model: "ModelWrapperBase") -> "ModelWrapperBase":
         hf_config_source = model.hf_config
     hf_config = copy.deepcopy(hf_config_source)
 
+    if getattr(hf_config, "model_type", None) in ("deepseek_v41", "deepseek_v41_text"):
+        from tensor_cast.layers.deepseek_v41_dspark import build_deepseek_v41_native_dspark
+
+        model._inner = build_deepseek_v41_native_dspark(model, scfg, hf_config)
+        model.model_config.dspark_config = scfg
+        return model
+
     layers = _resolve_target_decoder_layers(model)
     if layers is None:
         raise ValueError(f"Unable to resolve decoder layers for DSpark from {model}")
@@ -276,17 +285,24 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         return model
 
     effective_hf_config = getattr(getattr(model, "_inner", None), "hf_config", getattr(model, "hf_config", None))
+    is_deepseek_v41 = getattr(effective_hf_config, "model_type", None) in (
+        "deepseek_v41",
+        "deepseek_v41_text",
+    )
+
     glm5_indexer_types = (
         get_glm5_indexer_types(effective_hf_config)
         if effective_hf_config is not None and glm5_uses_indexshare(effective_hf_config)
         else None
     )
     is_glm5_dsa = getattr(effective_hf_config, "model_type", None) == "glm_moe_dsa"
-    reuse_glm5_mlp_only = (
-        getattr(effective_hf_config, "model_type", None) in ("glm5_next", "glm5_next_text")
+    reuse_stateful_mlp_only = (
+        is_deepseek_v41
+        or getattr(effective_hf_config, "model_type", None) in ("glm5_next", "glm5_next_text")
         or glm5_indexer_types is not None
         or (is_glm5_dsa and config.compilation.passes.enable_sequence_parallel)
     )
+    processed_module_lists: set[int] = set()
 
     def get_submodule_structure_key(module: torch.nn.Module) -> str:
         submodule_types = []
@@ -311,6 +327,8 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         """Wrap structurally repeated modules with region replay wrappers."""
         seen_keys: dict[str, RegionMarkerWrapper] = {}
         for i, module in enumerate(modules):
+            if isinstance(module, (RegionMarkerWrapper, CopyLayerWrapper)):
+                continue
             key = get_submodule_structure_key(module)
             if key not in seen_keys:
                 modules[i] = RegionMarkerWrapper(region_id=id(module), layer=module)
@@ -329,6 +347,9 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         # For the first layer of the repetition, we wrap it with RegionMarkerWrapper and then
         # wrap the rest layers of the same pattern with CopyLayerWrapper. CopyLayerWrapper is a
         # synthetic module with no children, so later transformations only process representative layers.
+        if id(layers) in processed_module_lists:
+            return
+        processed_module_lists.add(id(layers))
         reuse_modules(layers)
 
     def reuse_glm5_stateless_submodules(layers):
@@ -341,6 +362,8 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         KDA/k-pool state. Copying a complete decoder would collapse those chains
         into a representative graph. MLPs remain safe replay boundaries.
         """
+        if id(layers) in processed_module_lists:
+            return
         mlps = []
         for layer in layers:
             mlp = getattr(layer, "mlp", None)
@@ -351,13 +374,14 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
                 return
             mlps.append(mlp)
 
+        processed_module_lists.add(id(layers))
         reuse_modules(mlps)
         for layer, mlp in zip(layers, mlps):
             layer.mlp = mlp
 
     unwrapped = model.unwrap()
     if hasattr(unwrapped, "layers"):
-        if reuse_glm5_mlp_only:
+        if reuse_stateful_mlp_only:
             reuse_glm5_stateless_submodules(unwrapped.layers)
         else:
             reuse_layers(unwrapped.layers)
@@ -375,7 +399,7 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         language_layers_path = get_language_layers(model.hf_config.model_type)
         try:
             language_layers = operator.attrgetter(language_layers_path)(model.unwrap())
-            if reuse_glm5_mlp_only:
+            if reuse_stateful_mlp_only:
                 reuse_glm5_stateless_submodules(language_layers)
             else:
                 reuse_layers(language_layers)
@@ -706,9 +730,15 @@ def patch_moe(
         expected_replacements=_expected_replacements_from_layers(model),
     )
     reset_moe_metadata = False
+    native_dspark = bool(getattr(getattr(model._inner, "draft", None), "native_dspark", False))
     for name, module in model._inner.named_modules():
-        # Dflash/DSpark draft is dense Qwen3; skip MoE patches under draft.*.
-        if config_has_draft_spec(model.model_config) and (name == "draft" or name.startswith("draft.")):
+        # Generic Dflash/DSpark uses a dense Qwen3 draft. DeepSeek V4.1 native
+        # DSpark instead owns a 128-expert MoE and must be patched for meta/EP.
+        if (
+            config_has_draft_spec(model.model_config)
+            and not native_dspark
+            and (name == "draft" or name.startswith("draft."))
+        ):
             continue
         if type(module).__name__ == moe_config.module_name:
             if not reset_moe_metadata:
@@ -756,7 +786,9 @@ def _shard_model_visual_by_tp_helper(model: "ModelWrapperBase"):
         return
     pattern = f"{visual_layers_path}.*.attn"
     for name, module in model._inner.named_modules():
-        if fnmatch.fnmatchcase(strip_module_name(name), pattern) and hasattr(module, "qkv"):
+        if fnmatch.fnmatchcase(strip_module_name(name), pattern) and (
+            hasattr(module, "qkv") or hasattr(module, "wqkv")
+        ):
             if module.num_heads % tp_size != 0:
                 raise ValueError(
                     "Vision attention TP requires vision_tp_size to divide num_heads exactly, "
@@ -1007,6 +1039,8 @@ def shard_model_by_tp(
                     {
                         f"{visual_layers_path}.*.attn.qkv": (COLWISE_LINEAR, params),
                         f"{visual_layers_path}.*.attn.proj": (ROWWISE_LINEAR, params),
+                        f"{visual_layers_path}.*.attn.wqkv": (COLWISE_LINEAR, params),
+                        f"{visual_layers_path}.*.attn.wo": (ROWWISE_LINEAR, params),
                     }
                 )
                 visual_merger_linear = get_visual_merger_linear(self.hf_config.model_type)
@@ -1110,7 +1144,9 @@ def shard_model_by_tp(
             if draft_enabled:
                 from tensor_cast.layers.dflash import DflashWrapper
 
-                draft_hf = self._inner.draft_hf_config if isinstance(self._inner, DflashWrapper) else None
+                draft_hf = (
+                    getattr(self._inner, "draft_hf_config", None) if isinstance(self._inner, DflashWrapper) else None
+                )
                 if draft_hf is not None:
                     draft_prefix = "draft.layers.*.dflash_block"
                     q_params = {
@@ -1151,6 +1187,58 @@ def shard_model_by_tp(
                                 "draft.markov_head.markov_bias": (COLWISE_LINEAR, params),
                             }
                         )
+                elif getattr(getattr(self._inner, "draft", None), "native_dspark", False):
+                    # Native V4.1 DSpark uses V4.1 MLA/mHC/MoE blocks rather
+                    # than the generic Qwen3 DFlash draft backbone.
+                    draft_prefix = "draft.layers"
+                    q_params = {
+                        "tp_group": tp_group,
+                        "global_tp_group": tp_group,
+                        "head_num": config_info.num_attention_heads,
+                    }
+                    o_params = {
+                        "tp_group": o_proj_tp_group,
+                        "global_tp_group": tp_group,
+                        "head_num": config_info.num_attention_heads,
+                    }
+                    tp_plan.update(
+                        {
+                            f"{draft_prefix}.*.attn.q_b_proj": (COLWISE_LINEAR, q_params),
+                            f"{draft_prefix}.*.attn.kv_a_proj_with_mqa": (
+                                COLWISE_LINEAR,
+                                {**q_params, "head_num": 1, "is_replicable": True},
+                            ),
+                            f"{draft_prefix}.*.attn.wo_a": (
+                                COLWISE_LINEAR,
+                                {**q_params, "head_num": int(config_info.o_groups)},
+                            ),
+                            f"{draft_prefix}.*.attn.o_proj": (ROWWISE_LINEAR, o_params),
+                            "draft.markov_head.markov_bias": (COLWISE_LINEAR, params),
+                        }
+                    )
+                    draft_moe_params = {
+                        "tp_group": moe_tp_group,
+                        "global_tp_group": moe_tp_group if not self.model_config.parallel_config.has_ep() else tp_group,
+                    }
+                    tp_plan.update(
+                        {
+                            f"{draft_prefix}.*.mlp.experts.*.gate_proj": (COLWISE_LINEAR, draft_moe_params),
+                            f"{draft_prefix}.*.mlp.experts.*.up_proj": (COLWISE_LINEAR, draft_moe_params),
+                            f"{draft_prefix}.*.mlp.experts.*.down_proj": (ROWWISE_LINEAR, draft_moe_params),
+                            f"{draft_prefix}.*.mlp.fused_moe.experts.experts.*.gate_proj": (
+                                COLWISE_LINEAR,
+                                draft_moe_params,
+                            ),
+                            f"{draft_prefix}.*.mlp.fused_moe.experts.experts.*.up_proj": (
+                                COLWISE_LINEAR,
+                                draft_moe_params,
+                            ),
+                            f"{draft_prefix}.*.mlp.fused_moe.experts.experts.*.down_proj": (
+                                ROWWISE_LINEAR,
+                                draft_moe_params,
+                            ),
+                        }
+                    )
             return tp_plan
 
         return {"tp_plan": get_tp_plan()}
@@ -1401,6 +1489,47 @@ def _ensure_draft_excluded_from_linear_quant(model: "ModelWrapperBase") -> None:
     quant_config.modules_to_not_convert = exclude
 
 
+def _quantize_deepseek_v41_native_dspark(model: "ModelWrapperBase") -> None:
+    """Apply the draft checkpoint's own FP8/FP4 storage contract.
+
+    Native V4.1 DSpark is trained and stored independently from the target
+    model, so it must not inherit ``--quantize-linear-action``.  Its dense
+    attention/projection and shared-expert linears are FP8, while routed
+    experts use packed MXFP4 weights with per-32 E8M0 scales.
+    """
+    draft = getattr(getattr(model, "_inner", None), "draft", None)
+    if not bool(getattr(draft, "native_dspark", False)):
+        return
+    quant_linear_cls = getattr(model.model_config, "quant_linear_cls", None)
+    if quant_linear_cls is None:
+        return
+
+    draft_quant = QuantConfig()
+    fp8 = create_linear_quant_config(QuantizeLinearAction.FP8)
+    mxfp4 = create_linear_quant_config(
+        QuantizeLinearAction.MXFP4,
+        weight_group_size=32,
+        weight_quant_granularity=QuantGranularity.PER_GROUP,
+    )
+    # First-match wildcard resolution makes the FP8 exceptions override the
+    # broad routed-expert rule below.
+    for pattern in (
+        "main_proj",
+        "layers.*.attn.*",
+        "layers.*.mlp.fused_moe.shared_experts.*",
+        "layers.*.mlp.shared_experts.*",
+    ):
+        draft_quant.linear_configs[pattern] = fp8
+    draft_quant.linear_configs["layers.*"] = mxfp4
+    quantize_linear_modules(
+        draft,
+        quant_linear_cls,
+        draft_quant,
+        default_config_name=None,
+        strip_module_fn=None,
+    )
+
+
 def _draft_attention_layer_indices(model: "ModelWrapperBase") -> set[int]:
     """Attention registry indices owned by DFlash/DSpark draft (skip attention quant)."""
     inner = getattr(model, "_inner", None)
@@ -1541,5 +1670,6 @@ def quantize_model(
     else:
         quantize_linear(model, report=report)
         quantize_attention(model, report=report)
+        _quantize_deepseek_v41_native_dspark(model)
     attach_patch_report(model, report)
     return model

@@ -2,7 +2,7 @@
 
 ## 1 简介
 
-本目录存放 TensorCast 运行时配置中的 draft 配置 JSON，启用 `--speculative-method` 时加载。Dflash 与 DSpark 共用同一套 draft 骨架；默认配置文件为 [`dflash_draft_builtin.json`](./dflash_draft_builtin.json)。
+本目录存放 TensorCast 运行时配置中的通用 draft 配置 JSON。Dflash 与通用 DSpark 共用同一套 draft 骨架；默认配置文件为 [`dflash_draft_builtin.json`](./dflash_draft_builtin.json)。模型已适配原生 DSpark draft 时，默认使用原生结构，不加载这份通用配置。
 
 | 项目 | 路径 / 参数 |
 | --- | --- |
@@ -33,6 +33,14 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
 - 自定义 draft 结构时，通过 `--draft-model-config-path` 指向外部 JSON；完整字段说明见下文。
 
 ## 3 覆盖优先级
+
+DSpark 未指定 `--num-draft-layers` 和 `--draft-model-config-path` 时：
+
+- 已适配原生 draft 的模型使用模型声明的层数、辅助隐藏状态来源和窗口大小。例如 DeepSeek V4.1-Flash 默认使用原生 3 层 draft，而非通用 Qwen3 draft 骨架。
+- 没有原生 draft 适配的模型使用通用配置，默认 6 层。其他模型的 MTP 层数声明不会被当作原生 DSpark 配置。
+- 显式指定的 CLI 参数或外部 draft 配置继续优先生效，并接受对应构建器的结构校验；DeepSeek V4.1 原生路径目前仍要求 draft 层数与原生声明一致。
+
+以下配置文件规则适用于通用 draft 路径，以及用户显式提供的外部 draft 配置：
 
 加载 draft 配置时，各字段的最终取值按下面顺序确定；**后一步会覆盖前一步**：
 

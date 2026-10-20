@@ -31,12 +31,14 @@ def _(
     hidden_size = x.size(-1)
     row_width = hc_mult * hidden_size
     num_rows = x.numel() // max(row_width, 1)
-    properties = op_invoke_info.get_memory_access_properties()
-    cast_gp_ops = num_rows * row_width
+    # ``hidden_states.float().flatten(-2)`` is an explicit convert node shared
+    # by this reduction and the HC projection matmul. Exclude the semantic-op
+    # input to avoid charging the original dtype a second time, then account
+    # for the FP32 buffer read consumed by the RMS reduction.
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
+    properties.memory_read_bytes += num_rows * row_width * torch.float32.itemsize
     rms_gp_ops = _rmsnorm_ops(num_rows, row_width)
-    # The fused implementation retains one FP32 intermediate round-trip.
-    properties.memory_readwrite_bytes += 8 * num_rows * row_width
-    _accumulate_compute_ops(properties, torch.float32, gp_ops=cast_gp_ops + rms_gp_ops)
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=rms_gp_ops)
     return properties
 
 
@@ -74,6 +76,73 @@ def _(
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.hc_split_sinkhorn.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    mixes, _, _, hc_mult, sinkhorn_iters, _ = op_invoke_info.args
+    properties = op_invoke_info.get_memory_access_properties()
+    num_rows = mixes.numel() // mixes.shape[-1]
+    hc_mult = max(int(hc_mult), 1)
+    setup_gp_ops = num_rows * (3 * hc_mult + 2 * hc_mult * hc_mult)
+    first_norm_gp_ops = num_rows * (5 * hc_mult * hc_mult + 2 * hc_mult)
+    extra_iter_gp_ops = num_rows * max(int(sinkhorn_iters) - 1, 0) * (6 * hc_mult * hc_mult + 4 * hc_mult)
+    _accumulate_compute_ops(
+        properties,
+        torch.float32,
+        gp_ops=setup_gp_ops + first_norm_gp_ops + extra_iter_gp_ops,
+    )
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.hc_pre_reduce.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    hidden_states = op_invoke_info.args[0]
+    properties = op_invoke_info.get_memory_access_properties()
+    hc_mult = int(hidden_states.shape[-2])
+    hidden_size = int(hidden_states.shape[-1])
+    num_rows = hidden_states.numel() // max(hc_mult * hidden_size, 1)
+    _accumulate_compute_ops(
+        properties,
+        torch.float32,
+        gp_ops=num_rows * hc_mult * hidden_size * 2,
+    )
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.hc_pre_v3.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    x, hc_fn, _, _, _, hc_mult, sinkhorn_iters, _, hc_eps, *mode_args = op_invoke_info.args
+    mode = mode_args[0] if mode_args else op_invoke_info.kwargs.get("pre_mix_mode", "incoming")
+    hc_mult = int(hc_mult)
+    hidden_size = int(x.shape[-1])
+    num_rows = x.numel() // (hc_mult * hidden_size)
+    mix_width = int(hc_fn.shape[0])
+    properties = op_invoke_info.get_memory_access_properties(
+        exclude_input_ids={4} if mode == "current" else set(),
+        exclude_output_ids={3} if mode == "current" else set(),
+    )
+
+    # One fused invocation reads its inputs and writes its external outputs. The
+    # intermediate FP32 projection and Sinkhorn tensors stay inside the op.
+    mma_ops = 2 * num_rows * hc_mult * hidden_size * mix_width
+    rms_ops = _rmsnorm_ops(num_rows, hc_mult * hidden_size)
+    setup_ops = num_rows * (3 * hc_mult + 2 * hc_mult * hc_mult)
+    first_norm_ops = num_rows * (5 * hc_mult * hc_mult + 2 * hc_mult)
+    eps_ops = 2 * hc_mult * hc_mult if hc_eps != 0 else 0
+    extra_norm_ops = num_rows * max(int(sinkhorn_iters) - 1, 0) * (4 * hc_mult * hc_mult + 2 * hc_mult + eps_ops)
+    collapse_ops = 2 * num_rows * hc_mult * hidden_size
+    cast_ops = x.numel() if x.dtype != torch.float32 else 0
+    output_cast_ops = num_rows * hidden_size if x.dtype != torch.float32 else 0
+    projection_scale_ops = num_rows * mix_width
+    _accumulate_compute_ops(properties, torch.float32, mma_ops=mma_ops)
+    _accumulate_compute_ops(
+        properties,
+        torch.float32,
+        gp_ops=cast_ops + rms_ops + projection_scale_ops + setup_ops + first_norm_ops + extra_norm_ops + collapse_ops,
+    )
+    _accumulate_compute_ops(properties, x.dtype, gp_ops=output_cast_ops)
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.hc_post.default)
 def _(
     op_invoke_info: OpInvokeInfo,
@@ -86,7 +155,6 @@ def _(
     comb_reduce_gp_ops = num_rows * hc_mult * hc_mult * hidden_size * 2
     post_gp_ops = num_rows * hc_mult * hidden_size * 2
     cast_gp_ops = num_rows * hc_mult * hidden_size
-    properties.memory_readwrite_bytes += num_rows * hc_mult * hidden_size * 8
     _accumulate_compute_ops(properties, torch.float32, gp_ops=comb_reduce_gp_ops + post_gp_ops)
     _accumulate_compute_ops(properties, x.dtype, gp_ops=cast_gp_ops)
     return properties

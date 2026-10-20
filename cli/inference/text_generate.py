@@ -15,6 +15,7 @@
 # -------------------------------------------------------------------------
 
 import logging
+import sys
 
 from cli.logo import print_logo
 from cli.registry.argparse_adapter import build_argparser, parse_module_args
@@ -25,6 +26,7 @@ from tensor_cast.core.compilation_config import apply_compilation_config
 
 from ..utils import (
     LOG_FORMAT,
+    argv_has_option,
     draft_method,
     resolve_draft_block_and_acceptance,
 )
@@ -44,8 +46,11 @@ def arg_parse(argv=None):
     """
     spec = get_spec("text_generate")
     parser = build_argparser(spec)
+    raw_argv = list(argv) if argv is not None else None
     args = parse_module_args(spec, parser, argv)
-    resolve_draft_block_and_acceptance(args)
+    effective_argv = raw_argv if raw_argv is not None else sys.argv[1:]
+    args.num_speculative_tokens_explicit = argv_has_option(effective_argv, "--num-speculative-tokens")
+    resolve_draft_block_and_acceptance(args, argv=raw_argv)
     # Bridge --speculative-method mtp --num-speculative-tokens N onto the
     # legacy num_mtp_tokens field so ConfigResolver/MtpWrapper match
     # --num-mtp-tokens N.

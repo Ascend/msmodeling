@@ -71,11 +71,13 @@ class TestTextGenerateDraftSpecCli(TestCase):
         self.assertEqual(args.draft_block_size, 8)
         self.assertEqual(args.dspark_markov_rank, 128)
         self.assertEqual(args.dspark_markov_head, "gated")
+        self.assertTrue(args.num_speculative_tokens_explicit)
 
     def test_builtin_num_speculative_tokens_maps_to_block_eight(self):
         args = self._parse(["--speculative-method=dflash"])
         self.assertEqual(args.num_speculative_tokens, 7)
         self.assertEqual(args.draft_block_size, 8)
+        self.assertFalse(args.num_speculative_tokens_explicit)
 
     def test_g3_dependent_without_method_fails(self):
         with self.assertRaises(SystemExit):

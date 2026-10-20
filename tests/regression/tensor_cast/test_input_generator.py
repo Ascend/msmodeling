@@ -817,7 +817,33 @@ class TestSparseAttentionCacheHelpers:
 
         assert 1 in info["indexer_cache_by_layers"]
         assert info["indexer_cache_by_layers"][1].shape == (4, 16, 128)
-        assert info["indexer_cache_per_token"] > 0
+        assert info["indexer_scale_cache_by_layers"] == {}
+        assert info["indexer_cache_per_token"] == 128 * torch.bfloat16.itemsize
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_get_sparse_attention_indexer_cache_info_v41_counts_scale(self, _mock_attn_quant):
+        model = MagicMock()
+        model.num_hidden_layers = 1
+        model.model_config.mla_config = MagicMock(mla_cls=DeepseekV4SparseAttention)
+        model.model_config.dtype = torch.bfloat16
+        model.model_config.hf_config = SimpleNamespace(model_type="deepseek_v41")
+        model.text_config = SimpleNamespace(
+            model_type="deepseek_v41_text",
+            compress_ratios=[1],
+            kv_source_layer_ids=[0],
+            index_source_layer_ids=[0],
+        )
+        model.unwrap.return_value = SimpleNamespace(
+            layers=[SimpleNamespace(self_attn=MagicMock(use_indexer=True, _index_head_dim=128, indexer=None))]
+        )
+
+        info = get_sparse_attention_indexer_cache_info(model, num_blocks=4, block_size=16)
+
+        assert info["indexer_scale_cache_by_layers"][0].shape == (4, 16, 4)
+        assert info["indexer_cache_per_token"] == (
+            bytes_of_tensor(info["indexer_cache_by_layers"][0])
+            + bytes_of_tensor(info["indexer_scale_cache_by_layers"][0])
+        ) / (4 * 16)
 
 
 class TestBailingV3KvCacheHelpers:
@@ -1206,6 +1232,41 @@ class TestDsparkKvCacheHelpers:
 
         assert tuple(cache_by_layers[0].shape) == (2, 4, 64, 1, 64)
         assert cache_per_token == 2 * 1 * 64 * 2
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_native_deepseek_v41_dspark_uses_single_fp8_latent_window(self, _mock_attn_quant):
+        model_config = SimpleNamespace(
+            dtype=torch.bfloat16,
+            mla_config=None,
+            hf_config=SimpleNamespace(model_type="deepseek_v41"),
+            parallel_config=SimpleNamespace(tensor_parallel_size=8),
+            dspark_config=SimpleNamespace(sliding_window=128, num_draft_layers=3),
+            dflash_config=None,
+            has_draft_spec=lambda: True,
+            draft_num_layers=lambda: 3,
+        )
+        model = SimpleNamespace(
+            num_hidden_layers=3,
+            head_dim=512,
+            text_config=SimpleNamespace(num_key_value_heads=1),
+            model_config=model_config,
+            _inner=SimpleNamespace(
+                draft_hf_config=None,
+                draft=SimpleNamespace(native_dspark=True),
+            ),
+        )
+
+        cache_by_layers, cache_per_token = get_kv_cache_info(
+            model,
+            num_blocks=65,
+            block_size=128,
+            batch_size=1,
+            total_kv_tokens=4096,
+        )
+
+        assert all(tuple(cache.shape) == (1, 128, 512) for cache in cache_by_layers.values())
+        assert all(cache.dtype == torch.float8_e4m3fn for cache in cache_by_layers.values())
+        assert cache_per_token == 3 * 512
 
     def test_dflash_mixed_layer_types_use_per_layer_blocks(self):
         draft_hf = SimpleNamespace(num_key_value_heads=8, head_dim=64, hidden_size=512, num_attention_heads=8)

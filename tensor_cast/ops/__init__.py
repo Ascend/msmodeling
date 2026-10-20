@@ -20,6 +20,7 @@ from . import (  # noqa: F401
     cat,
     communication,
     deepseek_v4,
+    deepseek_v41,
     fused_moe,
     gmm,
     glm5_next,

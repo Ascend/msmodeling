@@ -2580,13 +2580,28 @@ def _estimate_default_without_static_cost(
     memory_write_time_s = perf_properties.memory_write_bytes / memory_bandwidth
     memory_readwrite_time_s = perf_properties.memory_readwrite_bytes / memory_bandwidth
     memory_access_time_s = memory_read_time_s + memory_write_time_s + memory_readwrite_time_s
-    time_s = max(compute_time_s, memory_access_time_s)
+    h2d_bandwidth = device_profile.host_bandwidth_bytes_ps * device_profile.host_transfer_efficiency
+    h2d_time_s = 0.0
+    if perf_properties.host_to_device_bytes:
+        if h2d_bandwidth <= 0:
+            raise ValueError(
+                f"Host-to-device bandwidth is required for {op_invoke_info.func} "
+                f"with {perf_properties.host_to_device_bytes} transfer bytes on {device_profile.name}"
+            )
+        h2d_time_s = device_profile.host_latency_s + perf_properties.host_to_device_bytes / h2d_bandwidth
+    device_work_time_s = max(compute_time_s, memory_access_time_s)
+    time_s = (
+        h2d_time_s + device_work_time_s
+        if perf_properties.host_to_device_serial
+        else max(device_work_time_s, h2d_time_s)
+    )
     result = PerformanceModel.Result(
         execution_time_s=time_s,
         statistics={
             "memory_read_time_s": memory_read_time_s,
             "memory_write_time_s": memory_write_time_s,
             "memory_readwrite_time_s": memory_readwrite_time_s,
+            "host_to_device_time_s": h2d_time_s,
             StatsKey.MEMORY_ACCESS: memory_access_time_s,
             StatsKey.COMPUTE: compute_time_s,
             StatsKey.MMA_OPS: mma_ops_time_s,

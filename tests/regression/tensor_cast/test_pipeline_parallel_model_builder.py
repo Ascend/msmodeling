@@ -1840,6 +1840,8 @@ def test_model_runner_uses_pipeline_provided_activation_when_present():
     )
     runner.total_device_memory_gb = 16.0
     runner.model_weight_size_gb = 1.0
+    runner.engram_host_resident_size_gb = 0.0
+    runner.engram_host_resident_per_rank_gb = 0.0
     runner.perf_models = [SimpleNamespace(name="constant")]
     pipeline_result = PipelineRunResult(
         logits=torch.empty(1, 4, 32, device="meta"),
@@ -1863,6 +1865,8 @@ def test_model_runner_uses_pipeline_provided_activation_when_present():
     )
 
     assert metrics.model_activation_size_gb == 88.0
+    assert metrics.engram_host_resident_size_gb == 0.0
+    assert metrics.engram_host_resident_per_rank_gb == 0.0
     # peak is not rewritten by a clamp when activation comes from the PP path.
     assert metrics.peak_memory_usage_gb == 100.0
 
@@ -1921,6 +1925,8 @@ def test_model_runner_builds_metrics_from_pipeline_result():
     )
     runner.total_device_memory_gb = 16.0
     runner.model_weight_size_gb = 1.0
+    runner.engram_host_resident_size_gb = 8.0
+    runner.engram_host_resident_per_rank_gb = 2.0
     runner.perf_models = [SimpleNamespace(name="constant")]
     pipeline_result = PipelineRunResult(
         logits=torch.empty(1, 4, 32, device="meta"),
@@ -1947,6 +1953,8 @@ def test_model_runner_builds_metrics_from_pipeline_result():
     assert metrics.peak_memory_usage_gb == 4.0
     assert metrics.kv_cache_size_gb == 1.5
     assert metrics.model_weight_size_gb == 1.0
+    assert metrics.engram_host_resident_size_gb == 8.0
+    assert metrics.engram_host_resident_per_rank_gb == 2.0
     assert metrics.model_activation_size_gb == 1.5
     assert metrics.device_memory_available_gb == 11.5
     assert metrics.table_result == "pipeline table"

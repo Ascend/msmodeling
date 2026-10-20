@@ -277,6 +277,38 @@ def test_glm51_sequence_parallel_reuses_mlp_submodules_only(monkeypatch):
     assert all(isinstance(layer.mlp, CopyLayerWrapper) for layer in layers[1:])
 
 
+@pytest.mark.parametrize("model_type", ["deepseek_v41", "deepseek_v41_text"])
+def test_deepseek_v41_reuses_mlp_only_and_deduplicates_language_layers(monkeypatch, model_type):
+    class FakeMlp(torch.nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states
+
+    class FakeLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = FakeMlp()
+
+    layers = torch.nn.ModuleList([FakeLayer() for _ in range(4)])
+    hf_config = SimpleNamespace(model_type=model_type)
+    unwrapped = SimpleNamespace(layers=layers)
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(enable_repetition=True),
+        is_vl_model=True,
+        _inner=SimpleNamespace(hf_config=hf_config),
+        hf_config=hf_config,
+        unwrap=lambda: unwrapped,
+    )
+    monkeypatch.setattr("tensor_cast.transformers.transformations.get_visual_layers", lambda _model: None)
+    monkeypatch.setattr("tensor_cast.transformers.transformations.get_language_layers", lambda _model_type: "layers")
+
+    maybe_reuse_layers(model)
+
+    assert all(not isinstance(layer, (RegionMarkerWrapper, CopyLayerWrapper)) for layer in layers)
+    assert isinstance(layers[0].mlp, RegionMarkerWrapper)
+    assert layers[0].mlp.repeat_count == 4
+    assert all(isinstance(layer.mlp, CopyLayerWrapper) for layer in layers[1:])
+
+
 class RepetitionTestMixin:
     _model_cache: dict = {}
 

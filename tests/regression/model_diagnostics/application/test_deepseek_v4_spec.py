@@ -19,7 +19,7 @@
 from dataclasses import replace
 
 from tools.model_diagnostics import create_model_diagnostics_application
-from tools.model_diagnostics.domain import OUTPUT, ExecutionPhase, ModelRunContext, ParallelContext
+from tools.model_diagnostics.domain import INPUT, OUTPUT, ExecutionPhase, ModelRunContext, ParallelContext
 from tools.model_diagnostics.organization.theory import build_theory_regions, flatten_theory_calls
 
 
@@ -78,7 +78,16 @@ def test_deepseek_v4_theory_uses_packed_token_layout() -> None:
     }
 
     assert outputs["theory:input:embedding:embedding"] == (1, 6, 4096)
-    assert outputs["theory:language:L0:hc_pre_attention:hc_pre_sinkhorn"] == (1, 6, 4096)
+    assert outputs["theory:language:L0:hc_pre_attention:hc_pre_v3"] == (1, 6, 4096)
+    assert outputs["theory:language:L0:hc_pre_moe:hc_pre_v3"] == (1, 6, 4096)
+    hc_calls = [call for call in calls if call.operator_name == "hc_pre_v3"]
+    assert len(hc_calls) == 2
+    for call in hc_calls:
+        tensors = {tensor.slot: tensor for tensor in call.tensors}
+        assert tensors[INPUT[1]].shape == (24, 16384)
+        assert tensors[OUTPUT[1]].shape == (1, 6, 4)
+        assert tensors[OUTPUT[2]].shape == (1, 6, 4, 4)
+        assert tensors[OUTPUT[1]].dtype == tensors[OUTPUT[2]].dtype == "float32"
     assert outputs["theory:language:L0:sparse_attention:sparse_attn_sharedkv"] == (1, 6, 16, 512)
     assert outputs["theory:language:L0:hc_post_attention:hc_post"] == (1, 6, 4, 4096)
     assert outputs["theory:language:L0:moe_experts:grouped_matmul_swiglu"] == (48, 2048)

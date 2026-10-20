@@ -547,6 +547,71 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
 
         return kv_for_attn, kv_attn_handle
 
+    def _publish_v41_source(
+        self,
+        hidden_states,
+        compressed_cache,
+        compressed_scale_cache,
+        index_cache,
+        index_scale_cache,
+        attention_meta,
+        state,
+        source_id,
+    ):
+        """Publish both cache branches from one unrotated CSA2 latent."""
+        compressor = self._inner.compressor
+        indexer = self._inner.indexer
+        ratio = int(self.compress_ratio)
+        start_pos = int(getattr(attention_meta, "start_pos", 0) or 0)
+        slots = getattr(attention_meta, "compressed_slot_mapping", None)
+        tail = state.get_compressor_tail(source_id) if state is not None else None
+        latent, _, tail_kv, tail_scores = torch.ops.tensor_cast.csa2_compressor_v2(
+            hidden_states,
+            compressed_cache,
+            ratio,
+            self._head_dim,
+            self._qk_rope_head_dim,
+            False,
+            getattr(attention_meta, "seq_lens", None),
+            getattr(attention_meta, "query_lens", None),
+            tail.pending_tokens if tail is not None else None,
+            tail.pending_scores if tail is not None else None,
+            start_pos,
+            slots,
+            compressor.wkv.weight,
+            compressor.wgate.weight if compressor.wgate is not None else None,
+            None,
+        )
+        if state is not None:
+            state.update_compressor_tail(source_id, tail_kv, tail_scores)
+        latent = torch.ops.tensor_cast.rms_norm(latent, compressor.norm.weight, self._inner.config.rms_norm_eps)
+
+        index_key = torch.mm(latent.reshape(-1, latent.shape[-1]), indexer.wk.weight.transpose(0, 1)).reshape(
+            *latent.shape[:-1], indexer.wk.weight.shape[0]
+        )
+        index_key = torch.ops.tensor_cast.rms_norm(index_key, indexer.k_norm.weight, self._inner.config.rms_norm_eps)
+        index_key = torch.ops.tensor_cast.csa2_compressed_rope(
+            index_key, self._qk_rope_head_dim, ratio, start_pos, self._inner.config.compress_rope_theta
+        )
+        index_payload, index_scale = torch.ops.tensor_cast.fp4_kv_quantize(index_key, 32, torch.float8_e8m0fnu)
+        index_cache = torch.ops.tensor_cast.csa2_cache_update(index_cache, index_payload, slots)
+        if index_scale_cache is not None:
+            index_scale_cache = torch.ops.tensor_cast.csa2_cache_update(index_scale_cache, index_scale, slots)
+
+        long_key = torch.ops.tensor_cast.csa2_compressed_rope(
+            latent, self._qk_rope_head_dim, ratio, start_pos, self._inner.config.compress_rope_theta
+        )
+        long_payload, long_scale = torch.ops.tensor_cast.fp4_kv_quantize(long_key, 16, torch.float8_e4m3fn)
+        compressed_cache = torch.ops.tensor_cast.csa2_cache_update(compressed_cache, long_payload, slots)
+        if compressed_scale_cache is not None:
+            compressed_scale_cache = torch.ops.tensor_cast.csa2_cache_update(compressed_scale_cache, long_scale, slots)
+        if state is not None:
+            state.index_k_by_source[source_id] = index_cache
+            state.index_k_scale_by_source[source_id] = index_scale_cache
+            state.compressed_kv_by_source[source_id] = compressed_cache
+            state.compressed_kv_scale_by_source[source_id] = compressed_scale_cache
+        return compressed_cache, compressed_scale_cache, index_cache, index_scale_cache
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -557,14 +622,72 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         **kwargs,
     ) -> tuple[torch.Tensor, None]:
         kv_cache_by_layers = kwargs.pop("kv_cache_by_layers", None)
+        compressed_kv_cache_by_source = kwargs.pop("compressed_kv_cache_by_source", None)
+        compressed_kv_scale_cache_by_source = kwargs.pop("compressed_kv_scale_cache_by_source", None)
+        csa2_cache_ownership = kwargs.pop("csa2_cache_ownership", None)
+        csa2_state = kwargs.get("csa2_state")
         indexer_cache_by_layers = kwargs.pop("indexer_cache_by_layers", None)
+        indexer_scale_cache_by_layers = kwargs.pop("indexer_scale_cache_by_layers", None)
         kv_cache = kv_cache_by_layers[self.layer_idx] if kv_cache_by_layers else None
+        csa2_source_id = getattr(self, "kv_owner_layer_id", self.layer_idx)
+        is_v41_config = getattr(getattr(self._inner, "config", None), "model_type", None) in (
+            "deepseek_v41",
+            "deepseek_v41_text",
+        )
+        if is_v41_config:
+            # Resolve the absolute physical owner before looking up either
+            # cache stream.  Meta tracing may not have executed the source
+            # layer's Python state publication yet, so cache lookup must not
+            # depend on ``csa2_state.compressed_kv_by_source`` being populated.
+            owner_map = (
+                csa2_cache_ownership.get("compressed_kv_owner_by_layer", {})
+                if isinstance(csa2_cache_ownership, dict)
+                else {}
+            )
+            mapped_owner = owner_map.get(self.layer_idx)
+            if mapped_owner is not None:
+                csa2_source_id = int(mapped_owner)
+            elif getattr(self, "csa2_role", None) is not None:
+                role_owner = getattr(self.csa2_role, "compressed_kv_owner", None)
+                if role_owner is not None:
+                    csa2_source_id = int(role_owner)
+            if csa2_source_id is None:
+                csa2_source_id = self.layer_idx
+        compressed_kv_cache = (
+            compressed_kv_cache_by_source.get(csa2_source_id)
+            if compressed_kv_cache_by_source and csa2_source_id is not None
+            else None
+        )
+        if is_v41_config and compressed_kv_cache is None and compressed_kv_cache_by_source:
+            # Preserve the fallback when a source cache is absent; V4.1 wrappers
+            # normally resolve this owner during module construction.
+            config = getattr(self._inner, "config", None)
+            sources = tuple(int(x) for x in getattr(config, "kv_source_layer_ids", ()))
+            prior_sources = tuple(x for x in sources if x <= int(self.layer_idx))
+            owner = max(prior_sources) if prior_sources else None
+            if owner is not None:
+                csa2_source_id = owner
+                compressed_kv_cache = compressed_kv_cache_by_source.get(owner)
+        compressed_kv_scale_cache = (
+            compressed_kv_scale_cache_by_source.get(csa2_source_id)
+            if compressed_kv_scale_cache_by_source and csa2_source_id is not None
+            else None
+        )
+        if is_v41_config and compressed_kv_scale_cache is None and compressed_kv_scale_cache_by_source:
+            compressed_kv_scale_cache = compressed_kv_scale_cache_by_source.get(csa2_source_id)
         indexer_cache = (
             indexer_cache_by_layers[self.layer_idx]
             if indexer_cache_by_layers and self.layer_idx in indexer_cache_by_layers
             else None
         )
+        if hidden_states.ndim == 2:
+            hidden_states = hidden_states.unsqueeze(0)
+        if hidden_states.ndim != 3:
+            raise RuntimeError(
+                f"DeepSeek V4 attention L{self.layer_idx} expected [B,S,D], got {tuple(hidden_states.shape)}"
+            )
         batch_size, seq_length = hidden_states.shape[:-1]
+        is_v41 = is_v41_config
         cos, sin = position_embeddings
         rd = self._qk_rope_head_dim
         head_dim = self._head_dim
@@ -572,7 +695,8 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
 
         # --- Q path (reference model.py:495-499) ---
         # Keep the decoder-layer attn_norm boundary explicit; Q path itself then
-        # starts from wq_a -> q_norm -> wq_b -> per-head rsqrt -> RoPE.
+        # starts from wq_a -> q_norm -> wq_b -> RoPE. V4 additionally applies
+        # per-head inverse RMS after wq_b; V4.1 does not.
         q_a = apply_static_quant_linear(hidden_states, self.q_a_proj)
         q_a_normed = torch.ops.tensor_cast.rms_norm(
             q_a,
@@ -582,7 +706,8 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         q_proj = apply_static_quant_linear(q_a_normed, self.q_b_proj)
         n_local_heads = exact_division(q_proj.shape[-1], head_dim)
         q_states = q_proj.view(batch_size, seq_length, n_local_heads, head_dim)
-        q_states *= torch.rsqrt(q_states.square().mean(-1, keepdim=True) + 1e-6).to(q_states.dtype)
+        if not is_v41:
+            q_states *= torch.rsqrt(q_states.square().mean(-1, keepdim=True) + 1e-6).to(q_states.dtype)
 
         # Keep the op input/output at full head width (512 in V4) so memory
         # traffic matches the reference tensor shape; only the trailing `rd`
@@ -624,7 +749,14 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         # the per-pass cost via `dynamic_quantize_symmetric` (FP8 e4m3fn), then
         # write the quantized values back into the same slice so the graph keeps
         # a real data dependency on the KV act-quant producer chain.
-        if self.quant_config is None:
+        if is_v41:
+            kv_window_entry, _ = torch.ops.tensor_cast.dynamic_quantize_symmetric(
+                kv_normed,
+                [-1],
+                scale_dtype=torch.float32,
+                out_dtype=torch.float8_e4m3fn,
+            )
+        elif self.quant_config is None:
             kv_nope_quant, _ = torch.ops.tensor_cast.dynamic_quantize_symmetric(
                 kv_normed[..., :-rd],
                 [-1],
@@ -679,6 +811,46 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         meta_query_lens = attention_meta.query_lens if attention_meta is not None else None
         meta_seq_lens = attention_meta.seq_lens if attention_meta is not None else None
         is_decode = _is_decode_attention_batch(sl, attention_meta, batch_size)
+        role = getattr(self, "csa2_role", None) if is_v41 else None
+        indexer_scale_cache = (
+            indexer_scale_cache_by_layers[self.layer_idx]
+            if indexer_scale_cache_by_layers and self.layer_idx in indexer_scale_cache_by_layers
+            else None
+        )
+        if is_v41:
+            slot_mapping = attention_meta.slot_mapping if attention_meta is not None else None
+            if is_decode:
+                kv_for_attn = kv_window_entry
+                kv_attn_handle = (
+                    torch.ops.tensor_cast.scatter_nd_update_mla(
+                        kv_window_entry, kv_cache, slot_mapping, sl, meta_seq_lens
+                    )
+                    if kv_cache is not None
+                    else kv_window_entry
+                )
+                kv_for_attn = kv_attn_handle
+            else:
+                kv_for_attn, kv_attn_handle = self._scatter_window_kv_prefill(
+                    kv_window_entry, kv_cache, slot_mapping, sl, meta_seq_lens
+                )
+            if (
+                role is not None
+                and role.owns_compressed_kv
+                and compressed_kv_cache is not None
+                and indexer_cache is not None
+            ):
+                compressed_kv_cache, compressed_kv_scale_cache, indexer_cache, indexer_scale_cache = (
+                    self._publish_v41_source(
+                        hidden_states,
+                        compressed_kv_cache,
+                        compressed_kv_scale_cache,
+                        indexer_cache,
+                        indexer_scale_cache,
+                        attention_meta,
+                        csa2_state,
+                        csa2_source_id,
+                    )
+                )
 
         # 1. window topk (model.py:507). Keep the full construction in tensor
         # ops so torch.compile does not pull query_lens / seq_lens back through
@@ -689,18 +861,39 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         # (ratio==128), then cat with window topk (model.py:508-514).
         if self.compress_ratio:
             R = int(self.compress_ratio)
-            if self.use_indexer and self.indexer is not None and indexer_cache is not None:
+            reuse_topk = (
+                is_v41
+                and csa2_state is not None
+                and role is not None
+                and role.topk_owner is not None
+                and role.topk_owner != role.layer_id
+            )
+            if reuse_topk:
+                compress_topk_indices = csa2_state.require_topk(role.topk_owner)
+            elif self.use_indexer and self.indexer is not None and indexer_cache is not None:
                 # Keep the indexer branch anchored to the post-KV tensor so
                 # torch.compile cannot DCE or hoist the learned-indexer segment.
                 indexer_hidden_states = hidden_states + kv_window_entry[..., :1].to(hidden_states.dtype) * 0
                 indexer_q_a_normed = q_a_normed + kv_window_entry[..., :1].to(q_a_normed.dtype) * 0
-                compress_topk_indices = self.indexer(
+                if is_v41 and csa2_state is not None and role is not None:
+                    owner = role.index_k_owner
+                    indexer_cache = csa2_state.index_k_by_source.get(owner, indexer_cache)
+                    indexer_scale_cache = csa2_state.index_k_scale_by_source.get(owner, indexer_scale_cache)
+                index_result = self.indexer(
                     indexer_hidden_states,
                     indexer_q_a_normed,
                     position_embeddings,
                     indexer_cache,
                     attention_meta=attention_meta,
+                    candidate_mask=(csa2_state.candidate_mask if is_v41 and csa2_state is not None else None),
+                    indexer_scale_cache=indexer_scale_cache,
                 )
+                if is_v41:
+                    compress_topk_indices, candidates = index_result
+                    if role is not None and role.produces_candidate_pool and csa2_state is not None:
+                        csa2_state.candidate_mask = candidates
+                else:
+                    compress_topk_indices = index_result
             else:
                 compress_topk_indices = get_compress_topk_idxs(
                     R,
@@ -713,6 +906,31 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                     # compressor/perf paths still receive per-request seq_lens
                     # and query_lens for row-count modeling.
                     total_seq_length=_resolve_max_total_seq_len(attention_meta),
+                )
+            if is_v41:
+                # CSA2 attention always consumes at most index_topk compressed
+                # positions.  Do not let a missing producer state fall back to
+                # the full compressed context (which created 2176/4224-wide
+                # gather inputs in the earlier trace).
+                index_topk = int(getattr(getattr(self._inner, "config", None), "index_topk", 512))
+                if compress_topk_indices.shape[-1] > index_topk:
+                    compress_topk_indices = compress_topk_indices[..., :index_topk]
+                elif compress_topk_indices.shape[-1] < index_topk:
+                    compress_topk_indices = torch.nn.functional.pad(
+                        compress_topk_indices,
+                        (0, index_topk - compress_topk_indices.shape[-1]),
+                        value=-1,
+                    )
+            if is_v41 and csa2_state is not None and role is not None and role.topk_owner == role.layer_id:
+                csa2_state.publish_topk(role.layer_id, compress_topk_indices)
+            # The first stream occupies the window position domain.  Prefixing
+            # compressed indices with the window width makes the two physical
+            # streams unambiguous to sparse_index_gather_attention.
+            if is_v41:
+                compress_topk_indices = torch.ops.tensor_cast.csa2_prepare_indices(
+                    compress_topk_indices,
+                    position_embeddings[0],
+                    topk_indices.shape[-1],
                 )
             topk_indices = torch.cat([topk_indices, compress_topk_indices], dim=-1)
 
@@ -732,9 +950,15 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                 "kv_quant_dtype": self.quant_config.get_quant_dtype(),
                 "rope_head_dim": rd,
             }
-
         # 4-6. scatter + compressor + sparse_attn (model.py:518-533).
         slot_mapping = attention_meta.slot_mapping if attention_meta is not None else None
+        window_valid_len = (
+            torch.clamp(meta_seq_lens, max=W)
+            if meta_seq_lens is not None
+            else torch.full((batch_size,), min(sl, W), dtype=torch.long, device=hidden_states.device)
+        )
+        published_compressed_stream = None
+        published_compressed_scale_stream = None
 
         if not is_decode:
             # Prefill: reference attention consumes freshly-built `kv`, but keep
@@ -742,50 +966,149 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
             # entire KV producer chain stays live. Feed sparse_attn a payload
             # whose visible data matches `[window | compressed]` while its dtype
             # / meta shape comes from the post-scatter/cache path.
-            kv_for_attn, kv_attn_handle = self._scatter_window_kv_prefill(
-                kv_window_entry,
-                kv_cache,
-                slot_mapping,
-                sl,
-                meta_seq_lens,
-            )
+            if not is_v41:
+                kv_for_attn, kv_attn_handle = self._scatter_window_kv_prefill(
+                    kv_window_entry,
+                    kv_cache,
+                    slot_mapping,
+                    sl,
+                    meta_seq_lens,
+                )
             # On ratio>0 layers, chain the compressor to the post-scatter cache
             # and concat the compressed KV so sparse_attn sees [window|compressed].
-            if self.use_compressor and kv_cache is not None:
-                kv_compress, kv_cache = torch.ops.tensor_cast.compressor(
+            if self.use_compressor and kv_cache is not None and not is_v41:
+                compressor_op = (
+                    torch.ops.tensor_cast.csa2_compressor
+                    if getattr(getattr(self._inner, "config", None), "model_type", None)
+                    in ("deepseek_v41", "deepseek_v41_text")
+                    else torch.ops.tensor_cast.compressor
+                )
+                compressor_args_cache = (
+                    (compressed_kv_cache if compressed_kv_cache is not None else kv_cache)
+                    if compressor_op == torch.ops.tensor_cast.csa2_compressor
+                    else kv_cache
+                )
+                compressor_result = compressor_op(
                     hidden_states,
-                    kv_cache,
+                    compressor_args_cache,
                     self.compress_ratio,
                     head_dim,
                     rd,
                     False,
-                    meta_seq_lens,
+                    window_valid_len,
                     meta_query_lens,
+                    *(
+                        (
+                            csa2_state.get_compressor_tail(csa2_source_id).pending_tokens,
+                            csa2_state.get_compressor_tail(csa2_source_id).pending_scores,
+                            int(getattr(attention_meta, "start_pos", 0) or 0),
+                            getattr(attention_meta, "compressed_slot_mapping", None),
+                        )
+                        if compressor_op == torch.ops.tensor_cast.csa2_compressor and csa2_state is not None
+                        else ()
+                    ),
                 )
-                kv_for_attn = torch.cat([kv_for_attn, kv_compress], dim=1)
-                kv_attn_handle = kv_cache
+                if compressor_op == torch.ops.tensor_cast.csa2_compressor:
+                    kv_compress, compressed_kv_cache, tail_kv, tail_scores = compressor_result
+                    kv_compress = torch.ops.tensor_cast.csa2_compressed_rope(
+                        kv_compress,
+                        rd,
+                        int(self.compress_ratio),
+                        int(getattr(attention_meta, "start_pos", 0) or 0),
+                        float(
+                            getattr(
+                                getattr(self._inner, "config", None),
+                                "compress_rope_theta",
+                                160000.0,
+                            )
+                        ),
+                    )
+                    fp4_payload, fp4_scale = torch.ops.tensor_cast.fp4_kv_quantize(kv_compress, 16, torch.float8_e4m3fn)
+                    published_compressed_stream = fp4_payload
+                    published_compressed_scale_stream = fp4_scale
+                    if csa2_state is not None:
+                        csa2_state.update_compressor_tail(csa2_source_id, tail_kv, tail_scores)
+                        csa2_state.publish_compressed_kv(csa2_source_id, fp4_payload)
+                        csa2_state.publish_compressed_kv_scale(csa2_source_id, fp4_scale)
+                        if getattr(attention_meta, "compressed_slot_mapping", None) is not None:
+                            csa2_state.publish_compressed_slot_mapping(
+                                csa2_source_id, attention_meta.compressed_slot_mapping
+                            )
+                else:
+                    kv_compress, kv_cache = compressor_result
+                if not is_v41:
+                    kv_for_attn = torch.cat([kv_for_attn, kv_compress], dim=1)
+                    kv_attn_handle = (
+                        compressed_kv_cache if compressor_op == torch.ops.tensor_cast.csa2_compressor else kv_cache
+                    )
+            elif csa2_state is not None and csa2_source_id is not None and not is_v41:
+                kv_for_attn = torch.cat([kv_for_attn, csa2_state.require_compressed_kv(csa2_source_id)], dim=1)
             # Bind the post-write cache handle to sparse_attn_sharedkv so
             # torch.compile cannot DCE the upstream cache-update chain
             # (wkv -> kv_norm -> RoPE -> scatter -> compressor).
             # This avoids materializing a full-cache elementwise add.
-            attn_output = attention_op(
-                q_states,
-                kv_for_attn,
-                attn_sink,
-                topk_indices,
-                softmax_scale,
-                head_dim,
-                kv_dependency=kv_attn_handle,
-                **attention_quant_kwargs,
-            )
+            if is_v41:
+                candidate_mask = None
+                compressed_stream = (
+                    csa2_state.compressed_kv_by_source.get(csa2_source_id)
+                    if is_v41 and csa2_state is not None
+                    else compressed_kv_cache
+                )
+                if compressed_stream is None:
+                    compressed_stream = compressed_kv_cache
+                if published_compressed_stream is not None:
+                    compressed_stream = published_compressed_stream
+                compressed_scale_stream = (
+                    csa2_state.compressed_kv_scale_by_source.get(csa2_source_id)
+                    if is_v41 and csa2_state is not None
+                    else compressed_kv_scale_cache
+                )
+                if compressed_scale_stream is None:
+                    compressed_scale_stream = compressed_kv_scale_cache
+                if published_compressed_scale_stream is not None:
+                    compressed_scale_stream = published_compressed_scale_stream
+                compressed_valid_len = (
+                    meta_seq_lens // max(int(self.compress_ratio), 1)
+                    if compressed_stream is not None and meta_seq_lens is not None
+                    else None
+                )
+                attn_output = torch.ops.tensor_cast.sparse_index_gather_attention(
+                    q_states,
+                    kv_for_attn,
+                    compressed_stream,
+                    topk_indices,
+                    attn_sink,
+                    softmax_scale,
+                    head_dim,
+                    window_valid_len,
+                    compressed_valid_len,
+                    candidate_mask,
+                    kv_attn_handle,
+                    compressed_scale_stream,
+                    16,
+                    self.layer_idx,
+                    hidden_states.dtype,
+                )
+            else:
+                attn_output = attention_op(
+                    q_states,
+                    kv_for_attn,
+                    attn_sink,
+                    topk_indices,
+                    softmax_scale,
+                    head_dim,
+                    kv_dependency=kv_attn_handle,
+                    **attention_quant_kwargs,
+                )
         else:
             # Decode (incl. packed multi-decode where sl=N>1 with all
             # query_lens==1): write `sl` rows (one per per-request decode
             # token), then route sparse_attn through the post-write handle so
             # scatter/compressor and their upstream KV producers remain in the
             # compiled graph.
-            kv_for_attn = kv_window_entry
-            if kv_cache is not None:
+            if not is_v41:
+                kv_for_attn = kv_window_entry
+            if kv_cache is not None and not is_v41:
                 kv_cache = torch.ops.tensor_cast.scatter_nd_update_mla(
                     kv_window_entry,
                     kv_cache,
@@ -794,27 +1117,124 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                     meta_seq_lens,
                 )
                 kv_for_attn = kv_cache
-            if self.use_compressor and kv_cache is not None:
-                _, kv_cache = torch.ops.tensor_cast.compressor(
+            if self.use_compressor and kv_cache is not None and not is_v41:
+                compressor_op = (
+                    torch.ops.tensor_cast.csa2_compressor
+                    if getattr(getattr(self._inner, "config", None), "model_type", None)
+                    in ("deepseek_v41", "deepseek_v41_text")
+                    else torch.ops.tensor_cast.compressor
+                )
+                compressor_args_cache = (
+                    (compressed_kv_cache if compressed_kv_cache is not None else kv_cache)
+                    if compressor_op == torch.ops.tensor_cast.csa2_compressor
+                    else kv_cache
+                )
+                compressor_result = compressor_op(
                     hidden_states,
-                    kv_cache,
+                    compressor_args_cache,
                     self.compress_ratio,
                     head_dim,
                     rd,
                     False,
-                    meta_seq_lens,
+                    window_valid_len,
                     meta_query_lens,
+                    *(
+                        (
+                            csa2_state.get_compressor_tail(csa2_source_id).pending_tokens,
+                            csa2_state.get_compressor_tail(csa2_source_id).pending_scores,
+                            int(getattr(attention_meta, "start_pos", 0) or 0),
+                            getattr(attention_meta, "compressed_slot_mapping", None),
+                        )
+                        if compressor_op == torch.ops.tensor_cast.csa2_compressor and csa2_state is not None
+                        else ()
+                    ),
                 )
-                kv_for_attn = kv_cache
-            attn_output = attention_op(
-                q_states,
-                kv_for_attn,
-                attn_sink,
-                topk_indices,
-                softmax_scale,
-                head_dim,
-                **attention_quant_kwargs,
-            )
+                if compressor_op == torch.ops.tensor_cast.csa2_compressor:
+                    kv_compress, compressed_kv_cache, tail_kv, tail_scores = compressor_result
+                    kv_compress = torch.ops.tensor_cast.csa2_compressed_rope(
+                        kv_compress,
+                        rd,
+                        int(self.compress_ratio),
+                        int(getattr(attention_meta, "start_pos", 0) or 0),
+                        float(
+                            getattr(
+                                getattr(self._inner, "config", None),
+                                "compress_rope_theta",
+                                160000.0,
+                            )
+                        ),
+                    )
+                    fp4_payload, fp4_scale = torch.ops.tensor_cast.fp4_kv_quantize(kv_compress, 16, torch.float8_e4m3fn)
+                    published_compressed_stream = fp4_payload
+                    published_compressed_scale_stream = fp4_scale
+                    if csa2_state is not None:
+                        csa2_state.update_compressor_tail(csa2_source_id, tail_kv, tail_scores)
+                        csa2_state.publish_compressed_kv(csa2_source_id, fp4_payload)
+                        csa2_state.publish_compressed_kv_scale(csa2_source_id, fp4_scale)
+                        if getattr(attention_meta, "compressed_slot_mapping", None) is not None:
+                            csa2_state.publish_compressed_slot_mapping(
+                                csa2_source_id, attention_meta.compressed_slot_mapping
+                            )
+                    # Decode attention consumes the window cache handle; the
+                    # compressed source is bound as an explicit dependency
+                    # until the sparse gather op accepts separate streams.
+                    kv_for_attn = kv_for_attn
+                    kv_attn_handle = compressed_kv_cache
+                else:
+                    _, kv_cache = compressor_result
+                    kv_for_attn = kv_cache
+            if is_v41:
+                candidate_mask = None
+                compressed_stream = (
+                    csa2_state.compressed_kv_by_source.get(csa2_source_id)
+                    if is_v41 and csa2_state is not None
+                    else compressed_kv_cache
+                )
+                if compressed_stream is None:
+                    compressed_stream = compressed_kv_cache
+                if published_compressed_stream is not None:
+                    compressed_stream = published_compressed_stream
+                compressed_scale_stream = (
+                    csa2_state.compressed_kv_scale_by_source.get(csa2_source_id)
+                    if is_v41 and csa2_state is not None
+                    else compressed_kv_scale_cache
+                )
+                if compressed_scale_stream is None:
+                    compressed_scale_stream = compressed_kv_scale_cache
+                if published_compressed_scale_stream is not None:
+                    compressed_scale_stream = published_compressed_scale_stream
+                compressed_valid_len = (
+                    meta_seq_lens // max(int(self.compress_ratio), 1)
+                    if compressed_stream is not None and meta_seq_lens is not None
+                    else None
+                )
+                attn_output = torch.ops.tensor_cast.sparse_index_gather_attention(
+                    q_states,
+                    kv_for_attn,
+                    compressed_stream,
+                    topk_indices,
+                    attn_sink,
+                    softmax_scale,
+                    head_dim,
+                    meta_seq_lens,
+                    compressed_valid_len,
+                    candidate_mask,
+                    kv_attn_handle if "kv_attn_handle" in locals() else None,
+                    compressed_scale_stream,
+                    16,
+                    self.layer_idx,
+                    hidden_states.dtype,
+                )
+            else:
+                attn_output = attention_op(
+                    q_states,
+                    kv_for_attn,
+                    attn_sink,
+                    topk_indices,
+                    softmax_scale,
+                    head_dim,
+                    **attention_quant_kwargs,
+                )
         # attn_output: [batch_size, seq_length, n_local_heads, head_dim]
 
         # Inverse RoPE on o[..., -rd:] (model.py:534, in-place).
@@ -910,6 +1330,8 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         indexer_cache: torch.Tensor,
         attention_meta: Optional[AttentionMetadataBase] = None,
+        candidate_mask: Optional[torch.Tensor] = None,
+        indexer_scale_cache: Optional[torch.Tensor] = None,
     ):
         # Mirrors reference `Indexer.forward` (deepseek-ai/DeepSeek-V4-Flash/
         # inference/model.py:402-433) op-for-op so the cost trace tracks the
@@ -940,25 +1362,42 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
         q_proj = apply_static_quant_linear(qa_normed, self.wq_b)
         num_local_heads = exact_division(q_proj.shape[-1], self.head_dim)
         q_states = q_proj.view(batch_size, seq_length, num_local_heads, self.head_dim)
-        # Keep the indexer q tensor at full head width for RoPE I/O shape
-        # parity with the reference; only the trailing `rd` channels rotate.
-        torch.ops.tensor_cast.apply_rope_inplace(q_states, cos, sin, True, False, rd)
+        is_v41_indexer = getattr(getattr(self._inner, "config", None), "model_type", None) in (
+            "deepseek_v41",
+            "deepseek_v41_text",
+        )
+        if is_v41_indexer:
+            config = getattr(self._inner, "config", None)
+            q_states = torch.ops.tensor_cast.csa2_compressed_rope(
+                q_states,
+                rd,
+                1,
+                int(getattr(attention_meta, "start_pos", 0) or 0),
+                float(getattr(config, "compress_rope_theta", 160000.0)),
+            )
+            query_payload, query_scale = torch.ops.tensor_cast.csa2_query_quant(q_states, 32)
+        else:
+            torch.ops.tensor_cast.apply_rope_inplace(q_states, cos, sin, True, False, rd)
 
-        # `rotate_activation(q)` and `fp4_act_quant(q)` (reference model.py:414-416)
-        # are pointwise, shape-preserving stages. tensor_cast has no standalone
-        # semantic op for either — instead, both their FLOPs/bytes are charged
-        # inside the `quant_lightning_indexer` cost model below over the full
-        # (batch, seq_len, num_heads, head_dim) q tensor. We deliberately do not
-        # emit a separate trace event for them so the chrome trace shape stays
-        # identical to the reference, but the modeled latency does include them.
+        # Query FP4 quant/dequant is shape-preserving and charged by the
+        # indexer semantic operator over the full query tensor.
 
         # `self.compressor(x, start_pos)` — runs AFTER the q-side ops, matching
         # reference model.py:417. Writes the indexer-local compressed KV cache
         # used by the einsum below; rebind `indexer_cache` from the compressor
         # return so its data edge into `quant_lightning_indexer` survives
         # torch.compile DCE.
-        if self.compress_ratio:
-            _, indexer_cache = torch.ops.tensor_cast.compressor(
+        if self.compress_ratio and getattr(getattr(self._inner, "config", None), "model_type", None) not in (
+            "deepseek_v41",
+            "deepseek_v41_text",
+        ):
+            compressor_op = (
+                torch.ops.tensor_cast.csa2_compressor
+                if getattr(getattr(self._inner, "config", None), "model_type", None)
+                in ("deepseek_v41", "deepseek_v41_text")
+                else torch.ops.tensor_cast.compressor
+            )
+            _, indexer_cache = compressor_op(
                 hidden_states,
                 indexer_cache,
                 self.compress_ratio,
@@ -984,6 +1423,26 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
         #   - topk over min(topk_limit, end_pos // ratio)
         # See `_register_op_properties(quant_lightning_indexer)` in
         # tensor_cast/performance_model/__init__.py.
+        if is_v41_indexer:
+            config = getattr(self._inner, "config", None)
+            ratio = int(config.compress_ratios[self._inner.layer_idx])
+            is_candidate_source = self._inner.layer_idx == config.candidate_source_layer_id
+            uses_candidates = self._inner.layer_idx > config.candidate_source_layer_id
+            return torch.ops.tensor_cast.csa2_index_select(
+                query_payload,
+                query_scale,
+                weights,
+                indexer_cache,
+                indexer_scale_cache,
+                int(self.topk_limit),
+                ratio,
+                int(getattr(attention_meta, "start_pos", 0) or 0),
+                candidate_mask,
+                int(config.candidate_block_size),
+                int(config.candidate_topk_blocks),
+                is_candidate_source,
+                uses_candidates,
+            )
         return torch.ops.tensor_cast.quant_lightning_indexer(
             q_states,
             weights,

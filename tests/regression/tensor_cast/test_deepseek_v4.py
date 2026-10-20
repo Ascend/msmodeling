@@ -28,6 +28,7 @@ import tensor_cast.performance_model.builtin_model  # noqa: F401 — register V4
 
 from tensor_cast.core.quantization.config import create_attention_quant_config
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
+from tensor_cast.performance_model import _rmsnorm_ops
 from tensor_cast.performance_model.builtin_model.deepseek_v4 import _safe_max_int
 from tensor_cast.transformers.builtin_model.deepseek_v4 import (
     DeepseekV4Compressor,
@@ -278,14 +279,36 @@ class TestDeepseekV4HCOperators(unittest.TestCase):
 
     def test_hc_post_op(self):
         """Test hc_post operator combines residual correctly."""
-        x = torch.randn(2, 8, 4, 4096)  # [B, S, Hc, D]
+        x = torch.randn(2, 8, 4096)  # [B, S, D]
         residual = torch.randn(2, 8, 4, 4096)
         post = torch.randn(2, 8, 4)
         comb = torch.randn(2, 8, 4, 4)
 
         result = torch.ops.tensor_cast.hc_post(x, residual, post, comb, hc_mult=4)
         # Result shape: [B, S, Hc, D]
-        assert result.shape == (2, 8, 4, 4, 4096)
+        assert result.shape == residual.shape
+
+    def test_hc_post_preserves_residual_shape_for_compiled_token_flattening(self):
+        """Compiled sublayers may return [T,D], but HC restores [B,S,Hc,D]."""
+        x = torch.empty(6, 16, device="meta")
+        residual = torch.empty(2, 3, 4, 16, device="meta")
+        post = torch.empty(2, 3, 4, device="meta")
+        comb = torch.empty(2, 3, 4, 4, device="meta")
+
+        result = torch.ops.tensor_cast.hc_post(x, residual, post, comb, hc_mult=4)
+
+        assert result.shape == residual.shape
+
+    def test_hc_post_drops_extra_compiled_token_axis(self):
+        """A transient extra token axis must not propagate to the next layer."""
+        x = torch.empty(1, 4, 4, 16, device="meta")
+        residual = torch.empty(1, 4, 5, 16, device="meta")
+        post = torch.empty(1, 4, 5, device="meta")
+        comb = torch.empty(1, 4, 5, 5, device="meta")
+
+        result = torch.ops.tensor_cast.hc_post(x, residual, post, comb, hc_mult=5)
+
+        assert result.shape == residual.shape
 
     def test_hc_head_op(self):
         """Test hc_head operator reduces HC dimension."""
@@ -960,12 +983,16 @@ class TestDeepseekV4PerformanceModel(unittest.TestCase):
         # x shape [B, S, hc_mult * nope_head_dim] (already flattened 2D)
         x = torch.randn(2, 8, 4 * 64)
         mock_invoke.args = [x, 4]
-        mock_invoke.get_memory_access_properties.return_value = MagicMock(
-            memory_read_bytes=0, memory_write_bytes=0, memory_readwrite_bytes=0
-        )
+        mock_invoke.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
 
         props = hc_pre_inv_rms_props(mock_invoke)
         assert props is not None
+        mock_invoke.get_memory_access_properties.assert_called_once_with(exclude_input_ids={0})
+        num_rows = 2 * 8
+        row_width = 4 * 64
+        assert props.memory_read_bytes == num_rows * row_width * torch.float32.itemsize
+        assert props.memory_readwrite_bytes == 0
+        assert props.compute_ops[torch.float32].gp_ops == _rmsnorm_ops(num_rows, row_width)
 
     def test_hc_pre_sinkhorn_performance(self):
         """Test hc_pre_sinkhorn performance properties."""
@@ -990,16 +1017,21 @@ class TestDeepseekV4PerformanceModel(unittest.TestCase):
         """Test hc_post performance properties."""
         hc_post_props = _v4_perf_props(torch.ops.tensor_cast.hc_post.default)
 
-        mock_invoke = MagicMock()
-        # x shape [B, S, hc, D] - flattened to 2D [B*S, hc*D]
-        x = torch.randn(4, 4 * 4096)
-        mock_invoke.args = [x, x, x, x, 4]
-        mock_invoke.get_memory_access_properties.return_value = MagicMock(
-            memory_read_bytes=0, memory_write_bytes=0, memory_readwrite_bytes=0
-        )
+        mock_invoke = MagicMock(spec=OpInvokeInfo)
+        x = torch.randn(2, 8, 4096, dtype=torch.bfloat16)
+        residual = torch.randn(2, 8, 4, 4096, dtype=torch.bfloat16)
+        post = torch.randn(2, 8, 4, dtype=torch.float32)
+        comb = torch.randn(2, 8, 4, 4, dtype=torch.float32)
+        mock_invoke.args = [x, residual, post, comb, 4]
+        mock_invoke.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
 
         props = hc_post_props(mock_invoke)
         assert props is not None
+        num_rows = 2 * 8
+        output_elements = num_rows * 4 * 4096
+        assert props.memory_readwrite_bytes == 0
+        assert props.compute_ops[torch.float32].gp_ops == num_rows * (4 * 4 + 4) * 4096 * 2
+        assert props.compute_ops[torch.bfloat16].gp_ops == output_elements
 
     def test_hc_head_performance(self):
         """Test hc_head performance properties."""

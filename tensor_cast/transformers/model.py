@@ -68,6 +68,11 @@ _EXTRA_TC_KWARGS_KEYS = (
     "kv_cache_per_token",
     "sampling_metadata",
     "attention_by_layers",
+    "csa2_state",
+    "csa2_cache_ownership",
+    "compressed_kv_cache_by_source",
+    "compressed_kv_scale_cache_by_source",
+    "indexer_scale_cache_by_layers",
 )
 
 
@@ -386,6 +391,10 @@ class TransformerModel(ModelWrapperBase):
 
             logger.info("Initializing parallel groups")
             self.parallel_group_manager = ParallelGroupManager(self.model_config.parallel_config)
+            engram_group = self.parallel_group_manager.all_rank_group
+            for config in (self.hf_config, self.text_config):
+                config.engram_rank = engram_group.rank
+                config.engram_rank_group = tuple(engram_group.rank_group)
             # the order of these functions matters!
             logger.info("Applying model transformations")
             model_type = self.hf_config.model_type

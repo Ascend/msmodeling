@@ -122,6 +122,8 @@ class UserInputConfig:
     """Draft speculative method: ``dflash``, ``dspark``, or None (disabled)."""
     num_speculative_tokens: int = 0
     """Speculative tokens excluding anchor; internal block_size = n + 1 when n > 0."""
+    num_speculative_tokens_explicit: bool = False
+    """Whether --num-speculative-tokens was explicitly supplied by the user."""
     acceptance_length: float = 5.0
     """Decode fold scalar (throughput_optimizer); clamped by speculative_method after resolve."""
     num_draft_layers: int = 0

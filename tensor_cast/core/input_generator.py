@@ -19,8 +19,9 @@ input_generation
 """
 
 import json
+import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from numbers import Integral
@@ -30,6 +31,7 @@ from typing import Any, Optional
 import torch
 
 from ..layers.attention import AttentionMetadataTensorCast
+from ..layers.deepseek_v41 import DeepseekV41SharedAttentionState, EngramHashState, resolve_csa2_layer_role
 from ..layers.glm5 import get_glm5_indexer_types, glm5_uses_indexshare, resolve_glm5_indexer_source_layer
 from ..layers.sampler import SamplingMetadata, SpecDecodeMetadata
 from ..model_config import config_has_draft_spec
@@ -45,6 +47,21 @@ _BAILING_V3_KDA_CONV_STATE_COUNT = 3
 _DEFAULT_DRAFT_SLIDING_WINDOW = 2048
 
 
+def _is_deepseek_v41_config(config) -> bool:
+    """Recognize both the multimodal wrapper and its nested text config."""
+    return getattr(config, "model_type", None) in {"deepseek_v41", "deepseek_v41_text"}
+
+
+def _validate_deepseek_v41_image_chunk(
+    model_type: str,
+    has_image_input: bool,
+    is_decode: bool,
+    context_length: int,
+) -> None:
+    if model_type == "deepseek_v41" and has_image_input and not is_decode and int(context_length) != 0:
+        raise ValueError("DeepSeek V4.1 image spans must be fully contained in the first prefill chunk")
+
+
 @dataclass
 class RequestInfo:
     query_len: int
@@ -57,6 +74,11 @@ class RequestInfo:
     image_batch_size: int = None
     image_height: int = None
     image_width: int = None
+    # CSA2 state belongs to the request/workload lifecycle, not the model
+    # object.  Keeping it here prevents concurrent ModelRunner invocations from
+    # sharing mutable compressor tails and top-k streams.
+    csa2_state: Optional[DeepseekV41SharedAttentionState] = field(default=None, repr=False)
+    engram_hash_state: Optional[EngramHashState] = field(default=None, repr=False)
 
 
 def _build_spec_decode_metadata(
@@ -114,10 +136,19 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     query_len = request.query_len
     is_decode = request.is_decode
     image_kwargs = {}
-    # Derive the effective context the same way as generate_inputs_varlen so both
-    # entries agree on cache_position / tensor_cast_has_previous_state semantics.
+    num_image_tokens = 0
+    # Match the varlen entry so cached-prefix tokens count as previous context.
     context_length = request.context_length or max(seq_len - query_len, 0)
     if model.is_vl_model:
+        has_image_input = all(
+            value is not None for value in (request.image_batch_size, request.image_height, request.image_width)
+        )
+        _validate_deepseek_v41_image_chunk(
+            model.model_config.hf_config.model_type,
+            has_image_input,
+            is_decode,
+            context_length,
+        )
         image_kwargs = generate_image_inputs(
             model,
             request.image_batch_size,
@@ -172,6 +203,7 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     block_table_tensor = torch.empty((batch_size, max_num_blocks_per_seq), dtype=torch.long, device="meta")
 
     slot_mapping = torch.empty((batch_size * query_len,), dtype=torch.long, device="meta")
+    compressed_slot_mapping = torch.empty((batch_size * query_len,), dtype=torch.long, device="meta")
 
     attn_meta = AttentionMetadataTensorCast(
         query_start_loc=query_start_loc,
@@ -183,6 +215,8 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         max_total_seq_len=int(seq_len),
+        start_pos=int(context_length),
+        compressed_slot_mapping=compressed_slot_mapping,
     )
 
     # The total number of new tokens to be processed in this batch, concatenated.
@@ -194,6 +228,9 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     num_tokens = batch_size * query_len
     input_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
     position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
+    if model.model_config.hf_config.model_type == "deepseek_v41" and "pixel_values" in image_kwargs:
+        image_kwargs["image_token_types"] = torch.empty_like(input_ids, dtype=torch.int8)
+        image_kwargs["image_token_mask"] = torch.empty_like(input_ids, dtype=torch.bool)
     # total_kv_tokens mirrors the numerator behind num_blocks (max_context_length
     # per request, summed over the batch); V4 sizing compresses this footprint.
     total_kv_tokens = max_context_length * batch_size
@@ -214,6 +251,9 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
         [seq_len] * batch_size,
         speculative_tail,
         num_blocks,
+    )
+    compressed_cache_by_source, compressed_scale_cache_by_source, compressed_cache_per_token = (
+        _get_deepseek_v41_compressed_cache_info(model, block_size, batch_size, total_kv_tokens)
     )
     sampling_metadata = SamplingMetadata(
         query_start_loc=attn_meta.query_start_loc,
@@ -252,6 +292,18 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
         "kv_cache_excluded_layer_indices": kv_cache_excluded_layer_indices(model),
         "sampling_metadata": sampling_metadata,
     }
+    if _is_deepseek_v41_config(model.model_config.hf_config):
+        kwargs["csa2_state"] = _get_deepseek_v41_state(model, requests)
+        if is_decode:
+            _seed_deepseek_v41_draft_windows(model, kwargs["csa2_state"], batch_size)
+        kwargs["engram_hash_state"] = _get_deepseek_v41_engram_state(model, requests)
+        kwargs["engram_token_ids"] = torch.empty_like(input_ids)
+        if "image_token_mask" in image_kwargs:
+            kwargs["engram_token_mask"] = torch.empty_like(input_ids, dtype=torch.bool)
+        kwargs["csa2_cache_ownership"] = _get_deepseek_v41_cache_ownership(model)
+        kwargs["compressed_kv_cache_by_source"] = compressed_cache_by_source
+        kwargs["compressed_kv_scale_cache_by_source"] = compressed_scale_cache_by_source
+        kwargs["compressed_kv_cache_per_token"] = compressed_cache_per_token
 
     sparse_attention_indexer_cache = get_sparse_attention_indexer_cache_info(
         model, num_blocks, block_size, batch_size, total_kv_tokens
@@ -430,6 +482,14 @@ def generate_image_inputs(model, image_batch_size, image_height, image_width, co
         return {}
     hf_config = model.model_config.hf_config
     vision_config = hf_config.vision_config
+    if hf_config.model_type == "deepseek_v41":
+        return _generate_deepseek_v41_image_inputs(
+            model,
+            image_batch_size,
+            image_height,
+            image_width,
+            concurrency,
+        )
     patch_size = vision_config.patch_size
     merge_size = vision_config.spatial_merge_size or 2
     # Rescales the image
@@ -567,12 +627,16 @@ def _resolve_decoder_attention_layer(layer, preserve_attention_wrapper: bool = F
 
 
 def _is_v4_model(model) -> bool:
-    """Return True when the loaded model is DeepSeek V4."""
+    """Return True when the loaded model uses a V4 shared-KV layout."""
     for config in (
         getattr(getattr(model, "model_config", None), "hf_config", None),
         getattr(model, "text_config", None),
     ):
-        if config is not None and getattr(config, "model_type", None) == "deepseek_v4":
+        if config is not None and getattr(config, "model_type", None) in (
+            "deepseek_v4",
+            "deepseek_v41",
+            "deepseek_v41_text",
+        ):
             return True
     return False
 
@@ -855,6 +919,8 @@ def _resolve_main_kv_cache_dtype(model, layer_idx: int) -> torch.dtype:
     this function does not need to know about draft boundaries.
     """
     model_config = model.model_config
+    if _is_deepseek_v41_config(getattr(model, "text_config", None)):
+        return torch.float8_e4m3fn
     kvcache_dtype = torch.bfloat16 if _is_v4_model(model) else model_config.dtype
     if (attention_config := get_attention_quant_config(model, layer_idx)) is not None:
         kvcache_dtype = attention_config.get_quant_dtype()
@@ -871,6 +937,8 @@ def _v4_main_cache_storage(shape, dtype, rope_head_dim):
 
 def _resolve_indexer_cache_dtype(model, layer_idx: int, attention_layer=None) -> torch.dtype:
     """Resolve storage dtype for sparse-attention indexer auxiliary cache."""
+    if _is_deepseek_v41_config(getattr(model, "text_config", None)):
+        return torch.int4
     model_config = model.model_config
     if attention_layer is not None:
         dtype = getattr(attention_layer, "indexer_cache_dtype", None)
@@ -1063,18 +1131,22 @@ def _get_kv_cache_info(
             # PipelineModel has no _inner; the speculative wrapper lives on the
             # last stage and exposes the draft HF config from there.
             draft_hf = getattr(model, "draft_hf_config", None)
-        if draft_hf is None:
-            # UnsupportedPPConfigurationError instead of a bare AttributeError:
-            # the serving layer skips candidates raising it, while PP>1 re-raises
-            # other exceptions loud and would abort the whole multi-candidate
-            # search. Deferred import avoids a circular import.
-            from ..pipeline_parallel import UnsupportedPPConfigurationError
+    native_draft = getattr(getattr(model, "_inner", None), "draft", None)
+    if native_draft is None:
+        native_draft = getattr(model, "draft", None)
+    native_dspark = bool(getattr(native_draft, "native_dspark", False))
+    if draft_enabled and draft_hf is None and not native_dspark:
+        # UnsupportedPPConfigurationError instead of a bare AttributeError:
+        # the serving layer skips candidates raising it, while PP>1 re-raises
+        # other exceptions loud and would abort the whole multi-candidate
+        # search. Deferred import avoids a circular import.
+        from ..pipeline_parallel import UnsupportedPPConfigurationError
 
-            raise UnsupportedPPConfigurationError(
-                "DFlash/DSpark is enabled but the draft HF config is not reachable "
-                f"from {type(model).__name__}; refusing to allocate draft KV cache "
-                "with the target model layout."
-            )
+        raise UnsupportedPPConfigurationError(
+            "DFlash/DSpark is enabled but the draft HF config is not reachable "
+            f"from {type(model).__name__}; refusing to allocate draft KV cache "
+            "with the target model layout."
+        )
 
     for i in range(model.num_hidden_layers):
         kvcache_dtype = _resolve_main_kv_cache_dtype(model, i)
@@ -1100,9 +1172,9 @@ def _get_kv_cache_info(
             continue
 
         if is_draft_layer:
-            # Draft is always Qwen3 GQA; allocate [2, blocks, block_size, kv_heads, head_dim]
-            # even when the target model uses MLA caches. Draft layers use their
-            # configured attention type to size the paged cache.
+            # Generic DFlash/DSpark uses Qwen3 GQA and owns separate K/V tensors.
+            # DeepSeek V4.1 native DSpark instead owns one FP8 latent window per
+            # draft layer, matching DSparkAttention's [B, window, head_dim] cache.
             layer_num_blocks = _resolve_draft_kv_cache_num_blocks(
                 model,
                 i - num_target_layers,
@@ -1114,16 +1186,26 @@ def _get_kv_cache_info(
                 draft_tail_tokens,
                 unsharded_num_blocks,
             )
-            # draft_hf is mandatory (raise above) — never fall back to the
-            # target model's KV layout for draft layers.
-            draft_kv_heads = int(draft_hf.num_key_value_heads)
-            draft_head_dim = int(getattr(draft_hf, "head_dim", draft_hf.hidden_size // draft_hf.num_attention_heads))
-            kv_heads = _shard_kv_heads(draft_kv_heads, parallel_config.tensor_parallel_size)
-            kv_cache_by_layers[i] = torch.empty(
-                [2, layer_num_blocks, block_size, kv_heads, draft_head_dim],
-                dtype=kvcache_dtype,
-                device="meta",
-            )
+            if native_dspark:
+                kv_cache_by_layers[i] = torch.empty(
+                    [layer_num_blocks, block_size, int(model.head_dim)],
+                    dtype=torch.float8_e4m3fn,
+                    device="meta",
+                )
+            else:
+                # Generic DFlash/DSpark requires its own draft config. The
+                # validation above deliberately prevents falling back to the
+                # target model's KV layout.
+                draft_kv_heads = int(draft_hf.num_key_value_heads)
+                draft_head_dim = int(
+                    getattr(draft_hf, "head_dim", draft_hf.hidden_size // draft_hf.num_attention_heads)
+                )
+                kv_heads = _shard_kv_heads(draft_kv_heads, parallel_config.tensor_parallel_size)
+                kv_cache_by_layers[i] = torch.empty(
+                    [2, layer_num_blocks, block_size, kv_heads, draft_head_dim],
+                    dtype=kvcache_dtype,
+                    device="meta",
+                )
         elif model_config.mla_config is not None:
             # decoder_layers may be None if _resolve_decoder_layers raises
             # AttributeError (e.g., model not fully wrapped). In that case
@@ -1240,6 +1322,118 @@ def _get_kv_cache_info(
     return kv_cache_by_layers, kv_cache_per_token
 
 
+def _get_deepseek_v41_cache_ownership(model) -> dict[str, dict[int, Optional[int]]]:
+    """Expose CSA2 logical-to-physical owner mappings to model invocations."""
+    if not _is_deepseek_v41_config(model.text_config):
+        return {}
+    compressed = {}
+    index = {}
+    for layer_id in range(int(model.text_config.num_hidden_layers)):
+        role = resolve_csa2_layer_role(model.text_config, layer_id)
+        compressed[layer_id] = role.compressed_kv_owner
+        index[layer_id] = role.index_k_owner
+    return {"compressed_kv_owner_by_layer": compressed, "index_k_owner_by_layer": index}
+
+
+def _get_deepseek_v41_state(model, requests: list[RequestInfo]) -> DeepseekV41SharedAttentionState:
+    """Return workload-bound CSA2 state for one request lifecycle.
+
+    The first request owns the batch state object; callers that reuse the same
+    RequestInfo instances for subsequent decode calls therefore retain tails,
+    while a different request list gets an isolated state without mutating the
+    model object.
+    """
+    if not requests:
+        return DeepseekV41SharedAttentionState()
+    state = requests[0].csa2_state
+    if state is None:
+        if any(request.csa2_state is not None for request in requests):
+            raise ValueError("All requests in a CSA2 batch must share one workload state")
+        state = DeepseekV41SharedAttentionState()
+        for request in requests:
+            request.csa2_state = state
+    elif any(request.csa2_state is not state for request in requests):
+        raise ValueError("All requests in a CSA2 batch must share one workload state")
+    return state
+
+
+def _get_deepseek_v41_engram_state(model, requests: list[RequestInfo]) -> EngramHashState:
+    """Return request-owned Engram history shared by packed requests."""
+    if not _is_deepseek_v41_config(model.text_config):
+        return EngramHashState()
+    if not requests:
+        return EngramHashState()
+    state = requests[0].engram_hash_state
+    if state is None:
+        state = EngramHashState()
+        for request in requests:
+            request.engram_hash_state = state
+    elif any(request.engram_hash_state is not state for request in requests):
+        raise ValueError("Packed DeepSeek V4.1 requests must share one Engram hash state")
+    return state
+
+
+def _seed_deepseek_v41_draft_windows(model, state, batch_size: int) -> None:
+    """Represent historical draft KV for standalone meta decode simulations.
+
+    A real prefill publishes its windows to this same request state. Allocate
+    only missing planes so subsequent invocations consume previous updates.
+    """
+    draft = getattr(getattr(model, "_inner", None), "draft", None)
+    if not bool(getattr(draft, "native_dspark", False)):
+        return
+    for layer_id, layer in enumerate(draft.layers):
+        if layer_id not in state.draft_kv_by_layer:
+            state.draft_kv_by_layer[layer_id] = torch.empty(
+                batch_size,
+                layer.attn.window_size,
+                layer.attn.head_dim,
+                dtype=torch.float8_e4m3fn,
+                device="meta",
+            )
+
+
+def reset_deepseek_v41_state(model=None, requests: Optional[list[RequestInfo]] = None) -> None:
+    """Reset request-owned CSA2 state while retaining the legacy call shape."""
+    del model
+    if requests:
+        seen = set()
+        for request in requests:
+            state = request.csa2_state
+            if state is not None and id(state) not in seen:
+                state.reset()
+                seen.add(id(state))
+            request.csa2_state = None
+
+
+def _get_deepseek_v41_compressed_cache_info(
+    model, block_size: int, batch_size: Optional[int], total_kv_tokens: Optional[int]
+) -> tuple[dict[int, torch.Tensor], dict[int, torch.Tensor], int]:
+    """Allocate one compressed-KV cache per configured CSA2 source layer."""
+    config = getattr(model, "text_config", None)
+    if not _is_deepseek_v41_config(config):
+        return {}, {}, 0
+    total_tokens = max(int(total_kv_tokens or 0), 1)
+    head_dim = int(getattr(config, "head_dim", getattr(model, "head_dim", 1)))
+    dtype = torch.int4
+    scale_dtype = torch.float8_e4m3fn
+    caches: dict[int, torch.Tensor] = {}
+    scale_caches: dict[int, torch.Tensor] = {}
+    per_token = 0
+    for source in tuple(getattr(config, "kv_source_layer_ids", ())):
+        ratio = max(int(config.compress_ratios[int(source)]), 1)
+        slots = max(1, (total_tokens + ratio - 1) // ratio)
+        # ``total_kv_tokens`` already covers the whole packed batch. Do not
+        # multiply by batch again, or memory grows quadratically with batch size.
+        blocks = max(1, (slots + block_size - 1) // block_size)
+        cache = torch.empty((blocks, block_size, head_dim), dtype=dtype, device="meta")
+        scale_cache = torch.empty((blocks, block_size, (head_dim + 16 - 1) // 16), dtype=scale_dtype, device="meta")
+        caches[int(source)] = cache
+        scale_caches[int(source)] = scale_cache
+        per_token += (bytes_of_tensor(cache) + bytes_of_tensor(scale_cache)) / max(blocks * block_size, 1)
+    return caches, scale_caches, per_token
+
+
 def _resolve_v4_kv_cache_size(
     model,
     attention_layer=None,
@@ -1297,6 +1491,16 @@ def _resolve_v4_kv_cache_size(
     # window_size from config (sliding_window). Non-V4 MLA models (e.g. V3.2)
     # have no sliding window, so this stays 0 and we keep the full pool below.
     window_size = int(getattr(model.text_config, "sliding_window", 0) or 0)
+
+    if _is_deepseek_v41_config(model.model_config.hf_config):
+        # V4.1 owns compressed KV in a separate source cache.  This tensor is
+        # therefore the window-only ring buffer; compressed source caches are
+        # allocated by _get_deepseek_v41_compressed_cache_info().
+        if batch_size is not None:
+            window_slots = max(int(batch_size), 1) * max(window_size, 1)
+            window_blocks = max(1, (window_slots + block_size - 1) // block_size)
+            return [window_blocks, block_size, head_dim]
+        return [num_blocks, block_size, head_dim]
 
     compress_ratio = 0
     if attention_layer is not None:
@@ -1451,6 +1655,7 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
     num_draft_layers = _draft_layer_count(model_config)
     num_target_layers = max(int(model.num_hidden_layers) - num_draft_layers, 0)
     indexer_cache_by_layers = {}
+    indexer_scale_cache_by_layers = {}
     indexer_cache_per_token = 0
     for i in range(model.num_hidden_layers):
         # Qwen3 GQA draft is not part of the target GLM5/DSA indexer stack.
@@ -1500,10 +1705,30 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
             dtype=cache_dtype,
             device="meta",
         )
-        indexer_cache_per_token += bytes_of_tensor(indexer_cache_by_layers[i]) / (num_blocks * block_size)
+        is_v41 = _is_deepseek_v41_config(model.model_config.hf_config) or _is_deepseek_v41_config(
+            getattr(model, "text_config", None)
+        )
+        if is_v41:
+            indexer_scale_cache_by_layers[i] = torch.empty(
+                [indexer_num_blocks, block_size, (cache_width + 32 - 1) // 32],
+                dtype=torch.float8_e8m0fnu,
+                device="meta",
+            )
+            role = resolve_csa2_layer_role(model.text_config, i)
+            owner = role.index_k_owner
+            if owner is not None and owner != i and owner in indexer_cache_by_layers:
+                indexer_cache_by_layers[i] = indexer_cache_by_layers[owner]
+                if owner in indexer_scale_cache_by_layers:
+                    indexer_scale_cache_by_layers[i] = indexer_scale_cache_by_layers[owner]
+                continue
+        cache_bytes = bytes_of_tensor(indexer_cache_by_layers[i])
+        if is_v41:
+            cache_bytes += bytes_of_tensor(indexer_scale_cache_by_layers[i])
+        indexer_cache_per_token += cache_bytes / max(num_blocks * block_size, 1)
 
     return {
         "indexer_cache_by_layers": indexer_cache_by_layers,
+        "indexer_scale_cache_by_layers": indexer_scale_cache_by_layers,
         "indexer_cache_per_token": indexer_cache_per_token,
     }
 
@@ -1549,6 +1774,7 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     max_num_blocks_per_seq = (max_total_seq_len + block_size - 1) // block_size
     block_table_tensor = torch.empty((batch_size, max_num_blocks_per_seq), dtype=torch.long, device="meta")
     slot_mapping = torch.empty((num_tokens,), dtype=torch.long, device="meta")
+    compressed_slot_mapping = torch.empty((num_tokens,), dtype=torch.long, device="meta")
 
     attn_meta = AttentionMetadataTensorCast(
         query_start_loc=query_start_loc,
@@ -1560,6 +1786,8 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         max_total_seq_len=max_total_seq_len,
+        start_pos=(seq_lens[0] - query_lens[0]) if len(set(s - q for s, q in zip(seq_lens, query_lens))) == 1 else None,
+        compressed_slot_mapping=compressed_slot_mapping,
     )
 
     input_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
@@ -1574,6 +1802,9 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
         seq_lens,
         speculative_tail,
         num_blocks,
+    )
+    compressed_cache_by_source, compressed_scale_cache_by_source, compressed_cache_per_token = (
+        _get_deepseek_v41_compressed_cache_info(model, block_size, batch_size, total_kv_tokens)
     )
 
     sampling_meta = SamplingMetadata(query_start_loc=query_start_loc)
@@ -1623,6 +1854,16 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
         "sampling_metadata": sampling_meta,
         "kv_cache_per_token": kv_cache_per_token,
     }
+    if _is_deepseek_v41_config(model.model_config.hf_config):
+        kwargs["csa2_state"] = _get_deepseek_v41_state(model, requests)
+        if all(request.is_decode for request in requests):
+            _seed_deepseek_v41_draft_windows(model, kwargs["csa2_state"], batch_size)
+        kwargs["engram_hash_state"] = _get_deepseek_v41_engram_state(model, requests)
+        kwargs["engram_token_ids"] = torch.empty_like(input_ids)
+        kwargs["csa2_cache_ownership"] = _get_deepseek_v41_cache_ownership(model)
+        kwargs["compressed_kv_cache_by_source"] = compressed_cache_by_source
+        kwargs["compressed_kv_scale_cache_by_source"] = compressed_scale_cache_by_source
+        kwargs["compressed_kv_cache_per_token"] = compressed_cache_per_token
 
     sparse_attention_indexer_cache = get_sparse_attention_indexer_cache_info(
         model, num_blocks, block_size, batch_size, total_kv_tokens
@@ -1664,6 +1905,84 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
         kwargs["cache_position"] = cache_position
 
     return kwargs
+
+
+def _deepseek_v41_image_grid(image_height: int, image_width: int, vision_config) -> tuple[int, int, int, int]:
+    """Return ViT and LLM grid sizes using the reference V4.1 resize rules."""
+    patch = int(vision_config.patch_size)
+    ratio = int(vision_config.downsample_ratio)
+    width = int(image_width)
+    height = int(image_height)
+    max_wh_ratio = getattr(vision_config, "max_wh_ratio", None)
+    if max_wh_ratio is not None and width > height * float(max_wh_ratio):
+        width = int(height * float(max_wh_ratio))
+    min_pixels = int(getattr(vision_config, "min_pixels", 0) or 0)
+    if 0 < width * height < min_pixels:
+        scale = math.sqrt(min_pixels / (width * height))
+        width = int(width * scale)
+        height = int(height * scale)
+
+    best_width = math.ceil(width / patch) * patch
+    best_height = math.ceil(height / patch) * patch
+
+    def grids(pixel_height: int, pixel_width: int) -> tuple[int, int, int, int]:
+        vit_h, vit_w = pixel_height // patch, pixel_width // patch
+        llm_h = math.ceil(vit_h / ratio)
+        llm_w = math.ceil(vit_w / ratio)
+        return vit_h, vit_w, llm_h, llm_w
+
+    vit_h, vit_w, llm_h, llm_w = grids(best_height, best_width)
+    max_tokens = int(getattr(vision_config, "max_image_tokens", 1024))
+    if llm_h * (llm_w + 1) + VISION_IMAGE_BOUNDARY_TOKEN_COUNT > max_tokens:
+        aspect = height / width
+        max_w_float = math.sqrt((max_tokens - 2) / aspect + 0.25) - 0.5
+        max_h_float = max_w_float * aspect
+        cell = patch * ratio
+        if max_w_float < 1.0:
+            best_height, best_width = ((max_tokens - 2) // 2 * cell, cell)
+        elif max_h_float < 1.0:
+            best_height, best_width = (cell, (max_tokens - 3) * cell)
+        else:
+            scale = min(
+                math.floor(max_w_float) * cell / width,
+                math.floor(max_h_float) * cell / height,
+            )
+            best_height = math.floor(height * scale / patch) * patch
+            best_width = math.floor(width * scale / patch) * patch
+        vit_h, vit_w, llm_h, llm_w = grids(best_height, best_width)
+    return vit_h, vit_w, llm_h, llm_w
+
+
+def _generate_deepseek_v41_image_inputs(
+    model,
+    image_batch_size: int,
+    image_height: int,
+    image_width: int,
+    concurrency: int,
+) -> dict[str, Any]:
+    vision_config = model.model_config.hf_config.vision_config
+    vit_h, vit_w, llm_h, llm_w = _deepseek_v41_image_grid(image_height, image_width, vision_config)
+    patch = int(vision_config.patch_size)
+    channels = int(getattr(vision_config, "in_channels", 3))
+    parallel_config = model.model_config.parallel_config
+    batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
+    num_images = batch_size * int(image_batch_size)
+    pixel_values = torch.empty(
+        num_images,
+        vit_h * vit_w,
+        channels,
+        patch,
+        patch,
+        dtype=model.model_config.dtype,
+        device="meta",
+    )
+    image_span_tokens = llm_h * (llm_w + 1) + VISION_IMAGE_BOUNDARY_TOKEN_COUNT
+    return {
+        "pixel_values": pixel_values,
+        "vision_grid_height": vit_h,
+        "vision_grid_width": vit_w,
+        "num_image_tokens": int(image_batch_size) * image_span_tokens,
+    }
 
 
 def get_inputs_num_bytes(model, requests: list[RequestInfo], block_size: int) -> int:

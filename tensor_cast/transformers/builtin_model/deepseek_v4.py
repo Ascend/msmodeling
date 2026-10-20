@@ -50,6 +50,13 @@ _LAYER_TYPE_TO_RATIO = {value: key for key, value in _RATIO_TO_LAYER_TYPE.items(
 logger = logging.getLogger(__name__)
 
 
+def make_v41_identity_pre_mix(hidden_states: torch.Tensor, hc_mult: int) -> torch.Tensor:
+    """Initialize V4.1 HC routing so the first attention reads stream zero."""
+    pre_mix = torch.zeros(*hidden_states.shape[:-2], int(hc_mult), dtype=torch.float32, device=hidden_states.device)
+    pre_mix[..., 0] = 1.0
+    return pre_mix
+
+
 def _safe_register_auto_config() -> None:
     registry = getattr(AutoConfig, "register", None)
     if registry is None:
@@ -680,6 +687,25 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+        engram_layers = tuple(getattr(config, "engram_layer_ids", ()))
+        if layer_idx in engram_layers:
+            hash_cols = max(int(getattr(config, "engram_max_ngram_size", 1)) - 1, 0) * int(
+                getattr(config, "engram_n_heads", 0)
+            )
+            engram_head_dim = int(getattr(config, "engram_head_dim", 0))
+            self.engram_wkv_weight = nn.Parameter(
+                torch.empty(
+                    hash_cols * engram_head_dim,
+                    self.hidden_size * (self.hc_mult + 1),
+                    dtype=torch.float8_e4m3fn,
+                )
+            )
+            self.engram_q_weight = nn.Parameter(torch.empty(self.hc_mult, self.hidden_size, dtype=torch.float32))
+            self.engram_k_weight = nn.Parameter(torch.empty(self.hc_mult, self.hidden_size, dtype=torch.float32))
+        else:
+            self.register_parameter("engram_wkv_weight", None)
+            self.register_parameter("engram_q_weight", None)
+            self.register_parameter("engram_k_weight", None)
 
     def _emit_hc_pre(
         self,
@@ -688,32 +714,18 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ):
-        """Emit a trace-faithful HC-pre sequence matching reference `hc_pre`.
-
-        Reference (`deepseek-ai/DeepSeek-V4-Flash/inference/model.py:673-681`):
-          1. x: [B,S,Hc,D]
-          2. x_flat = x.flatten(2).float()
-          3. rsqrt = rsqrt(mean(x_flat^2) + eps)
-          4. mixes = linear(x_flat, hc_fn) * rsqrt
-          5. pre, post, comb = hc_split_sinkhorn(mixes, ...)
-          6. y = sum(pre.unsqueeze(-1) * x, dim=2)
-          7. return y.to(dtype), post, comb
-
-        Steps 5-7 are folded into the single `hc_pre_sinkhorn` semantic op so
-        the cost model can account for the sinkhorn iterations together with
-        the weighted reduction back to the original hidden width.
-        """
-        x_flat = hidden_states.float().flatten(-2)
-        rsqrt = torch.ops.tensor_cast.hc_pre_inv_rms(hidden_states, self.hc_mult)
-        hc_mixes = torch.matmul(x_flat, hc_fn.transpose(0, 1)) * rsqrt
-        reduced_hidden_states, post, comb = torch.ops.tensor_cast.hc_pre_sinkhorn(
-            hc_mixes,
+        """Fuse V4 HC-pre, collapsing with this sublayer's own coefficients."""
+        reduced_hidden_states, post, comb, _ = torch.ops.tensor_cast.hc_pre_v3(
             hidden_states,
+            hc_fn,
             hc_scale,
             hc_base,
+            None,
             self.hc_mult,
             self.hc_sinkhorn_iters,
+            self.config.rms_norm_eps,
             self.hc_eps,
+            "current",
         )
         return reduced_hidden_states, post, comb
 
@@ -746,6 +758,49 @@ class DeepseekV4DecoderLayer(nn.Module):
         input_ids: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
+        # Engram is injected before the layer's HC-pre path, matching the
+        # reference block.  The semantic ops model hash generation and sparse
+        # host-resident row fetch without materializing the 196B tables.
+        config = self.config
+        engram_layers = tuple(getattr(config, "engram_layer_ids", ()))
+        if self.layer_idx in engram_layers and (input_ids is not None or kwargs.get("engram_hash_ids") is not None):
+            hash_cols = max(int(getattr(config, "engram_max_ngram_size", 1)) - 1, 0) * int(
+                getattr(config, "engram_n_heads", 0)
+            )
+            if hash_cols > 0:
+                layer_pos = engram_layers.index(self.layer_idx)
+                table_rows = int(getattr(config, "engram_num_embeddings", ())[layer_pos])
+                head_dim = int(getattr(config, "engram_head_dim", 0))
+                row_bytes = head_dim + max(head_dim // 32, 1)
+                all_hash_ids = kwargs.get("engram_hash_ids")
+                hash_ids = all_hash_ids[..., layer_pos, :] if isinstance(all_hash_ids, torch.Tensor) else None
+                if hash_ids is None:
+                    hash_ids, _ = torch.ops.tensor_cast.engram_hash_lookup(
+                        kwargs.get("engram_token_ids", input_ids),
+                        None,
+                        hash_cols,
+                        int(getattr(config, "engram_max_ngram_size", 1)),
+                        1,
+                        input_ids.shape[0],
+                        kwargs.get("engram_token_mask"),
+                    )
+                    hash_ids = hash_ids[..., 0, :]
+                rank_group = list(getattr(config, "engram_rank_group", (0,)))
+                table_values = torch.ops.tensor_cast.engram_table_lookup(
+                    hash_ids, table_rows, head_dim, row_bytes, len(rank_group)
+                )
+                if len(rank_group) > 1:
+                    table_values = torch.ops.tensor_cast.all_reduce(
+                        table_values, int(getattr(config, "engram_rank", 0)), rank_group
+                    )
+                hidden_states = torch.ops.tensor_cast.engram_inject(
+                    hidden_states,
+                    table_values,
+                    self.engram_wkv_weight,
+                    self.engram_q_weight,
+                    self.engram_k_weight,
+                    int(getattr(config, "hc_mult", 1)),
+                )
         # Reference Block.forward (deepseek-ai/DeepSeek-V4-Flash/inference/model.py 688-699)
         # wraps BOTH attention and FFN with HC pre/post. The HC post op itself
         # mixes the residual back in, so we deliberately omit a follow-up
@@ -791,6 +846,21 @@ class DeepseekV4DecoderLayer(nn.Module):
         return hidden_states
 
 
+def validate_precomputed_engram_hash_ids(
+    hashes: torch.Tensor,
+    input_ids: Optional[torch.Tensor],
+    engram_layer_count: int,
+    hash_cols: int,
+) -> None:
+    """Validate tokenizer-derived Engram hashes supplied by the caller."""
+    if hashes.ndim != 4:
+        raise ValueError("Precomputed Engram hash IDs must be [batch, sequence, layer, hash_col]")
+    if input_ids is not None and tuple(hashes.shape[:2]) != tuple(input_ids.shape[:2]):
+        raise ValueError("Precomputed Engram hash IDs must match the input batch and sequence axes")
+    if int(hashes.shape[2]) != int(engram_layer_count) or int(hashes.shape[3]) != int(hash_cols):
+        raise ValueError("Precomputed Engram hash IDs do not match the configured layer/hash-column layout")
+
+
 class DeepseekV4Model(DeepseekV3Model):
     config: DeepseekV4Config
 
@@ -830,9 +900,48 @@ class DeepseekV4Model(DeepseekV3Model):
         position_embeddings: Tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs,
     ):
+        # The reference computes all Engram n-gram IDs once before entering
+        # the backbone, then each configured layer consumes its own table's
+        # slice.  Keep this metadata request-local and explicit so chunked
+        # callers can replace it with precomputed tokenizer/hash state.
+        engram_layers = tuple(getattr(self.config, "engram_layer_ids", ()))
+        precomputed_hashes = kwargs.get("engram_hash_ids")
+        if isinstance(precomputed_hashes, torch.Tensor):
+            hash_cols = max(int(getattr(self.config, "engram_max_ngram_size", 1)) - 1, 0) * int(
+                getattr(self.config, "engram_n_heads", 0)
+            )
+            shape_input = input_ids if input_ids is not None else inputs_embeds
+            validate_precomputed_engram_hash_ids(precomputed_hashes, shape_input, len(engram_layers), hash_cols)
+        elif input_ids is not None and engram_layers:
+            hash_cols = max(int(getattr(self.config, "engram_max_ngram_size", 1)) - 1, 0) * int(
+                getattr(self.config, "engram_n_heads", 0)
+            )
+            table_rows_all = tuple(getattr(self.config, "engram_num_embeddings", ()))
+            if hash_cols > 0 and len(table_rows_all) == len(engram_layers):
+                token_mask = kwargs.get("engram_token_mask")
+                engram_state = kwargs.get("engram_hash_state")
+                history = getattr(engram_state, "history", None)
+                hashes, next_history = torch.ops.tensor_cast.engram_hash_lookup(
+                    kwargs.get("engram_token_ids", input_ids),
+                    history,
+                    hash_cols,
+                    int(getattr(self.config, "engram_max_ngram_size", 1)),
+                    len(engram_layers),
+                    input_ids.shape[0],
+                    token_mask,
+                )
+                kwargs["engram_hash_ids"] = hashes
+                if engram_state is not None:
+                    engram_state.update(next_history)
+
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+        prepare_multimodal = getattr(self, "prepare_multimodal_embeddings", None)
+        if prepare_multimodal is not None:
+            inputs_embeds = prepare_multimodal(input_ids, inputs_embeds, **kwargs)
         hidden_states = inputs_embeds
+        collect_hidden_states = bool(output_hidden_states)
+        all_hidden_states = [] if collect_hidden_states else None
         hc_mult = int(getattr(self.config, "hc_mult", 1) or 1)
         hidden_states = hidden_states.unsqueeze(2).repeat(1, 1, hc_mult, 1)
 
@@ -846,8 +955,17 @@ class DeepseekV4Model(DeepseekV3Model):
                 ).unsqueeze(0)
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
+        is_v41 = getattr(self.config, "model_type", None) in ("deepseek_v41", "deepseek_v41_text")
+        pre_mix = None
+        if is_v41:
+            pre_mix = make_v41_identity_pre_mix(hidden_states, hc_mult)
         for decoder_layer in self.layers:
-            hidden_states = decoder_layer(
+            if all_hidden_states is not None and not is_v41:
+                # DeepSeek V4.1 native DSpark consumes the attention input of
+                # target layers 37/38/39, not their post-layer output.
+                all_hidden_states.append(hidden_states.mean(dim=-2) if hidden_states.ndim == 4 else hidden_states)
+            layer_kwargs = {"output_attention_input": collect_hidden_states} if is_v41 else {}
+            layer_output = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -856,20 +974,31 @@ class DeepseekV4Model(DeepseekV3Model):
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
                 input_ids=input_ids,
+                pre_mix=pre_mix,
+                **layer_kwargs,
                 **kwargs,
             )
+            if is_v41:
+                hidden_states, pre_mix = layer_output[:2]
+                if all_hidden_states is not None:
+                    all_hidden_states.append(layer_output[2])
+            else:
+                hidden_states = layer_output
 
         # Reference output path applies hc_head before the final norm/logits
         # (deepseek-ai/DeepSeek-V4-Flash/inference/model.py:718-721, 728-735).
         hc_eps = float(getattr(self.config, "hc_eps", 1e-6))
-        reduced_hidden_states = torch.ops.tensor_cast.hc_head(
-            hidden_states,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
-            hc_mult,
-            hc_eps,
-        )
+        if is_v41:
+            reduced_hidden_states = torch.ops.tensor_cast.hc_pre_reduce(hidden_states, pre_mix)
+        else:
+            reduced_hidden_states = torch.ops.tensor_cast.hc_head(
+                hidden_states,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                hc_mult,
+                hc_eps,
+            )
         reduced_hidden_states = self.norm(reduced_hidden_states)
 
         if return_dict is False:
@@ -880,7 +1009,7 @@ class DeepseekV4Model(DeepseekV3Model):
         return BaseModelOutputWithPast(
             last_hidden_state=reduced_hidden_states,
             past_key_values=None,
-            hidden_states=None,
+            hidden_states=tuple(all_hidden_states) if all_hidden_states is not None else None,
             attentions=None,
         )
 

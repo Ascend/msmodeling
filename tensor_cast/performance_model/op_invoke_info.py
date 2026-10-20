@@ -49,6 +49,10 @@ class OpInvokeInfo:
         """Write-only bytes"""
         memory_readwrite_bytes: int = 0
         """Read-write bytes"""
+        host_to_device_bytes: int = 0
+        """Bytes transferred from host-resident memory to device."""
+        host_to_device_serial: bool = False
+        """Whether H2D transfer precedes device compute/memory work."""
         extra_static_cost_count: int = 0
         """Extra static cost multiplier for decomposed ops (e.g. chunk delta rule kernel launches)"""
 
@@ -62,6 +66,8 @@ class OpInvokeInfo:
                 self.memory_read_bytes += other.memory_read_bytes
                 self.memory_write_bytes += other.memory_write_bytes
                 self.memory_readwrite_bytes += other.memory_readwrite_bytes
+                self.host_to_device_bytes += other.host_to_device_bytes
+                self.host_to_device_serial = self.host_to_device_serial or other.host_to_device_serial
                 self.extra_static_cost_count += other.extra_static_cost_count
 
     def __init__(self, func, args, kwargs, out, cache_key=None):

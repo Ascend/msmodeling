@@ -1008,6 +1008,21 @@ class TestThroughputOptimizerDraftSpecCli(TestCase):
         with patch.object(sys, "argv", argv):
             return mod.arg_parse()
 
+    def _parse_model(self, model_id: str, extra: list[str]):
+        from cli.inference import throughput_optimizer as mod
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=1",
+            "--output-length=1",
+            model_id,
+            "--device=TEST_DEVICE",
+            "--num-devices=8",
+            *extra,
+        ]
+        with patch.object(sys, "argv", argv):
+            return mod.arg_parse()
+
     def test_defaults_keep_draft_disabled(self):
         args = self._parse([])
         self.assertIsNone(args.speculative_method)
@@ -1081,6 +1096,18 @@ class TestThroughputOptimizerDraftSpecCli(TestCase):
         args = self._parse(["--speculative-method=dflash"])
         self.assertEqual(args.num_speculative_tokens, 7)
         self.assertEqual(args.draft_block_size, 8)
+
+    def test_deepseek_v41_native_dspark_default_is_five_proposals(self):
+        from tensor_cast.transformers.utils import AutoModelConfigLoader
+
+        model_config = AutoModelConfigLoader().load_config(
+            vendored_model_config_path("deepseek-ai/DeepSeek-V4.1-Flash")
+        )
+        with patch.object(AutoModelConfigLoader, "load_config", return_value=model_config):
+            args = self._parse_model("DeepSeek-V4.1-Flash", ["--speculative-method=dspark"])
+        self.assertEqual(args.num_speculative_tokens, 5)
+        self.assertEqual(args.draft_block_size, 6)
+        self.assertFalse(args.num_speculative_tokens_explicit)
 
     def test_mtp_new_entry_single_n(self):
         args = self._parse(["--speculative-method=mtp", "--num-speculative-tokens=2", "--acceptance-length=1.5"])
@@ -1511,3 +1538,15 @@ class TestPPCandidateGeneration:
         # EP disabled: no constraint.
         assert is_valid_ep_domain(ep=1, moe_dp=2, tp=2, dp=4)
         assert is_valid_ep_domain(ep=1, moe_dp=1, tp=8, dp=1)
+
+
+@pytest.mark.parametrize("error_type", [OSError, ValueError, AttributeError])
+def test_dspark_config_load_error_uses_generic_speculative_defaults(error_type):
+    from tensor_cast.transformers.utils import AutoModelConfigLoader
+
+    with patch.object(AutoModelConfigLoader, "load_config", side_effect=error_type("unavailable config")) as load:
+        args = TestThroughputOptimizerDraftSpecCli()._parse(["--speculative-method=dspark"])
+    load.assert_called_once()
+    assert args.num_speculative_tokens == 7
+    assert args.draft_block_size == 8
+    assert not args.num_speculative_tokens_explicit

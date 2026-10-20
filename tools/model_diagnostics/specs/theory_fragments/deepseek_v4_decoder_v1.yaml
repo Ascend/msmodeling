@@ -15,21 +15,15 @@ fragment_kind: model_decoder
 stages:
   - id: hc_pre_attention
     modules:
-      - name: hc_pre_inv_rms
+      - name: hc_pre_v3
         tensors:
           INPUT[0]: {shape: "[1, T, HCm, H]", dtype: ACT}
-          OUTPUT[0]: {shape: "[1, T, 1]", dtype: float32}
-      - name: hc_pre_projection
-        tensors:
-          INPUT[0]: {shape: "[T, HCh]", dtype: float32}
-          OUTPUT[0]: {shape: "[1, T, HCm * (HCm + 2)]", dtype: float32}
-      - name: hc_pre_sinkhorn
-        tensors:
-          INPUT[0]: {shape: "[1, T, HCm * (HCm + 2)]", dtype: float32}
-          INPUT[1]: {shape: "[1, T, HCm, H]", dtype: ACT}
+          INPUT[1]: {shape: "[HCm * (HCm + 2), HCh]", dtype: float32}
           OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          OUTPUT[1]: {shape: "[1, T, HCm]", dtype: float32}
+          OUTPUT[2]: {shape: "[1, T, HCm, HCm]", dtype: float32}
     runtime:
-      boundary_operators: [hc_pre_inv_rms]
+      boundary_operators: [hc_pre_v3]
       ignored_operator_groups: [quantization, dtype_cast, layout_permute, shape_views, tensor_storage, broadcast_shapes]
       ignored_operators:
         - mul
@@ -188,21 +182,15 @@ stages:
 
   - id: hc_pre_moe
     modules:
-      - name: hc_pre_inv_rms
+      - name: hc_pre_v3
         tensors:
           INPUT[0]: {shape: "[1, T, HCm, H]", dtype: ACT}
-          OUTPUT[0]: {shape: "[1, T, 1]", dtype: float32}
-      - name: hc_pre_projection
-        tensors:
-          INPUT[0]: {shape: "[T, HCh]", dtype: float32}
-          OUTPUT[0]: {shape: "[1, T, HCm * (HCm + 2)]", dtype: float32}
-      - name: hc_pre_sinkhorn
-        tensors:
-          INPUT[0]: {shape: "[1, T, HCm * (HCm + 2)]", dtype: float32}
-          INPUT[1]: {shape: "[1, T, HCm, H]", dtype: ACT}
+          INPUT[1]: {shape: "[HCm * (HCm + 2), HCh]", dtype: float32}
           OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          OUTPUT[1]: {shape: "[1, T, HCm]", dtype: float32}
+          OUTPUT[2]: {shape: "[1, T, HCm, HCm]", dtype: float32}
     runtime:
-      boundary_operators: [hc_pre_inv_rms]
+      boundary_operators: [hc_pre_v3]
       ignored_operator_groups: [quantization, dtype_cast, layout_permute, shape_views, tensor_storage, broadcast_shapes]
       ignored_operators:
         - mul

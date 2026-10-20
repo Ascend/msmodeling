@@ -14,13 +14,18 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
-from tensor_cast.core.config_resolver import ConfigResolver, _resolve_model_dtype
+from tensor_cast.core.config_resolver import ConfigResolver, _resolve_model_dtype, _resolve_text_config
+from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
+from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.model_config import ParallelConfig
 
 
@@ -179,6 +184,22 @@ class ModelDtypeResolutionTestCase(unittest.TestCase):
                 self.assertIs(resolver.model_config.is_compile_enabled, do_compile)
 
 
+class TextConfigResolutionTestCase(unittest.TestCase):
+    def test_uses_get_text_config_when_available(self):
+        text_config = SimpleNamespace(dspark_block_size=5)
+        config = SimpleNamespace(get_text_config=lambda: text_config)
+        self.assertIs(_resolve_text_config(config), text_config)
+
+    def test_uses_nested_text_config_without_getter(self):
+        text_config = SimpleNamespace(dspark_block_size=5)
+        config = SimpleNamespace(text_config=text_config)
+        self.assertIs(_resolve_text_config(config), text_config)
+
+    def test_falls_back_to_outer_config(self):
+        config = SimpleNamespace(dspark_block_size=5)
+        self.assertIs(_resolve_text_config(config), config)
+
+
 class DsaCpStructureTestCase(unittest.TestCase):
     def test_has_dsa_structure_matches_index_topk(self):
         resolver = _make_resolver()
@@ -251,6 +272,195 @@ class DraftSpecRepetitionTestCase(unittest.TestCase):
 
         captured = self._resolve_with(UserInputConfig(disable_repetition=False))
         self.assertTrue(captured["enable_repetition"])
+
+
+class DsparkDefaultsTestCase(unittest.TestCase):
+    @staticmethod
+    def _resolver(hf_config):
+        from tensor_cast.model_config import ModelConfig, QuantConfig
+
+        resolver = object.__new__(ConfigResolver)
+        resolver.hf_config = hf_config
+        resolver.model_config = ModelConfig(ParallelConfig(), QuantConfig())
+        return resolver
+
+    @staticmethod
+    def _native_config():
+        return SimpleNamespace(
+            model_type="deepseek_v41_text",
+            num_nextn_predict_layers=3,
+            dspark_target_layer_ids=[37, 38, 39],
+            dspark_block_size=5,
+            sliding_window=128,
+        )
+
+    def test_native_defaults_do_not_load_generic_draft(self):
+        text = self._native_config()
+        for config in (text, SimpleNamespace(text_config=text), SimpleNamespace(get_text_config=lambda: text)):
+            with self.subTest(config=repr(config)):
+                resolver = self._resolver(config)
+                with patch("tensor_cast.layers.dspark.apply_cli_overrides_to_dspark_config") as generic:
+                    resolver.update_dspark_config(dspark=True)
+                generic.assert_not_called()
+                draft = resolver.model_config.dspark_config
+                self.assertEqual(draft.num_draft_layers, 3)
+                self.assertEqual(draft.aux_hidden_state_layer_ids, [37, 38, 39])
+                self.assertEqual(draft.sliding_window, 128)
+                self.assertEqual(draft.dspark_block_size, 6)
+                self.assertIsNone(draft.layer_types)
+
+    def test_normalized_native_aux_ids_are_supported(self):
+        config = self._native_config()
+        del config.dspark_target_layer_ids
+        config.excluded_dspark_layer_ids = (37, 38, 39)
+        resolver = self._resolver(config)
+        resolver.update_dspark_config(dspark=True)
+        self.assertEqual(resolver.model_config.dspark_config.num_draft_layers, 3)
+        self.assertEqual(resolver.model_config.dspark_config.aux_hidden_state_layer_ids, [37, 38, 39])
+
+    def test_generic_defaults_remain_six_layers(self):
+        # MTP declarations on other model families must not select native DSpark.
+        for config in (
+            SimpleNamespace(model_type="qwen3"),
+            SimpleNamespace(model_type="other", num_nextn_predict_layers=3),
+            SimpleNamespace(model_type="deepseek_v41_text", num_nextn_predict_layers=0),
+        ):
+            with self.subTest(config=repr(config)):
+                resolver = self._resolver(config)
+                resolver.update_dspark_config(dspark=True)
+                draft = resolver.model_config.dspark_config
+                self.assertEqual(draft.num_draft_layers, 6)
+                self.assertEqual(draft.dspark_block_size, 8)
+                self.assertEqual(draft.aux_hidden_state_layer_ids, [1, 12, 24, 35, 47, 58])
+
+    def test_explicit_cli_overrides_remain_effective(self):
+        for config in (self._native_config(), SimpleNamespace(model_type="qwen3")):
+            with self.subTest(config=repr(config)):
+                resolver = self._resolver(config)
+                resolver.update_dspark_config(dspark=True, num_draft_layers=4, dspark_block_size=4)
+                draft = resolver.model_config.dspark_config
+                self.assertEqual(draft.num_draft_layers, 4)
+                self.assertEqual(draft.dspark_block_size, 4)
+                self.assertEqual(draft.dspark_acceptance_length, 3)
+
+    def test_explicit_draft_file_and_cli_priority_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"num_hidden_layers": 2, "block_size": 4}), encoding="utf-8")
+            for config in (self._native_config(), SimpleNamespace(model_type="qwen3")):
+                resolver = self._resolver(config)
+                resolver.update_dspark_config(dspark=True, draft_model_config_path=str(config_path))
+                self.assertEqual(resolver.model_config.dspark_config.num_draft_layers, 2)
+                self.assertEqual(resolver.model_config.dspark_config.dspark_block_size, 4)
+                resolver.update_dspark_config(
+                    dspark=True, draft_model_config_path=str(config_path), num_draft_layers=3, dspark_block_size=6
+                )
+                self.assertEqual(resolver.model_config.dspark_config.num_draft_layers, 3)
+                self.assertEqual(resolver.model_config.dspark_config.dspark_block_size, 6)
+
+    def test_resolved_checkpoint_defaults_build_native_draft(self):
+        from tensor_cast.layers.deepseek_v41_dspark import DeepseekV41NativeDsparkDraft
+        from tensor_cast.transformers.builtin_model.deepseek_v41 import DeepseekV41Config
+
+        checkpoint = Path(__file__).resolve().parents[2] / "assets/model_config/deepseek_v41_flash"
+        config = DeepseekV41Config.from_pretrained(checkpoint)
+        resolver = ConfigResolver(
+            user_input=UserInputConfig(model_id=str(checkpoint), speculative_method="dspark", do_compile=True)
+        )
+        resolver.resolve()
+        with torch.device("meta"):
+            draft = DeepseekV41NativeDsparkDraft(config.get_text_config(), resolver.model_config.dspark_config)
+        self.assertEqual(len(draft.layers), 3)
+        self.assertEqual(draft.target_layer_ids, [37, 38, 39])
+        self.assertEqual(draft.proposal_count, config.get_text_config().dspark_block_size)
+        self.assertEqual(draft.layers[0].mlp.gate.top_k, 3)
+        self.assertEqual(draft.layers[0].mlp.gate.weight.shape[0], 128)
+
+
+class DeepseekV41AttentionQuantValidationTestCase(unittest.TestCase):
+    def test_rejects_generic_attention_quantization(self):
+        from tensor_cast.model_config import ModelConfig, QuantConfig
+
+        resolver = object.__new__(ConfigResolver)
+        resolver.user_input = UserInputConfig(
+            quantize_attention_action=QuantizeAttentionAction.FP8,
+        )
+        resolver.model_config = ModelConfig(ParallelConfig(), QuantConfig())
+        resolver.hf_config = MagicMock()
+        resolver.hf_config.model_type = "deepseek_v41"
+        resolver.update_hf_config = MagicMock()
+        resolver.update_moe_config = MagicMock()
+        resolver.update_mla_config = MagicMock()
+
+        with self.assertRaisesRegex(ValueError, "does not support --quantize-attention-action"):
+            resolver.resolve()
+
+    def test_disabled_attention_quantization_is_allowed(self):
+        from tensor_cast.model_config import ModelConfig, QuantConfig
+
+        resolver = object.__new__(ConfigResolver)
+        resolver.user_input = UserInputConfig(
+            quantize_attention_action=QuantizeAttentionAction.DISABLED,
+        )
+        resolver.model_config = ModelConfig(ParallelConfig(), QuantConfig())
+        resolver.hf_config = MagicMock()
+        resolver.hf_config.model_type = "deepseek_v41"
+        resolver.update_hf_config = MagicMock()
+        resolver.update_moe_config = MagicMock()
+        resolver.update_mla_config = MagicMock()
+        resolver.update_mtp_config = MagicMock()
+        resolver.update_parallel_config = MagicMock()
+        resolver.validate_moe_parallel_config = MagicMock()
+
+        resolver.resolve()
+
+
+class DeepseekV41SpeculativeEntryTestCase(unittest.TestCase):
+    def _resolver(self, user_input):
+        resolver = DsparkDefaultsTestCase._resolver(
+            SimpleNamespace(
+                model_type="deepseek_v41",
+                get_text_config=DsparkDefaultsTestCase._native_config,
+            )
+        )
+        resolver.user_input = user_input
+        for name in (
+            "update_hf_config",
+            "update_moe_config",
+            "update_mla_config",
+            "update_mtp_config",
+            "update_parallel_config",
+            "validate_moe_parallel_config",
+        ):
+            setattr(resolver, name, MagicMock())
+        return resolver
+
+    def test_rejects_generic_mtp_and_dflash_at_resolve_entry(self):
+        for options, message in (
+            ({"num_mtp_tokens": 2}, "generic MTP"),
+            ({"speculative_method": "dflash"}, "generic DFlash"),
+        ):
+            with self.subTest(options=repr(options)):
+                resolver = self._resolver(UserInputConfig(**options))
+                with self.assertRaisesRegex(ValueError, message):
+                    resolver.resolve()
+
+    def test_native_decode_defaults_and_explicit_token_priority(self):
+        for explicit, expected_tokens in ((False, 5), (True, 2)):
+            with self.subTest(explicit=explicit):
+                user = UserInputConfig(
+                    speculative_method="dspark",
+                    decode=True,
+                    num_speculative_tokens=2,
+                    num_speculative_tokens_explicit=explicit,
+                    query_len=3,
+                )
+                resolver = self._resolver(user)
+                config = resolver.resolve()
+                self.assertEqual(user.num_speculative_tokens, expected_tokens)
+                self.assertEqual(user.query_len, expected_tokens + 1)
+                self.assertEqual(config.dspark_config.dspark_block_size, expected_tokens + 1)
+                self.assertEqual(config.dspark_config.num_draft_layers, 3)
 
 
 if __name__ == "__main__":

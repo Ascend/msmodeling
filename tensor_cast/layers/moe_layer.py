@@ -489,6 +489,21 @@ class ParallelMoELayer(ModelWrapperBase):
             hidden_states = self.global_dp_group.all_gather(hidden_states, dim=0)
         return hidden_states, num_tokens
 
+    def _dp_transform_routing_tensor(self, tensor: Optional[torch.Tensor], num_tokens: int) -> Optional[torch.Tensor]:
+        """Apply the same token-domain transform as hidden_states to routing metadata."""
+        if tensor is None:
+            return None
+        tensor = tensor.reshape(-1)
+        if tensor.shape[0] != num_tokens:
+            raise ValueError(f"MoE routing metadata has {tensor.shape[0]} tokens, expected {num_tokens}")
+        if self.has_ep:
+            divisor = self._get_dp_alignment()
+            padding_tokens = (-num_tokens) % divisor
+            if padding_tokens > 0:
+                tensor = F.pad(tensor, (0, padding_tokens), value=0)
+            return self.global_tp_group.slice(tensor, dim=0)
+        return self.global_dp_group.all_gather(tensor, dim=0)
+
     def _dp_transform_exit(self, hidden_states: torch.Tensor, num_tokens: int) -> torch.Tensor:
         """Post-MoE DP domain transform. Restores original token count."""
         if self.has_ep:
@@ -597,7 +612,9 @@ class ParallelMoELayer(ModelWrapperBase):
             origin_shape = hidden_states.shape
             if len(origin_shape) == 3:
                 hidden_states = hidden_states.view(-1, *origin_shape[2:])
+            original_num_tokens = hidden_states.shape[0]
             hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
+            input_ids = self._dp_transform_routing_tensor(input_ids, original_num_tokens)
 
         hidden_states = self._inner(hidden_states, input_ids=input_ids)
 

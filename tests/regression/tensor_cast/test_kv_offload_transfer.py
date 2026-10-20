@@ -235,7 +235,7 @@ def test_apply_prefill_kv_offload_accounting_on_but_decode_skipped():
     assert peak == 10.0
 
 
-def test_atlas_a_series_host_link_calibrated():
+def test_atlas_a_series_host_link_configuration():
     from tensor_cast.device import ATLAS_800
 
     profiles = [
@@ -253,11 +253,9 @@ def test_atlas_a_series_host_link_calibrated():
             # A3 host link is calibrated to the confirmed die-level spec.
             assert profile.host_bandwidth_bytes_ps == 70e9, f"{profile.name} wrong A3 host bandwidth"
         else:
-            # A2 host links are intentionally uncalibrated: enabling KV offload
-            # on them fails fast instead of using a placeholder bandwidth.
-            assert profile.host_bandwidth_bytes_ps == 0, f"{profile.name} should be uncalibrated"
-        assert profile.host_latency_s > 0, f"{profile.name} host_latency not set"
-        assert 0 < profile.host_transfer_efficiency <= 1.0, f"{profile.name} bad efficiency"
+            assert profile.host_bandwidth_bytes_ps == 32e9, f"{profile.name} wrong A2 host bandwidth"
+        assert profile.host_latency_s == 5e-6, f"{profile.name} wrong latency"
+        assert profile.host_transfer_efficiency == 0.8, f"{profile.name} wrong efficiency"
     # A3_560T_128G_DIE_ROCE is built via dataclasses.replace and must inherit the
     # host link from A3_560T_128G_DIE.
     assert ATLAS_800.A3_560T_128G_DIE_ROCE.host_bandwidth_bytes_ps == ATLAS_800.A3_560T_128G_DIE.host_bandwidth_bytes_ps
@@ -267,17 +265,15 @@ def test_atlas_a_series_host_link_calibrated():
     assert ATLAS_800.A3_560T_128G_DIE.host_bandwidth_bytes_ps == 70e9
 
 
-def test_a5_host_link_calibrated():
+def test_a5_host_link_configuration():
     from tensor_cast.device import A5, DeviceProfile
 
     profiles = [v for v in vars(A5).values() if isinstance(v, DeviceProfile)]
     assert profiles, "no A5 DeviceProfile instances found"
     for profile in profiles:
-        # A5 host links are intentionally uncalibrated: enabling KV offload on
-        # them fails fast instead of using a placeholder bandwidth.
-        assert profile.host_bandwidth_bytes_ps == 0, f"{profile.name} should be uncalibrated"
-        assert profile.host_latency_s > 0, f"{profile.name} host_latency not set"
-        assert 0 < profile.host_transfer_efficiency <= 1.0, f"{profile.name} bad efficiency"
+        assert profile.host_bandwidth_bytes_ps == 112e9, f"{profile.name} wrong A5 host bandwidth"
+        assert profile.host_latency_s == 5e-6, f"{profile.name} wrong latency"
+        assert profile.host_transfer_efficiency == 0.8, f"{profile.name} wrong efficiency"
 
 
 def test_model_runner_metrics_offload_fields_default_inactive():

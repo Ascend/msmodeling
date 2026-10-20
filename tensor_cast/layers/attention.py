@@ -110,6 +110,12 @@ class AttentionMetadataBase:
     ``.item()``.
     """
 
+    start_pos: Optional[int] = None
+    """Uniform absolute start position for a decode/chunked-prefill step."""
+
+    compressed_slot_mapping: Optional[torch.Tensor] = None
+    """Logical compressed-cache slots for CSA2 source writes."""
+
     is_dcp_decode: bool = dataclasses.field(init=False, default=False)
     """Whether this batch is a DCP-eligible decode step. Resolved ONCE here on
     the host (``__post_init__``) so the ``torch.compile``-traced attention

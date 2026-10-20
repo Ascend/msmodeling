@@ -109,6 +109,7 @@ def arg_parse():
         args.num_mtp_token_sizes = []
 
         n_raw = getattr(args, "num_speculative_tokens", None)
+        args.num_speculative_tokens_explicit = n_raw is not None
 
         if isinstance(n_raw, list):
             # Explicit multi-value: dedup + validate non-negative (check_non_negative_integer already rejects < 0).
@@ -122,11 +123,22 @@ def arg_parse():
             # Omitted: dflash/dspark → builtin (C2); mtp requires explicit n.
             if method == "mtp":
                 parser.error("--speculative-method mtp requires --num-speculative-tokens")
-            builtin_n, _ = resolve_num_speculative_tokens_to_block(
-                0,
-                draft_model_config_path=getattr(args, "draft_model_config_path", None),
-                explicit=False,
-            )
+            builtin_n = 0
+            if method == "dspark":
+                try:
+                    from tensor_cast.transformers.utils import AutoModelConfigLoader
+
+                    model_config = AutoModelConfigLoader().load_config(args.model_id)
+                    if getattr(model_config, "model_type", None) == "deepseek_v41":
+                        builtin_n = int(getattr(model_config.get_text_config(), "dspark_block_size", 0) or 0)
+                except (OSError, ValueError, AttributeError):
+                    builtin_n = 0
+            if builtin_n <= 0:
+                builtin_n, _ = resolve_num_speculative_tokens_to_block(
+                    0,
+                    draft_model_config_path=getattr(args, "draft_model_config_path", None),
+                    explicit=False,
+                )
             n_candidates = [builtin_n]
         else:
             n_candidates = [int(n_raw)]

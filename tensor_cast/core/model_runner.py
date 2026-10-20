@@ -154,6 +154,15 @@ class ModelRunner:
         # ---------- 4. static_memory ----------
         self.total_device_memory_gb = self.device_profile.memory_size_bytes / 1024**3
         self.model_weight_size_gb = self.model.weight_size / 1024**3
+        text_config = getattr(self.model, "text_config", None)
+        engram_rows = tuple(getattr(text_config, "engram_num_embeddings", ()))
+        engram_head_dim = int(getattr(text_config, "engram_head_dim", 0) or 0)
+        engram_row_bytes = engram_head_dim + (engram_head_dim // 32 if engram_head_dim else 0)
+        self.engram_host_resident_size_gb = sum(engram_rows) * engram_row_bytes / 1024**3
+        group_manager = getattr(self.model, "parallel_group_manager", None)
+        all_rank_group = getattr(group_manager, "all_rank_group", None)
+        engram_shard_size = max(int(getattr(all_rank_group, "world_size", 1)), 1)
+        self.engram_host_resident_per_rank_gb = self.engram_host_resident_size_gb / engram_shard_size
 
         logger.info("Initializing Sampler")
         self.sampler = Sampler()
@@ -257,6 +266,26 @@ class ModelRunner:
     # not user-facing: revisit in code only when a hybrid model needs it.
     _PREFILL_OFFLOAD_SHARED_BUFFERS = 2
     _PREFILL_OFFLOAD_INDEPENDENT_LAYERS = 0
+
+    def _validate_kv_offload_model(self) -> None:
+        """CSA2 ownership and compressed scales need dedicated offload accounting."""
+        if not (
+            getattr(self.user_input, "enable_decode_kv_offload", False)
+            or getattr(self.user_input, "enable_prefill_kv_offload", False)
+        ):
+            return
+        model_config = getattr(getattr(self, "model", None), "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "hf_text_config", None)
+        if any(
+            getattr(cfg, "model_type", None) in {"deepseek_v41", "deepseek_v41_text"}
+            for cfg in (hf_config, text_config)
+        ):
+            raise ValueError(
+                "DeepSeek V4.1 KV offload is not supported yet: CSA2 shared ownership, "
+                "compressed KV payloads and scales require dedicated offload accounting. "
+                "Disable enable_decode_kv_offload and enable_prefill_kv_offload."
+            )
 
     @staticmethod
     def _resolve_model_sparse_topk(model) -> int:
@@ -508,6 +537,7 @@ class ModelRunner:
         (this avoids a no-op recomputing kv_cache_size_gb and undoing the
         active phase's adjustment).
         """
+        ModelRunner._validate_kv_offload_model(self)
         if is_decode:
             return self._apply_decode_kv_offload_accounting(
                 peak_memory_usage_gb,
@@ -569,6 +599,7 @@ class ModelRunner:
         with_sampler: bool = False,
         runtime_observer: Optional[Callable[[Runtime], None]] = None,
     ) -> ModelRunnerMetrics:
+        ModelRunner._validate_kv_offload_model(self)
         empirical_record_offsets = {
             id(perf_model): len(perf_model.op_records)
             for perf_model in self.perf_models
@@ -589,7 +620,6 @@ class ModelRunner:
             requests,
             block_size=self.user_input.block_size,
         )
-
         run_start = time.perf_counter()
         if isinstance(self.model, PipelineModel):
             if getattr(self.user_input, "enable_decode_kv_offload", False) or getattr(
@@ -677,6 +707,16 @@ class ModelRunner:
 
         perf_model_name = self.perf_models[0].name if self.perf_models else None
         runtime_event_list = self._aggregate_runtime_events(runtime.event_list, perf_model_name=perf_model_name)
+        host_to_device_bytes = sum(
+            event.op_invoke_info.get_perf_properties().host_to_device_bytes for event in runtime.event_list
+        )
+        host_to_device_time_s = 0.0
+        if perf_model_name is not None:
+            host_to_device_time_s = sum(
+                float(event.perf_results[perf_model_name].statistics.get("host_to_device_time_s", 0.0))
+                for event in runtime.event_list
+                if perf_model_name in event.perf_results
+            )
 
         # Calculate TPS for each model
         tps_per_model: Dict[str, float] = {}
@@ -689,15 +729,41 @@ class ModelRunner:
         # linear_attention 层占位张量不计入 KV cache 字节（判定集中维护于
         # kv_cache_excluded_layer_indices，确保 kv_cache_bytes 与 kv_cache_per_token 口径一致）。
         excluded_layers = kv_cache_excluded_layer_indices(self.model)
-        per_layer_kv_bytes = {
-            layer_idx: bytes_of_tensor(kv_cache)
-            for layer_idx, kv_cache in input_kwargs["kv_cache_by_layers"].items()
-            if layer_idx not in excluded_layers
-        }
+        # V4.1 CSA2 reuse/reindex layers alias the physical cache owned by a
+        # source layer. Count each tensor object once while retaining the
+        # per-layer lookup keys required by the attention wrappers.
+        seen_kv_cache_ids = set()
+        per_layer_kv_bytes = {}
+        for layer_idx, kv_cache in input_kwargs["kv_cache_by_layers"].items():
+            if layer_idx in excluded_layers or id(kv_cache) in seen_kv_cache_ids:
+                continue
+            seen_kv_cache_ids.add(id(kv_cache))
+            per_layer_kv_bytes[layer_idx] = bytes_of_tensor(kv_cache)
         kv_cache_bytes = sum(per_layer_kv_bytes.values())
-        indexer_cache_bytes = sum(
-            bytes_of_tensor(kv_cache) for kv_cache in input_kwargs.get("indexer_cache_by_layers", {}).values()
-        )
+        seen_indexer_cache_ids = set()
+        indexer_cache_bytes = 0
+        for kv_cache in input_kwargs.get("indexer_cache_by_layers", {}).values():
+            if id(kv_cache) in seen_indexer_cache_ids:
+                continue
+            seen_indexer_cache_ids.add(id(kv_cache))
+            indexer_cache_bytes += bytes_of_tensor(kv_cache)
+        for scale_cache in input_kwargs.get("indexer_scale_cache_by_layers", {}).values():
+            if id(scale_cache) in seen_indexer_cache_ids:
+                continue
+            seen_indexer_cache_ids.add(id(scale_cache))
+            indexer_cache_bytes += bytes_of_tensor(scale_cache)
+        seen_compressed_cache_ids = set()
+        compressed_cache_bytes = 0
+        for kv_cache in input_kwargs.get("compressed_kv_cache_by_source", {}).values():
+            if id(kv_cache) in seen_compressed_cache_ids:
+                continue
+            seen_compressed_cache_ids.add(id(kv_cache))
+            compressed_cache_bytes += bytes_of_tensor(kv_cache)
+        for scale_cache in input_kwargs.get("compressed_kv_scale_cache_by_source", {}).values():
+            if id(scale_cache) in seen_compressed_cache_ids:
+                continue
+            seen_compressed_cache_ids.add(id(scale_cache))
+            compressed_cache_bytes += bytes_of_tensor(scale_cache)
         is_decode_step = bool(requests) and all(getattr(r, "is_decode", False) for r in requests)
         # Hot-buffer sizing must follow the requests' concurrency: the optimizer
         # encodes the searched batch in requests[0].concurrency (the
@@ -725,8 +791,12 @@ class ModelRunner:
             is_decode_step,
             cache_layer_count,
         )
+        # CSA2 compressed payloads and scales remain device-resident.
+        kv_cache_size_gb += compressed_cache_bytes / 1024**3
         kv_cache_per_token_gb = (
-            input_kwargs["kv_cache_per_token"] + input_kwargs.get("indexer_cache_per_token", 0)
+            input_kwargs["kv_cache_per_token"]
+            + input_kwargs.get("indexer_cache_per_token", 0)
+            + input_kwargs.get("compressed_kv_cache_per_token", 0)
         ) / 1024**3
         # DCP shards the KV cache along the token dimension, so a card can hold more
         # tokens for the same byte budget where that shard is a real saving (``dcp``
@@ -739,6 +809,16 @@ class ModelRunner:
             # in the calculation and needs to be removed
             visual_weight_size_gb = self.model.get_weight_size_nested([get_visual(self.model)]) / 1024**3
             self.model_weight_size_gb = self.model_weight_size_gb - visual_weight_size_gb
+            if self.model.model_config.hf_config.model_type == "deepseek_v41":
+                # V4.1 stores its Aligner and boundary embeddings beside the ViT.
+                unwrapped = self.model.unwrap()
+                aligner = getattr(unwrapped, "aligner", None)
+                if aligner is not None:
+                    self.model_weight_size_gb -= self.model.get_weight_size_nested([aligner]) / 1024**3
+                for name in ("image_start", "image_end", "image_newline"):
+                    value = getattr(unwrapped, name, None)
+                    if isinstance(value, torch.Tensor):
+                        self.model_weight_size_gb -= bytes_of_tensor(value) / 1024**3
 
         peak_memory_usage_gb = self._check_peak_memory_usage_gb(
             peak_memory_usage_gb,
@@ -770,6 +850,10 @@ class ModelRunner:
         return ModelRunnerMetrics(
             total_device_memory_gb=self.total_device_memory_gb,
             model_weight_size_gb=self.model_weight_size_gb,
+            engram_host_resident_size_gb=self.engram_host_resident_size_gb,
+            engram_host_resident_per_rank_gb=self.engram_host_resident_per_rank_gb,
+            host_to_device_bytes=host_to_device_bytes,
+            host_to_device_time_s=host_to_device_time_s,
             peak_memory_usage_gb=peak_memory_usage_gb,
             kv_cache_size_gb=kv_cache_size_gb,
             kv_cache_per_token_gb=kv_cache_per_token_gb,
@@ -851,6 +935,8 @@ class ModelRunner:
         return ModelRunnerMetrics(
             total_device_memory_gb=self.total_device_memory_gb,
             model_weight_size_gb=model_weight_size_gb,
+            engram_host_resident_size_gb=self.engram_host_resident_size_gb,
+            engram_host_resident_per_rank_gb=self.engram_host_resident_per_rank_gb,
             peak_memory_usage_gb=peak_memory_usage_gb,
             kv_cache_size_gb=kv_cache_size_gb,
             kv_cache_per_token_gb=kv_cache_per_token_gb,
@@ -942,6 +1028,10 @@ class ModelRunnerMetrics:
     """TPS per performance model, keyed by model name."""
     run_time_s: float
     batch_size: int
+    engram_host_resident_size_gb: float = 0.0
+    engram_host_resident_per_rank_gb: float = 0.0
+    host_to_device_bytes: int = 0
+    host_to_device_time_s: float = 0.0
     kv_cache_token_capacity_factor: int = 1
     """Per-card KV token capacity multiplier from DCP (1 when DCP is off, and when the
     token shard buys no real per-card saving). warmup() multiplies ``num_blocks`` by
@@ -992,6 +1082,12 @@ class ModelRunnerMetrics:
 
         print(f"Total device memory: {self.total_device_memory_gb:.3f} GB")
         print(f"  Model weight size: {self.model_weight_size_gb:.3f} GB")
+        if self.engram_host_resident_size_gb > 0:
+            print(f"  Engram host-resident tables: {self.engram_host_resident_size_gb:.3f} GB")
+            print(f"    Per-rank row shard: {self.engram_host_resident_per_rank_gb:.3f} GB")
+        if self.host_to_device_bytes > 0:
+            print(f"  Host-to-device traffic: {self.host_to_device_bytes / 1024**2:.3f} MB")
+            print(f"  Host-to-device time: {self.host_to_device_time_s * 1e3:.3f} ms")
         print(f"  KV cache: {self.kv_cache_size_gb:.3f} GB")
         if self.indexer_cache_size_gb > 0:
             print(f"    Main KV cache: {self.kv_cache_size_gb - self.indexer_cache_size_gb:.3f} GB")
