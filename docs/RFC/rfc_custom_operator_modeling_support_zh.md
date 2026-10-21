@@ -7,7 +7,7 @@
 | **状态** | 已批准                                       |
 | **作者** | genius52                                  |
 | **创建日期** | 2026-1-19                                 |
-| **相关链接** | https://gitcode.com/Ascend/msmodeling/pull/50 |
+| **相关链接** | <https://gitcode.com/Ascend/msmodeling/pull/50> |
 
 ---
 

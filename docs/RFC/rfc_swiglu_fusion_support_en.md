@@ -7,7 +7,7 @@
 | **Status** | Approved                                      |
 | **Author** | genius52                                      |
 | **Created Date** | 2026-02-06                                    |
-| **Related Links** | https://gitcode.com/Ascend/msmodeling/pull/75 |
+| **Related Links** | <https://gitcode.com/Ascend/msmodeling/pull/75> |
 
 ---
 

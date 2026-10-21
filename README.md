@@ -23,8 +23,8 @@
 <details>
 <summary><b>DeepSeek 系列</b></summary>
 
-🔹 [2026.06.04] msModeling 新增 **DeepSeek-V4** 模型支持  
-🔹 [2026.04.20] msModeling 新增 **DeepSeek V3.2** 模型支持  
+🔹 [2026.06.04] msModeling 新增 **DeepSeek-V4** 模型支持
+🔹 [2026.04.20] msModeling 新增 **DeepSeek V3.2** 模型支持
 🔹 [2025.09.06] msModeling 新增 **DeepSeek V3** 模型支持
 
 </details>
@@ -32,8 +32,8 @@
 <details>
 <summary><b>Kimi 系列</b></summary>
 
-🔹 [2026.06.11] msModeling 新增 **Kimi-K2.6** 模型支持  
-🔹 [2026.05.27] msModeling 新增 **Kimi-K2.5** 模型支持  
+🔹 [2026.06.11] msModeling 新增 **Kimi-K2.6** 模型支持
+🔹 [2026.05.27] msModeling 新增 **Kimi-K2.5** 模型支持
 🔹 [2025.09.06] msModeling 新增 **Kimi-K2** 模型支持
 
 </details>
@@ -41,10 +41,10 @@
 <details>
 <summary><b>Qwen 系列</b></summary>
 
-🔹 [2026.04.20] msModeling 新增 **Qwen3.5** 图片输入支持  
-🔹 [2026.03.31] msModeling 新增 **Qwen3.5 Dense / MoE** 文本输入支持  
-🔹 [2025.12.25] msModeling 新增 **Qwen3 MoE** 模型支持  
-🔹 [2025.09.18] msModeling 新增 **Qwen3-Next** 模型支持  
+🔹 [2026.04.20] msModeling 新增 **Qwen3.5** 图片输入支持
+🔹 [2026.03.31] msModeling 新增 **Qwen3.5 Dense / MoE** 文本输入支持
+🔹 [2025.12.25] msModeling 新增 **Qwen3 MoE** 模型支持
+🔹 [2025.09.18] msModeling 新增 **Qwen3-Next** 模型支持
 🔹 [2025.08.18] msModeling 新增 **Qwen3 Dense** 模型支持
 
 </details>
@@ -52,8 +52,8 @@
 <details>
 <summary><b>GLM 系列</b></summary>
 
-🔹 [2026.06.04] msModeling 新增 **GLM5.1** 模型支持  
-🔹 [2026.04.30] msModeling 新增 **GLM5** 模型支持  
+🔹 [2026.06.04] msModeling 新增 **GLM5.1** 模型支持
+🔹 [2026.04.30] msModeling 新增 **GLM5** 模型支持
 🔹 [2026.03.31] msModeling 新增 **GLM-4 MoE** 模型支持
 
 </details>
@@ -74,15 +74,15 @@
 <details>
 <summary><b>模型推理性能仿真</b></summary>
 
-🔹 多硬件仿真（Atlas 800 A2/A3、Atlas 350 等昇腾设备），支持自定义设备画像  
-🔹 LLM Prefill / Decode 分阶段仿真  
-🔹 Prefix Cache 仿真  
-🔹 MTP 投机解码仿真  
-🔹 编译与图优化、多流通算掩盖  
-🔹 量化仿真（W8A8 / W4A8 / FP8 / MXFP4 等）  
-🔹 并行与 MoE 扩展（TP / DP / EP，及 Embedding TP、Vision TP 等细粒度并行）  
-🔹 性能模型切换（Roofline / Profiling）  
-🔹 Chrome Trace / Debug  
+🔹 多硬件仿真（Atlas 800 A2/A3、Atlas 350 等昇腾设备），支持自定义设备画像
+🔹 LLM Prefill / Decode 分阶段仿真
+🔹 Prefix Cache 仿真
+🔹 MTP 投机解码仿真
+🔹 编译与图优化、多流通算掩盖
+🔹 量化仿真（W8A8 / W4A8 / FP8 / MXFP4 等）
+🔹 并行与 MoE 扩展（TP / DP / EP，及 Embedding TP、Vision TP 等细粒度并行）
+🔹 性能模型切换（Roofline / Profiling）
+🔹 Chrome Trace / Debug
 🔹 视频生成 DiT 仿真（Ulysses、CFG、DiT Cache）
 
 </details>
@@ -90,14 +90,14 @@
 <details>
 <summary><b>服务化性能仿真</b></summary>
 
-🔹 LLM / VLM 约束下吞吐优化（TTFT / TPOT / 服务成本）  
-🔹 PD 模式（混部 / 分离 / 配比）  
-🔹 并行策略搜索（TP / EP / MOE-DP）  
-🔹 MTP 配置搜索  
-🔹 Chunked Prefill 仿真  
-🔹 Prefix Cache 仿真  
-🔹 变长负载仿真  
-🔹 多流通算掩盖  
+🔹 LLM / VLM 约束下吞吐优化（TTFT / TPOT / 服务成本）
+🔹 PD 模式（混部 / 分离 / 配比）
+🔹 并行策略搜索（TP / EP / MOE-DP）
+🔹 MTP 配置搜索
+🔹 Chunked Prefill 仿真
+🔹 Prefix Cache 仿真
+🔹 变长负载仿真
+🔹 多流通算掩盖
 🔹 跨硬件对比
 
 </details>
@@ -105,9 +105,9 @@
 <details>
 <summary><b>Web UI</b></summary>
 
-🔹 LLM / VL 前向仿真与视频生成仿真  
-🔹 吞吐寻优实验（PD 混部 / 分离 / 配比）  
-🔹 命令预览与任务缓存  
+🔹 LLM / VL 前向仿真与视频生成仿真
+🔹 吞吐寻优实验（PD 混部 / 分离 / 配比）
+🔹 命令预览与任务缓存
 🔹 结果展示与导出（曲线、表格、显存/算子明细、Excel）
 
 </details>
@@ -115,8 +115,8 @@
 <details>
 <summary><b>服务化实测寻优</b></summary>
 
-🔹 服务框架实测寻优（PSO + Early Rejection）  
-🔹 多引擎支持（vLLM、MindIE）与评测策略  
+🔹 服务框架实测寻优（PSO + Early Rejection）
+🔹 多引擎支持（vLLM、MindIE）与评测策略
 🔹 自定义寻优配置与断点续跑
 
 </details>
@@ -183,7 +183,7 @@ msModeling 提供模型推理性能仿真、服务化性能仿真和服务化实
 
 | 即时互动（微信群） | 官方资讯（公众号） | 深度支持（助手/论坛） |
 |:--:|:--:|:--|
-| <img src="https://raw.gitcode.com/mengguangxin/docs/files/dev_0526/common/Writing_Template/figures/qr_code_wechat_work.png" width="120"><br><sub>*扫码加入技术交流群*</sub> | <img src="https://raw.gitcode.com/mengguangxin/docs/files/dev_0526/common/Writing_Template/figures/qr_code_wechat_official_account.png" width="120"><br><sub>*扫码关注官方公众号*</sub> | 扫码入群并关注公众号，直达 MindStudio 用户与开发者最快捷的交流平台：<br>**快速提问：** 与社区小伙伴即时探讨技术问题<br>**掌握动态：** 第一时间获取版本发布与功能更新通知<br>**经验共享：** 与广大开发者交流最佳实践与实战心得<br><br>**更多支持渠道**：👉 昇腾助手：[![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white)](https://gitcode.com/Ascend/msit/blob/master/docs/zh/figures/readme/xiaozhushou.png) 👉 昇腾论坛：[![Website](https://img.shields.io/badge/Website-%231e37ff?style=flat-square&logo=RSS&logoColor=white)](https://www.hiascend.com/forum/) |
+| <img src="https://raw.gitcode.com/Ascend/docs/files/master/common/Writing_Template/figures/qr_code_wechat_work.png" width="120"><br><sub>*扫码加入技术交流群*</sub> | <img src="https://raw.gitcode.com/Ascend/docs/files/master/common/Writing_Template/figures/qr_code_wechat_official_account.png" width="120"><br><sub>*扫码关注官方公众号*</sub> | 扫码入群并关注公众号，直达 MindStudio 用户与开发者最快捷的交流平台：<br>**快速提问：** 与社区小伙伴即时探讨技术问题<br>**掌握动态：** 第一时间获取版本发布与功能更新通知<br>**经验共享：** 与广大开发者交流最佳实践与实战心得<br><br>**更多支持渠道**：👉 昇腾助手：[![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white)](https://gitcode.com/Ascend/msit/blob/master/docs/zh/figures/readme/xiaozhushou.png) 👉 昇腾论坛：[![Website](https://img.shields.io/badge/Website-%231e37ff?style=flat-square&logo=RSS&logoColor=white)](https://www.hiascend.com/forum/) |
 
 ## 🙏 致谢
 

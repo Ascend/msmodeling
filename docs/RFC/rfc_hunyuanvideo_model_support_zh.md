@@ -7,7 +7,7 @@
 | **状态** | 已批准                                       |
 | **作者** | genius52                                  |
 | **创建日期** | 2025-12-25                                |
-| **相关链接** | https://gitcode.com/Ascend/msit/pull/4911 |
+| **相关链接** | <https://gitcode.com/Ascend/msit/pull/4911> |
 
 ---
 
