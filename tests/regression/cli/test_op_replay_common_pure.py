@@ -21,7 +21,7 @@ import csv
 import unittest
 
 from tools.perf_data_collection.op_replay import merge_shard_results
-from tools.perf_data_collection.signature_utils import get_sig
+from tools.perf_data_collection.signature_utils import canonicalize_shape_columns, get_sig
 from tools.perf_data_collection.op_replay.common import (
     SUPPORTED_DEVICES,
     DEFAULT_DEVICE,
@@ -49,6 +49,7 @@ from tools.perf_data_collection.op_replay.common import (
     process_replay_csvs,
     record_runtime_replay_case,
     reset_runtime_replay_cases,
+    scalar_fill_value_for_dtype,
 )
 
 
@@ -553,3 +554,117 @@ class TestShardMergeKeepsWinningSampleWhole:
         assert row["Profiling Std Duration(us)"] == "2"
         # Missing-key column is backfilled from the slower shard's row.
         assert row["Profiling Average aiv_vec_time(us)"] == "100"
+
+
+class TestCanonicalizeShapeStorage(unittest.TestCase):
+    """issue #510: DB write paths must emit canonical shape storage.
+
+    Legacy "()" / "[]" scalar slots are rewritten to the empty-slot contract
+    so the query-layer parser stays reachable, while real slot structure
+    (trailing empty slots) is preserved verbatim.
+    """
+
+    def test_legacy_empty_tuple_slot_normalized_to_empty_slot(self):
+        row = canonicalize_shape_columns({"Output Shapes": "1,1;()"})
+        self.assertEqual(row["Output Shapes"], '"1,1;"')
+
+    def test_legacy_empty_list_slot_normalized_to_empty_slot(self):
+        row = canonicalize_shape_columns({"Output Shapes": "1,1;[]"})
+        self.assertEqual(row["Output Shapes"], '"1,1;"')
+
+    def test_trailing_empty_slot_is_preserved(self):
+        # MaskedFill-style scalar value slots (issue #510) are stored as a
+        # trailing empty slot; canonicalization must not shorten the schema.
+        row = canonicalize_shape_columns({"Input Shapes": "144,6144;144,1;"})
+        self.assertEqual(row["Input Shapes"], '"144,6144;144,1;"')
+
+    def test_over_quoted_cell_collapses_to_one_quote_pair(self):
+        row = canonicalize_shape_columns({"Input Shapes": '"1,2"'})
+        self.assertEqual(row["Input Shapes"], '"1,2"')
+
+    def test_bare_cell_gains_quote_pair(self):
+        row = canonicalize_shape_columns({"Input Shapes": "1,2", "Output Shapes": "1,1;1"})
+        self.assertEqual(row["Input Shapes"], '"1,2"')
+        self.assertEqual(row["Output Shapes"], '"1,1;1"')
+
+    def test_dimensioned_paren_shape_untouched(self):
+        # A "(1,2,3)"-style slot has no defined scalar contract; canonicalize
+        # must not guess a rewrite for it (TransData rank-5 semantics etc.).
+        row = canonicalize_shape_columns({"Input Shapes": "(1,2,3)"})
+        self.assertEqual(row["Input Shapes"], '"(1,2,3)"')
+
+    def test_missing_shape_columns_left_untouched(self):
+        row = {"OP State": "static", "Average Duration(us)": "1.0"}
+        self.assertEqual(canonicalize_shape_columns(row), row)
+
+
+class TestShardMergeCanonicalizesShapeStorage:
+    """issue #510: the shard merge write path must emit canonical storage.
+
+    Before this fix, merge_shard_results echoed raw shard rows verbatim, so
+    bare (unquoted) shape cells and legacy "()" slots survived back into the
+    database as quote variants of canonical rows.
+    """
+
+    def test_merge_wraps_bare_shape_cells_in_canonical_quotes(self, tmp_path):
+        merged_rows = _merge_sample_shards(tmp_path, [SLOW_SAMPLE], [FAST_SAMPLE])
+        assert len(merged_rows) == 1
+        assert merged_rows[0]["Input Shapes"] == '"4,8;4,8"'
+        assert merged_rows[0]["Output Shapes"] == '"4,8"'
+
+    def test_merge_rewrites_legacy_empty_tuple_output_slot(self, tmp_path):
+        shard_dir = tmp_path / "shard"
+        shard_dir.mkdir(parents=True)
+        with (shard_dir / "DynamicQuant.csv").open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=MERGE_SAMPLE_FIELDNAMES)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "OP State": "static",
+                    "Input Shapes": '"1,512"',
+                    "Input Data Types": "DT_BF16",
+                    "Input Formats": "ND",
+                    "Output Shapes": '"1,512;()"',
+                    "Output Data Types": "INT8;FLOAT",
+                    "Average Duration(us)": "1.5",
+                }
+            )
+        out_dir = tmp_path / "merged"
+        merge_shard_results.merge_shard_directories([shard_dir], out_dir)
+        with (out_dir / "DynamicQuant.csv").open("r", encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 1
+        assert rows[0]["Output Shapes"] == '"1,512;"'
+
+
+class TestScalarFillValueForDtype(unittest.TestCase):
+    """issue #510: MaskedFill rows record the scalar value slot by dtype only.
+
+    The scalar value operand has an empty shape slot with an active dtype, so
+    replay rebuilds it as a literal matching the recorded dtype family.
+    """
+
+    def test_integer_family_gets_int_zero(self):
+        for dtype in (
+            "INT32",
+            "DT_INT32",
+            "INT8",
+            "DT_INT8",
+            "DT_INT64",
+            "UINT4",
+            "DT_UINT4",
+            "DT_UINT8",
+            "DT_UINT16",
+            "DT_UINT32",
+            "DT_UINT64",
+            "DT_BOOL",
+        ):
+            value = scalar_fill_value_for_dtype(dtype)
+            self.assertIsInstance(value, int)
+            self.assertEqual(value, 0)
+
+    def test_float_family_gets_float_zero(self):
+        for dtype in ("FLOAT", "DT_FLOAT", "DT_BF16", "DT_FLOAT16", "BF16"):
+            value = scalar_fill_value_for_dtype(dtype)
+            self.assertIsInstance(value, float)
+            self.assertEqual(value, 0.0)

@@ -35,14 +35,41 @@ Arguments:
 from __future__ import annotations
 
 try:
+    from .common import parse_list_field, scalar_fill_value_for_dtype
     from .replay_framework import OpReplay
 except ImportError:
+    from common import parse_list_field, scalar_fill_value_for_dtype
     from replay_framework import OpReplay
+
+
+def build_case(row):
+    """Rebuild the full MaskedFill case, including the scalar value slot.
+
+    MaskedFill rows store two tensor inputs plus one scalar value operand:
+    the value slot has an empty shape with an active dtype in
+    ``Input Data Types`` (issue #510). ``OpReplay.build_inputs`` only
+    materializes slots with a shape, so the value is re-attached here from
+    its recorded dtype instead of being dropped.
+    """
+    case = {
+        "inputs": op.build_inputs(row),
+        "kwargs": {},
+        "api": None,
+    }
+    dtypes = parse_list_field(row["Input Data Types"])
+    if len(dtypes) >= 3:
+        case["kwargs"]["value"] = scalar_fill_value_for_dtype(dtypes[2])
+    else:
+        # Fallback for legacy rows without a recorded value dtype: keep the
+        # pre-fix literal 0 — an int converts into both integer and float
+        # tensors, whereas 0.0 raises RuntimeError on integer dtypes.
+        case["kwargs"]["value"] = 0
+    return case
 
 
 def run_case(case):
     tensor, mask_tensor = case["inputs"][:2]
-    tensor.masked_fill_(mask_tensor, 0)
+    tensor.masked_fill_(mask_tensor, case["kwargs"].get("value", 0))
     return tensor
 
 
@@ -61,6 +88,7 @@ op = OpReplay(
     version_help="vLLM-Ascend version, e.g. 0.15.0.",
     input_count=2,
     input_dtype_overrides={1: "DT_BOOL"},
+    build_case=build_case,
     run_case=run_case,
 )
 

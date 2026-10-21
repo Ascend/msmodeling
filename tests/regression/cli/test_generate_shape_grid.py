@@ -16,6 +16,7 @@
 
 # pylint: disable=no-name-in-module
 import contextlib
+import csv
 import io
 import logging
 import os
@@ -240,6 +241,40 @@ class TestShapeGridLogic(unittest.TestCase):
 
             self.assertEqual(csv_path.read_text(encoding="utf-8"), "A\nold\n")
             remove_mock.assert_not_called()
+
+    def test_replace_csv_canonicalizes_shape_columns_on_write(self):
+        headers = [
+            "OP State",
+            "Input Shapes",
+            "Input Data Types",
+            "Input Formats",
+            "Output Shapes",
+            "Output Data Types",
+            "Average Duration(us)",
+        ]
+        source_rows = [
+            {
+                "OP State": "static",
+                # Bare storage and legacy "()" slots (issue #510) must be
+                # rewritten to the canonical contract on write, so grid
+                # regeneration no longer echoes quote variants of the same
+                # signature back into the database.
+                "Input Shapes": "4,8;4,8",
+                "Input Data Types": "DT_BF16;DT_BF16",
+                "Input Formats": "ND;ND",
+                "Output Shapes": "4,8;()",
+                "Output Data Types": "DT_BF16;DT_BF16",
+                "Average Duration(us)": "1.0",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            csv_path = Path(tmp_dir) / "Add.csv"
+            replace_csv_with_generated_rows(csv_path, headers, source_rows, [])
+            with csv_path.open("r", encoding="utf-8", newline="") as f:
+                written = list(csv.DictReader(f))
+        self.assertEqual(len(written), 1)
+        self.assertEqual(written[0]["Input Shapes"], '"4,8;4,8"')
+        self.assertEqual(written[0]["Output Shapes"], '"4,8;"')
 
     def test_dedupe_uses_microbench_profile_signature(self):
         headers = [

@@ -400,6 +400,34 @@ def normalize_dtype_name(dtype_name: str) -> str:
     return f"DT_{normalized}"
 
 
+_INTEGER_DTYPE_NAMES = {
+    "DT_INT4",
+    "DT_INT8",
+    "DT_UINT4",
+    "DT_UINT8",
+    "DT_INT16",
+    "DT_UINT16",
+    "DT_INT32",
+    "DT_UINT32",
+    "DT_INT64",
+    "DT_UINT64",
+    "DT_BOOL",
+}
+
+
+def scalar_fill_value_for_dtype(dtype_name: str) -> int | float:
+    """Return a neutral fill scalar matching the recorded dtype family.
+
+    MaskedFill-style rows record a scalar value operand as an empty shape slot
+    with an active dtype (the profiling CSV scalar-tensor contract, issue
+    #510). Replays must pass a value of the recorded family instead of
+    silently dropping the slot and falling back to a hardcoded literal.
+    """
+    if normalize_dtype_name(dtype_name) in _INTEGER_DTYPE_NAMES:
+        return 0
+    return 0.0
+
+
 def resolve_runtime_dtype(dtype_name: str):
     normalized = normalize_dtype_name(dtype_name)
     dtype = DTYPE_MAP.get(normalized)

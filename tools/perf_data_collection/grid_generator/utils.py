@@ -28,12 +28,14 @@ try:
     from ..signature_utils import (
         MATMUL_FAMILY_OPS,
         canonicalize_matmul_family_signature,
+        canonicalize_shape_columns,
         get_sig,
     )
 except ImportError:
     from signature_utils import (
         MATMUL_FAMILY_OPS,
         canonicalize_matmul_family_signature,
+        canonicalize_shape_columns,
         get_sig,
     )
 
@@ -227,8 +229,15 @@ def replace_csv_with_generated_rows(
     with temp_path.open("w", encoding="utf-8", newline="") as output_file:
         writer = csv.DictWriter(output_file, fieldnames=headers)
         writer.writeheader()
-        writer.writerows(source_rows)
-        writer.writerows(sort_generated_rows(generated_rows))
+        # Rewrite every row through canonical shape storage (issue #510): the
+        # generated rows are already canonical via build_shape_cell, but the
+        # source rows are echoed verbatim, which previously let legacy quote
+        # variants and "()" scalar slots survive each grid regeneration.
+        writer.writerows(canonicalize_shape_columns(row) for row in source_rows)
+        writer.writerows(
+            canonicalize_shape_columns(row)
+            for row in sort_generated_rows(generated_rows)
+        )
     if csv_path.exists():
         os.chmod(csv_path, stat.S_IWRITE | stat.S_IREAD)
     try:

@@ -74,6 +74,17 @@ exemptions:
       ticket: "PR-252"
 
     - symbols:
+        - tools/perf_data_collection/op_replay/MaskedFill_run.py::%
+        - tools/perf_data_collection/op_replay/MaskedFill_run.py::build_case
+        - tools/perf_data_collection/op_replay/MaskedFill_run.py::main
+        - tools/perf_data_collection/op_replay/MaskedFill_run.py::run_case
+      reason: "MaskedFill replay rebuilds the scalar value slot from the recorded dtype family and executes on Ascend NPU runtime against the live performance database (same nature as the PR-252 replay exemptions); scalar-slot extraction is covered by tests/regression/cli/test_op_replay_common_pure.py, and a full 491/491 replay was verified on an A3 device before submit."
+      applicant: Secluded_Ocean
+      approver: hexiaowu
+      deadline: 2026-12-31
+      ticket: "PR-1005"
+
+    - symbols:
         - tensor_cast/core/input_generator.py::_resolve_decoder_attention_layer
         - tensor_cast/core/input_generator.py::get_sparse_attention_indexer_cache_info
         - tensor_cast/layers/deepseek_v4.py::DeepseekV4SparseAttention::build_tp_plan_extras@classmethod

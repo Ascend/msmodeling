@@ -233,7 +233,10 @@ class TestRunQueryMode:
         fallback.assert_called_once()
         with (database / "Add.csv").open("r", encoding="utf-8-sig", newline="") as input_file:
             rows = list(csv.DictReader(input_file))
-        assert [row["Input Shapes"] for row in rows] == ["1,4;1,4", "2,4;2,4"]
+        # Grid regeneration now rewrites every row through canonical shape
+        # storage (issue #510): legacy quote variants must not survive a
+        # rewrite, so both source and generated rows are quote-wrapped.
+        assert [row["Input Shapes"] for row in rows] == ['"1,4;1,4"', '"2,4;2,4"']
 
     def test_explicit_ops_override_other_queried_operators(self, tmp_path: Path) -> None:
         database = tmp_path / "database"

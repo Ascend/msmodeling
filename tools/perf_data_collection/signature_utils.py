@@ -74,10 +74,19 @@ def normalize_shape_semantics(value: str) -> str:
     slots = []
     for slot in cleaned.split(";"):
         normalized_slot = _strip_balanced_outer_quotes(slot)
+        if not normalized_slot:
+            slots.append("")
+            continue
+        # 0-dim/scalar slots have historically been written with the python
+        # tuple/list reprs "()" / "[]" (e.g. DynamicQuant scale outputs,
+        # issue #510). The DB contract stores them as an empty shape slot so
+        # the query-layer parser stays reachable; get_sig already treats them
+        # the same way.
+        if normalized_slot in {"()", "[]"}:
+            slots.append("")
+            continue
         slots.append(
             ",".join(dimension.strip() for dimension in normalized_slot.split(","))
-            if normalized_slot
-            else ""
         )
     return ";".join(slots)
 

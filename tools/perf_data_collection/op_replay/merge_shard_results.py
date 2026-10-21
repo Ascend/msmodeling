@@ -51,9 +51,9 @@ except ImportError:
     from operator_metadata import supports_case_sharding
 
 try:
-    from signature_utils import get_case_shard_key, get_sig
+    from signature_utils import canonicalize_shape_columns, get_case_shard_key, get_sig
 except ImportError:
-    from ..signature_utils import get_case_shard_key, get_sig
+    from ..signature_utils import canonicalize_shape_columns, get_case_shard_key, get_sig
 
 
 DURATION_COLUMNS = (
@@ -169,7 +169,11 @@ def _merge_one_csv(
             # Ensure every header column is present.
             for col in header:
                 row.setdefault(col, "")
-            writer.writerow(row)
+            # Canonicalize shape storage on the only write path that still
+            # emitted raw shard rows verbatim (issue #510): quote variants of
+            # the same signature and legacy "()" scalar slots must not survive
+            # a merge back into the database.
+            writer.writerow(canonicalize_shape_columns(row))
     return len(merged)
 
 
