@@ -96,6 +96,31 @@ def _semantic_op_properties(op, *args):
     return out, OpInvokeInfo(op, args, {}, out).get_perf_properties()
 
 
+def test_siso_reshape_and_cache_allows_pre_sp_slot_mapping_shape():
+    key = torch.empty((512, 640), device="meta", dtype=torch.bfloat16)
+    cache = torch.empty((32, 128, 640), device="meta", dtype=torch.bfloat16)
+    global_slots = torch.empty((4096,), device="meta", dtype=torch.int64)
+
+    torch.ops.tensor_cast.siso_reshape_and_cache.default(key, cache, global_slots)
+
+
+@pytest.mark.parametrize(
+    ("key_shape", "cache_shape"),
+    [
+        ((2, 3, 4), (8, 4)),
+        ((2, 4), (8,)),
+        ((2, 4), (8, 5)),
+    ],
+)
+def test_siso_reshape_and_cache_rejects_invalid_value_or_cache_shape(key_shape, cache_shape):
+    key = torch.empty(key_shape, device="meta", dtype=torch.bfloat16)
+    cache = torch.empty(cache_shape, device="meta", dtype=torch.bfloat16)
+    slots = torch.empty((2,), device="meta", dtype=torch.int64)
+
+    with pytest.raises(ValueError, match="supported value shape and matching cache width"):
+        torch.ops.tensor_cast.siso_reshape_and_cache.default(key, cache, slots)
+
+
 def test_dynamic_quantize_mxfp4_uses_per_row_block_scales_and_costs():
     x = torch.empty((2, 3, 65), device="meta", dtype=torch.bfloat16)
     out = torch.ops.tensor_cast.dynamic_quantize_mxfp4.default(x, 32)

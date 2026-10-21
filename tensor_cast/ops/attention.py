@@ -60,14 +60,13 @@ def _(
     Writes ``key`` into ``kv_cache`` according to ``slot_mapping`` without a paired
     value tensor. Used for single-stream caches such as the MiniMax-M3 index K
     cache.
+
+    The sequence-parallel pass shards ``slot_mapping`` after FakeTensor propagation,
+    so its row count may temporarily remain global while ``key`` is already local.
     """
-    if (
-        (key.ndim != 2 and (key.ndim != 3 or key.shape[1] != 1))
-        or kv_cache.ndim < 2
-        or slot_mapping.numel() != key.shape[0]
-        or kv_cache.shape[-1] != key.shape[-1]
-    ):
-        raise ValueError("siso_reshape_and_cache requires matching value rows, cache width and slots")
+    invalid_key_shape = key.ndim != 2 and (key.ndim != 3 or key.shape[1] != 1)
+    if invalid_key_shape or kv_cache.ndim < 2 or kv_cache.shape[-1] != key.shape[-1]:
+        raise ValueError("siso_reshape_and_cache requires a supported value shape and matching cache width")
 
 
 @register_tensor_cast_op("attention")
