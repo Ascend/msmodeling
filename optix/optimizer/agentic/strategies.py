@@ -24,9 +24,12 @@ from tempfile import NamedTemporaryFile
 
 from loguru import logger
 
-from ...config.config import field_to_param
+from ...config.constant import MULTIHOST_INFER_ENGINE
+
+from ...config.config import OptimizerConfigField, field_to_param
 from .candidates import Candidate, SearchResult, TrialResult, TrialFailure
 from .validation import validate_candidate, classify_failure
+from .topology import is_multihost_context
 
 
 def compute_slo_violated(perf, fitness_evaluator) -> bool | None:
@@ -138,8 +141,16 @@ class AgentCandidateStrategy:
         return self.run_dir / f"results.round-{self.round_index}.json"
 
     def run(self, scheduler, target_field, search_space_context=None):
-        candidates = self._load_candidates()
         context = search_space_context or {}
+        multihost = is_multihost_context(context)
+        if getattr(scheduler, "engine", None) == MULTIHOST_INFER_ENGINE:
+            from .topology import validate_simulator_topology
+
+            validate_simulator_topology(context, scheduler.simulator)
+        candidates = self._load_candidates()
+        if multihost:
+            archive = self.run_dir / f"context.round-{self.round_index}.json"
+            archive.write_text(json.dumps(context, indent=2, ensure_ascii=False), encoding="utf-8")
         validations = [validate_candidate(context, c.to_dict() if hasattr(c, 'to_dict') else c) for c in candidates]
         valid = [v for v in validations if v["valid"]]
         if validations and not valid:
@@ -237,6 +248,7 @@ class AgentCandidateStrategy:
         return [Candidate.from_dict(item, i) for i, item in enumerate(data.get("candidates", []))]
 
     def _run_trial(self, validation: dict, scheduler, target_field: list, search_space_context: dict | None = None):
+        multihost = is_multihost_context(search_space_context)
         params = validation["params"]
         resolved_field = self._params_to_target_field(params, target_field, search_space_context)
         candidate_id = validation["candidate_id"]
@@ -304,6 +316,19 @@ class AgentCandidateStrategy:
             )
         except Exception as exc:
             logger.warning("Failed to save trial result: {}", exc)
+        metadata = {"round_id": self.round_index}
+        if multihost:
+            from copy import deepcopy
+
+            metadata["launch_plan"] = deepcopy(getattr(scheduler, "simulate_launch_plan", {}))
+            metadata["requested_params"] = dict(params)
+            effective = getattr(scheduler, "simulate_run_info", None)
+            if effective:
+                params = {field.name: field.value for field in effective}
+            metadata["parameter_metadata"] = [
+                {"name": field.name, "dtype": field.dtype, "config_position": field.config_position}
+                for field in resolved_field
+            ]
         return TrialResult(
             params=params,
             fitness=fitness,
@@ -313,79 +338,69 @@ class AgentCandidateStrategy:
             source="agent",
             elapsed_seconds=elapsed,
             failure=failure,
-            metadata={"round_id": self.round_index},
+            metadata=metadata,
             slo_violated=slo_violated,
         )
 
     def _params_to_target_field(
         self, params: dict, target_field: list, search_space_context: dict | None = None
     ) -> list:
-        from ...config.config import OptimizerConfigField
+        """Keep configured field contracts and add active-space service fields.
 
+        ``params`` is the full output of validate_candidate: active-space defaults,
+        pinned constants and explicit candidate values have already been resolved.
+        This function deliberately does not implement a second default policy.
+        """
+        space = (search_space_context or {}).get("search_space", {})
+        schema = {item["name"]: item for group in ("parameters", "constants") for item in space.get(group, [])}
         resolved = []
         covered_names = set()
-
-        # Phase 1: config.toml fields — override with candidate values
         for field in target_field:
-            f = deepcopy(field)
-            if f.name in params:
-                # Single dtype-aware conversion point (apply_value). Notably
-                # enum must NOT go through convert_dtype: dtype_func has no
-                # "enum" key, so it would coerce int/bool choices to float
-                # (2 -> 2.0, true -> 1.0), breaking CLI rendering.
-                f.apply_value(params[f.name])
-                covered_names.add(f.name)
-            resolved.append(f)
+            active = deepcopy(field)
+            item = schema.get(active.name)
+            if item is not None:
+                # Round-local domains govern tunable fields after TOML is frozen.
+                # Keep configured types, positions and derivation contracts; candidate
+                # validation checks that TOML constants cannot be unfrozen.
+                definition = active.model_dump()
+                definition.update(min=item["min"], max=item["max"])
+                if active.dtype == "enum":
+                    definition["dtype_param"] = item["choices"]
+                if active.constant is None:
+                    definition["constant"] = item.get("constant")
+                active = OptimizerConfigField(**definition)
+            covered_names.add(active.name)
+            if active.name in params:
+                value = params[active.name]
+                if isinstance(value, (list, dict)):
+                    value = json.dumps(value, ensure_ascii=False)
+                active.apply_value(value)
+            resolved.append(active)
 
-        # Phase 2: candidate params NOT in config.toml — dynamic creation
-        search_space = (search_space_context or {}).get("search_space", {})
-        all_schema = {p["name"]: p for p in search_space.get("parameters", [])}
-        all_schema.update({c["name"]: c for c in search_space.get("constants", [])})
-
-        for param_name, param_value in params.items():
-            if param_name in covered_names:
+        for name, value in params.items():
+            if name in covered_names:
                 continue
-            schema_entry = all_schema.get(param_name)
-            if schema_entry is None:
-                continue  # unknown param — validation should have caught this
-
-            try:
-                # JSON-container sub-key params (cudagraph_capture_sizes /
-                # cudagraph_mode / …) travel as JSON strings in field.value —
-                # OptimizerConfigField.value only accepts scalars, and
-                # _field_to_cli_flag json.loads()s the string back before
-                # emitting the container flag. Serialize list/dict values here
-                # or the OptimizerConfigField construction crashes on a list.
-                if isinstance(param_value, (list, dict)):
-                    param_value = json.dumps(param_value, ensure_ascii=False)
-                kwargs: dict = {
-                    "name": param_name,
-                    "value": param_value,
-                    "dtype": schema_entry.get("dtype", "str"),
-                    "config_position": schema_entry.get("config_position", "run"),
-                    "min": schema_entry.get("min", 0.0),
-                    "max": schema_entry.get("max", 1.0),
-                }
-                if schema_entry.get("constant") is not None:
-                    kwargs["constant"] = schema_entry["constant"]
-                # Map choices to dtype_param for enum dtype
-                choices = schema_entry.get("choices")
-                if choices is not None and schema_entry.get("dtype") == "enum":
-                    kwargs["dtype_param"] = choices
-                field = OptimizerConfigField(**kwargs)
-                # Same dtype-aware conversion as Phase 1 (apply_value keeps
-                # enum choices' original type instead of float-coercing them).
-                field.apply_value(param_value)
-            except Exception:
-                # Fallback: minimal field. param_value was already JSON-encoded
-                # above for container list/dict params, so keep it verbatim.
-                field = OptimizerConfigField(
-                    name=param_name,
-                    value=param_value,
-                    config_position=schema_entry.get("config_position", "run"),
-                )
-            resolved.append(field)
-
+            item = schema.get(name)
+            if item is None:
+                continue  # Candidate validation rejects unregistered names.
+            if isinstance(value, (list, dict)):
+                value = json.dumps(value, ensure_ascii=False)
+            kwargs = {
+                "name": name,
+                "value": value,
+                "dtype": item.get("dtype", "str"),
+                "config_position": item.get("config_position", "run"),
+                "min": item.get("min", 0.0),
+                "max": item.get("max", 1.0),
+                "dtype_param": item.get("choices") if item.get("dtype") == "enum" else item.get("dtype_param"),
+            }
+            if item.get("constant") is not None:
+                kwargs["constant"] = item["constant"]
+            # Invalid field definitions must fail preflight instead of silently
+            # becoming untyped fields with different execution semantics.
+            active = OptimizerConfigField(**kwargs)
+            active.apply_value(value)
+            resolved.append(active)
         return resolved
 
     def _write_results(self, trials, validations=None):

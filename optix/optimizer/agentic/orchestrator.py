@@ -26,6 +26,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from ...config.constant import MULTIHOST_INFER_ENGINE
+
 from ...config.config import PerformanceIndex
 from ...logging import LogStage
 from .coverage import search_space_coverage
@@ -61,10 +63,22 @@ class AgentOptimizer:
     def run(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         completed_rounds, global_best_fitness = self._scan_completed_rounds()
+        context = self._load_multihost_context()
         self._ensure_baseline()
         fixed_target = self._pin_concurrency()
-        context = self._load_search_space_context()
+        if context is None:
+            context = self._load_search_space_context()
         self._run_rounds(completed_rounds, global_best_fitness, fixed_target, context)
+
+    def _load_multihost_context(self) -> dict | None:
+        """Validate cluster context before baseline startup when required."""
+        if getattr(self.pso.scheduler, "engine", None) != MULTIHOST_INFER_ENGINE:
+            return None
+        from .topology import validate_simulator_topology
+
+        context = self._load_search_space_context()
+        validate_simulator_topology(context, self.pso.scheduler.simulator)
+        return context
 
     # ------------------------------------------------------------------ #
     # Resume: scan for prior completed rounds

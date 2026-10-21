@@ -38,7 +38,7 @@ from ..config.config import (
     get_settings,
     map_param_with_value,
 )
-from ..config.constant import Stage
+from ..config.constant import MULTIHOST_INFER_ENGINE, Stage
 from ..logging import LogStage, format_subprocess_failure
 from ..optimizer.errors import OptimizerError
 from ..optimizer.health_check import (
@@ -61,6 +61,7 @@ from ..optimizer.early_exit import (
     VllmMetricsClient,
 )
 from ..optimizer.outcome import RunOutcome, RunStatus
+from ..optimizer.multihost_adapter import run_multihost_trial
 from ..optimizer.performance_tunner import PerformanceTuner
 from ..optimizer.plugins.simulate import Simulator
 from ..optimizer.protocols import (
@@ -101,6 +102,7 @@ class Scheduler:
         # Iteration index of the current phase; together with backup_phase forms a top-level dir under back_up, e.g. pso_001, refine_002
         self.backup_iter = 0
         self.simulate_run_info = None
+        self.simulate_launch_plan = {}
         self.performance_index = None
         self._error_info = None
         self.last_outcome: Optional[RunOutcome] = None
@@ -492,13 +494,25 @@ class Scheduler:
                     return
             else:
                 self._handle_error(result.error_context)
-        raise TimeoutError(self.wait_time)
+        # Timeout must carry evidence: a bare number (e.g. "1800") gives the
+        # failure classifier and the agent nothing to act on — the real root
+        # cause (e.g. Mamba cache blocks exceeded) stayed invisible until
+        # someone read the service log manually.
+        timeout_detail = self._simulator_failure_message()
+        raise TimeoutError(
+            f"service not ready within {self.wait_time}s of startup polling — "
+            f"last known state below; full log at the path listed\n{timeout_detail}"
+        )
 
     def run_simulate(self, params: np.ndarray, params_field: tuple[OptimizerConfigField]):
+        self.simulate_launch_plan = {}
         if isinstance(self.benchmark, SupportsPrepare):
             self.benchmark.prepare()
         logger.debug("starting simulator subprocess")
-        self.simulator.run(tuple(self.simulate_run_info))
+        if self.engine == MULTIHOST_INFER_ENGINE:
+            self.simulate_launch_plan = run_multihost_trial(self.simulator, tuple(self.simulate_run_info))
+        else:
+            self.simulator.run(tuple(self.simulate_run_info))
         logger.debug("waiting for simulator startup")
         self.wait_simulate()
         logger.debug("simulator startup complete")

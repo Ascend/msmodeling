@@ -25,6 +25,16 @@
       "type": "string",
       "description": "benchmark 工具，例如 vllm_benchmark 或 ais_bench。"
     },
+    "deployment": {
+      "type": ["object", "null"],
+      "description": "多机部署快照；单机可省略或为 null。多机对象记录部署类型及集群配置内容哈希。",
+      "required": ["type", "cluster_config_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "multihost"},
+        "cluster_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
     "hardware": {
       "type": "object",
       "description": "硬件拓扑与单卡显存。",
@@ -110,6 +120,7 @@
       "properties": {
         "config_toml": {"type": "string", "minLength": 1},
         "config_toml_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "cluster_config": {"type": "string", "minLength": 1},
         "optimizer_strategy": {"type": "string"}
       },
       "additionalProperties": false

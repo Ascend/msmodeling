@@ -37,7 +37,7 @@ msmodeling optix -e <vllm|mindie> -b <ais_bench|vllm_benchmark> -c <config.toml>
 候选/search_space 里写的是**短参数名**，optix 负责映射成真实 vLLM flag：
 
 - 并行参数：`tp`→`--tensor-parallel-size`，`dp`→`--data-parallel-size`，
-  `pp`→`--pipeline-parallel-size`。其余参数名按"小写+下划线转连字符"映射
+  `pp`→`--pipeline-parallel-size`，`pcp`→`--prefill-context-parallel-size`。其余参数名按"小写+下划线转连字符"映射
   （如 `max_num_batched_tokens`→`--max-num-batched-tokens`）。
 - **容器 flag 的子键参数**（不要自己拼 JSON）：
   - `cudagraph_mode`、`cudagraph_capture_sizes` → 进 `--compilation-config '{...}'`
@@ -49,7 +49,7 @@ msmodeling optix -e <vllm|mindie> -b <ais_bench|vllm_benchmark> -c <config.toml>
     （会被当成普通值再拼一次 flag 名，产出非法命令）。
 - `CONCURRENCY`、`REQUESTRATE` 是 benchmark 专用字段（渲染为 `vllm bench serve` 的
   `--max-concurrency` / `--request-rate`），永远不会进 serve 命令。
-- bool 参数：`true` → 只出 flag（`--flag`）；`false` → 省略。
+- bool 参数：`true` → 只出 flag（`--flag`）；显式 `false` → 不输出该 flag，并移除 `others` 中同名开关（单机、多机及 PSO 共用）；候选省略字段仍按有效字段定义解析，不能用省略代替关闭。
 - 固定不变的启动参数（模型路径、`--max-model-len`、`--trust-remote-code` 等）写进
   `[vllm.command].others`，不进搜索空间。
 
@@ -60,10 +60,10 @@ msmodeling optix -e <vllm|mindie> -b <ais_bench|vllm_benchmark> -c <config.toml>
 
 1. 候选 `params` 先过 `validate_candidate`（校验规则见 `../workflows/data-analysis.md`「候选校验规则」），
    非法候选直接跳过、不消耗 trial。
-2. 参数落到 `OptimizerConfigField`：config.toml 已有字段走 `apply_value`（按 dtype 转换）；
+2. 参数落到 `OptimizerConfigField`：config.toml 已有字段保留类型、位置和派生关系，可调域采用当轮 search_space 定义，再走 `apply_value`（按 dtype 转换）；
    不在 config.toml 里的参数按 run 目录 `context.json` 的 search_space schema 动态建字段
    （list/dict 值先 JSON 序列化成字符串再进字段）。
-3. serve 命令渲染（`VllmCommand`）：`config_position="env"` 的字段渲染为 CLI flag；
+3. serve 命令渲染（`VllmCommand`）：`config_position="run"` 的字段渲染为 CLI flag；
    `CONCURRENCY`/`REQUESTRATE`（`BENCHMARK_ONLY_FIELDS`）被跳过，绝不进 serve 命令。
 4. benchmark 命令渲染（`VllmBenchmarkCommand`）：argv 固定含字面占位 token
    `--max-concurrency $CONCURRENCY --request-rate $REQUESTRATE`；启动前
@@ -162,3 +162,7 @@ candidates 文件已就位。
   PATH 上的 `mindie_llm_server`。
 - CLI 入口：`msmodeling optix` 与 `python -m optix` 等价；`-c` 自定义 TOML 追加在默认
   `optix/config.toml` 之后加载，同名键以自定义文件为准。
+
+## 多机混部
+
+完整约定见 [multihost.md](multihost.md)。参数装配复用 `AgentCandidateStrategy._params_to_target_field()`，命令渲染复用 `optix/serve_plan.py`。scheduler 在多机路径通过 `multihost_adapter.py` 转换为原插件的 env/others 协议。节点通信、脚本生成、SSH 和生命周期仍由原插件负责。

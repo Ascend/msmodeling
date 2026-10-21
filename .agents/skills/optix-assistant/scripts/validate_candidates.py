@@ -335,6 +335,10 @@ def check_run_entry_flags(fields: list[dict], engine: str) -> list[str]:
 def validate_search_space(space: dict, configured_fields: list[dict]) -> list[dict]:
     """Validate the active space against the fields the engine will execute."""
     fields = _space_items(space)
+    from optix.optimizer.agentic.topology import TOPOLOGY_FACT_NAMES
+
+    if any(item["name"].upper() in TOPOLOGY_FACT_NAMES for item in fields):
+        raise ValueError("Topology facts belong in context.hardware, not search_space or service parameters")
     configured = {f["name"]: f for f in configured_fields}
     active = {f["name"]: f for f in fields}
     missing = configured.keys() - active.keys()
@@ -408,7 +412,7 @@ def validate_round(data: dict, run_dir: Path, round_no: int) -> None:
     from check_search_space import check_parameters, load_configured_parameters
 
     sys.path.insert(0, str(SKILL_ROOT.parents[2]))
-    from optix.config.config import OptimizerConfigField, field_to_param, range_to_enum
+    from optix.config.config import OptimizerConfigField, field_to_param, range_to_enum, map_param_with_value
     from optix.optimizer.agentic.strategies import AgentCandidateStrategy
     from optix.optimizer.agentic.validation import validate_candidate
 
@@ -508,7 +512,26 @@ def validate_round(data: dict, run_dir: Path, round_no: int) -> None:
         if errors:
             raise ValueError("; ".join(errors))
         resolved = strategy._params_to_target_field(validation["params"], target_fields, context)
-        field_to_param(tuple(resolved))
+        position = field_to_param(tuple(resolved))
+        if (context.get("deployment") or {}).get("type") == "multihost":
+            from types import SimpleNamespace
+            from common import load_cluster_topology
+            from optix.optimizer.multihost_adapter import prepare_multihost_fields
+
+            topology = load_cluster_topology(context["source"]["cluster_config"])
+            if not topology["ok"]:
+                raise ValueError(topology["error"])
+            plugin_config = SimpleNamespace(
+                env=topology["env"], workers=topology["workers"], chips_per_node=topology["chips_per_node"]
+            )
+            simulator = SimpleNamespace(
+                remote_executor=SimpleNamespace(config=plugin_config),
+                config=SimpleNamespace(
+                    command=SimpleNamespace(others=(section.get("command") or {}).get("others", ""))
+                ),
+            )
+            active_fields = map_param_with_value(position, tuple(resolved))
+            prepare_multihost_fields(simulator, active_fields)
 
 
 def main() -> int:

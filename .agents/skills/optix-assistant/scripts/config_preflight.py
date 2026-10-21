@@ -58,7 +58,7 @@ from typing import Any, Dict, List
 import tomlkit
 
 from check_search_space import check_fixed_concurrency
-from common import bad_json_tokens, table_or_create
+from common import bad_json_tokens, table_or_create, load_cluster_topology
 
 #: placeholder values in the default config.toml that must be replaced by the user
 _PLACEHOLDER_VALUES = {"", "model_path", "model_name", "dataset_name", "models", "port", "host"}
@@ -162,6 +162,7 @@ def check_completeness(
     expected_run_id: str | None = None,
     benchmark: str = "ais_bench",
     world_size: int | None = None,
+    multihost: bool = False,
 ) -> List[str]:
     """Return blocking errors for run-required config that is missing/placeholder.
 
@@ -282,7 +283,7 @@ def check_completeness(
 
     # --- 使用卡数与可见卡号一致性（可选交叉校验） --------------------------------
     visible_count = _visible_device_count()
-    if world_size is not None and visible_count and world_size != visible_count:
+    if not multihost and world_size is not None and visible_count and world_size != visible_count:
         errors.append(
             f"使用卡数 world_size={world_size} 与 {_VISIBLE_DEVICES_ENV} 可见卡数 "
             f"{visible_count}（{_visible_devices()}）不一致 —— 需确认"
@@ -317,7 +318,8 @@ def check_completeness(
                 f"name=tp config_position=run dtype=enum value=<选定tp> dtype_param='[<选定tp>]'\n"
                 f"     在 [vllm.command].others 追加 --data-parallel-size <world_size//选定tp>\n"
                 f"  钉死组合时，在场景冻结清单记录选定组合、备选组合、不探索理由。"
-                f"禁止只登记 tp 常量而不声明 dp。"
+                f"禁止只登记 tp 常量而不声明 dp。上述组合示例仅适用于 pp=pcp=1；"
+                f"实际候选须满足 tp×dp×pp×pcp=world_size，多机还须符合节点放置约束。"
             )
 
     # --- others 伪 JSON 兜底（最后一道门禁） ---------------------------------------
@@ -882,6 +884,9 @@ def main(argv: List[str] | None = None) -> int:
         help="benchmark 工具（默认 ais_bench，昇腾生态最常用；流程上仍须询问用户确认，vllm_benchmark 需显式输入输出）",
     )
     parser.add_argument("--world-size", type=int, default=None, help="使用卡数（可选，与可见卡号交叉校验）")
+    parser.add_argument(
+        "--cluster-config", default="", help="multihost cluster config; defaults to CLUSTER_CONFIG_PATH"
+    )
     parser.add_argument("--check-only", action="store_true", help="Only validate completeness; exit 1 if incomplete.")
     parser.add_argument("--set-model", help="Back-fill model path")
     parser.add_argument("--set-served-name", help="Back-fill served model name")
@@ -975,13 +980,44 @@ def main(argv: List[str] | None = None) -> int:
         print(f"run-id: {run_id}")
 
     expected_run_id = run_id if args.check_only else None
+    topology = load_cluster_topology(args.cluster_config or None)
+    multihost = topology["configured"]
     errors = check_completeness(
         config,
         args.engine,
         expected_run_id=expected_run_id,
         benchmark=args.benchmark,
         world_size=args.world_size,
+        multihost=multihost,
     )
+    if multihost:
+        if not topology["ok"]:
+            errors.append(topology["error"])
+        else:
+            if args.engine != "vllm":
+                errors.append("multihost cluster config requires --engine vllm")
+            capacity = topology["num_nodes"] * topology["chips_per_node"]
+            if args.world_size is not None and args.world_size != capacity:
+                errors.append(f"world_size conflicts with cluster config ({capacity})")
+            if _visible_device_count() and _visible_device_count() != topology["chips_per_node"]:
+                errors.append("Local visible devices conflict with cluster chips_per_node")
+            context_file = _find_context_json(args.context, run_id)
+            if context_file is not None:
+                try:
+                    context = json.loads(context_file.read_text(encoding="utf-8"))
+                    import sys
+
+                    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+                    from optix.optimizer.agentic.topology import validate_topology_snapshot
+
+                    if (context.get("deployment") or {}).get("type") != "multihost":
+                        raise ValueError("Collect a multihost context using --cluster-config")
+                    validate_topology_snapshot(context)
+                    if Path(context["source"]["cluster_config"]).resolve() != Path(topology["path"]):
+                        raise ValueError("Preflight and context must use the same cluster config")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    errors.append(str(exc))
+
     gate_errors: List[str] = []
     gate_warnings: List[str] = []
     if args.benchmark == "ais_bench":

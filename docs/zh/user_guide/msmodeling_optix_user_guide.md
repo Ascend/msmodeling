@@ -248,6 +248,8 @@ others = ""
 - **VLLM 环境变量**：只需在 `[[vllm.target_field]]` 中声明，且 `config_position = "env"`。工具会在每轮寻优启动服务前自动写入同名大写环境变量，不需要写入 `[vllm.command]` 的 `others`。
 - **VLLM 命令行参数**：在 `[[vllm.target_field]]` 中声明，且 `config_position = "run"`；工具会自动将字段名渲染为同名 `--kebab-case` 参数并追加到 `vllm serve`，无需在 `others` 中引用。
 
+对于 `config_position = "run"` 的布尔开关，执行字段值为 `false` 时会关闭 `others` 中的同名开关，例如 `enforce_eager=false` 会移除 `--enforce-eager`；该规则适用于 PSO 和 Agent 模式的 vLLM 服务参数渲染。
+
 如需给 vLLM 服务进程注入固定环境变量，可在 `[vllm.env]` 中按 key/value 配置：
 
 ```toml

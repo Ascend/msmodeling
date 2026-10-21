@@ -621,6 +621,14 @@ def validate_candidate(context: Dict[str, Any], candidate: Dict[str, Any]) -> Di
     params = dict(candidate.get("params", {}))
     schema_items = _get_schema_items(context)
     schema = {item["name"]: item for item in schema_items}
+    from .topology import TOPOLOGY_FACT_NAMES, validate_topology_snapshot
+
+    if any(name.upper() in TOPOLOGY_FACT_NAMES for name in schema):
+        errors.append("Topology facts belong in context.hardware, not search_space")
+    try:
+        validate_topology_snapshot(context)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        errors.append(str(exc))
 
     # 1. Check for unknown parameter names
     for name in params:

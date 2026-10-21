@@ -235,6 +235,8 @@ Round N 已连续执行失败 2 次（首次执行 + 1 次重试），自动恢�
     --run-dir .agent_optimizer/runs/<run_id>
   ```
 
+  多机混部输出 `serve_command_multihost.json`、`best_deployment/start_node.sh` 和各 worker 脚本，见 `../references/multihost.md`；final_report 展示节点对应关系和实际脚本。下面的单命令产物说明适用于单机。
+
   生成产物：
   - `best_result.json`：当前最优 trial
   - `optimizer_config_handoff.json`：给 `ms-serviceparam-optimizer-config` skill

@@ -126,7 +126,15 @@ def check_parameters(
     def error(message):
         issues.append({"level": "error", "msg": message})
 
+    multihost = (context.get("deployment") or {}).get("type") == "multihost"
     try:
+        if multihost:
+            import sys
+
+            sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+            from optix.optimizer.agentic.topology import validate_topology_snapshot
+
+            validate_topology_snapshot(context)
         if section is None or fields is None:
             section, fields = load_configured_parameters(context)
     except (OSError, ValueError) as exc:
@@ -208,7 +216,19 @@ def check_parameters(
             for short, long in aliases:
                 field = by_name.get(short) or by_name.get(long)
                 if field is None:
-                    domain = [int(flags.get(long, flags.get(short, 1)))]
+                    domain = [
+                        int(
+                            flags.get(
+                                long,
+                                flags.get(
+                                    short,
+                                    (context.get("hardware") or {}).get("num_nodes", 1)
+                                    if multihost and short == "dp"
+                                    else 1,
+                                ),
+                            )
+                        )
+                    ]
                 elif params is not None:
                     domain = [params[field["name"]]]
                 elif field.get("constant") is not None:
@@ -220,7 +240,20 @@ def check_parameters(
                 domains.append(domain)
             from math import prod
 
-            if not any(prod(values) == world for values in product(*domains)):
+            def feasible(values):
+                if prod(values) != world:
+                    return False
+                if multihost:
+                    from optix.optimizer.agentic.topology import validate_parallel_placement
+
+                    hardware = context.get("hardware") or {}
+                    try:
+                        validate_parallel_placement(*values, hardware["num_nodes"], hardware["num_per_node"])
+                    except (TypeError, ValueError):
+                        return False
+                return True
+
+            if not any(feasible(values) for values in product(*domains)):
                 subject = "Candidate parallel values" if params is not None else "Configured parallel domains"
                 error(f"{subject} cannot use WORLD_SIZE={world}")
     except (TypeError, ValueError) as exc:

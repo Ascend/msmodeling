@@ -63,6 +63,7 @@ _FLAG_NAME_MAP = {
     "tp": "tensor-parallel-size",
     "dp": "data-parallel-size",
     "pp": "pipeline-parallel-size",
+    "pcp": "prefill-context-parallel-size",
     # 主模型 eager/图模式开关 -> 顶层 --enforce-eager（一义一名）
     "enforce_eager": "enforce-eager",
 }
@@ -248,6 +249,46 @@ def render_serve_command(
     return cmd
 
 
+def _export_multihost_snapshot(run_dir: Path, context: dict, best: dict, parameter_metadata: dict) -> None:
+    """Export measured per-node scripts without needing OptiX or a live cluster."""
+    plan = (best.get("metadata") or {}).get("launch_plan")
+    nodes = (context.get("hardware") or {}).get("num_nodes", 0)
+    if not isinstance(nodes, int) or isinstance(nodes, bool) or nodes < 1:
+        raise ValueError("Winning context must record a positive node count")
+    expected = {"start_node.sh", *[f"start_work_{index}.sh" for index in range(nodes - 1)]}
+    if (
+        not isinstance(plan, dict)
+        or set(plan) != expected
+        or not all(isinstance(s, str) and s.strip() for s in plan.values())
+    ):
+        raise ValueError("Winning multihost trial has no complete measured launch scripts; rerun the trial")
+    directory = run_dir / "best_deployment"
+    directory.mkdir(exist_ok=True)
+    for name, script in plan.items():
+        target = directory / name
+        target.write_text(script, encoding="utf-8")
+        target.chmod(0o755)
+    manifest = {
+        "source_ref": best["source_ref"],
+        "deployment": "multihost",
+        "scripts": {name: f"best_deployment/{name}" for name in sorted(plan)},
+        "instructions": "Run start_node.sh on the configured master and each start_work_N.sh on its corresponding worker.",
+    }
+    write_json(run_dir / "serve_command_multihost.json", manifest)
+    write_json(
+        run_dir / "optimizer_config_handoff.json",
+        {
+            "source": "optix-assistant",
+            "recommended_params": best.get("params", {}),
+            "parameter_metadata": parameter_metadata,
+            "fitness": best["fitness"],
+            "performance": best.get("performance"),
+            "deployment": manifest,
+            "selection": best["selection_policy"],
+        },
+    )
+
+
 def _candidate_trial_types(path: Path) -> dict | None:
     """Resolve types from the same round's immutable candidate archive."""
     if not path.exists():
@@ -374,6 +415,13 @@ def main():
         parser.exit(1, f"Cannot load winning context {context_path.name}: {exc}\n")
     best["trial_count"] = len(trials)
     best["round_count"] = len(round_numbers)
+    if (context.get("deployment") or {}).get("type") == "multihost":
+        try:
+            _export_multihost_snapshot(run_dir, context, best, parameter_metadata)
+        except (OSError, ValueError, TypeError) as exc:
+            parser.exit(1, f"Cannot export multihost snapshot: {exc}\n")
+        write_json(run_dir / "best_result.json", best)
+        return
     write_json(run_dir / "best_result.json", best)
     config_path = args.config or (context.get("source") or {}).get("config_toml")
     config_path = Path(config_path) if config_path else Path.cwd() / "optix" / "config.toml"

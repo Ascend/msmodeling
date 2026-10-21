@@ -24,6 +24,7 @@ from pathlib import Path
 from common import (
     read_json,
     write_json,
+    load_cluster_topology,
 )
 
 
@@ -217,6 +218,9 @@ def main():
     )
     parser.add_argument("--model-name", default=None)
     parser.add_argument("--model-path", default=None)
+    parser.add_argument(
+        "--cluster-config", default="", help="multihost plugin cluster config; defaults to CLUSTER_CONFIG_PATH"
+    )
     parser.add_argument("--world-size", type=int, default=None)
     parser.add_argument("--num-nodes", type=int, default=None)
     parser.add_argument("--num-per-node", type=int, default=None)
@@ -286,8 +290,6 @@ def main():
     # 实际存在的顶层字段（engine / benchmark_policy），其余输入一律走 CLI 旗标。
     recommendation = read_json(Path(args.recommend_result)) if args.recommend_result else {}
     world_size = int(args.world_size or 0)
-    if world_size <= 0:
-        parser.error("--world-size is required")
 
     engine = coalesce(args.engine, recommendation_field(recommendation, "engine"), default="")
 
@@ -309,6 +311,29 @@ def main():
         "optimizer_strategy": config.get("optimizer_strategy", "pso"),
     }
 
+    topology = load_cluster_topology(args.cluster_config or None)
+    deployment = {}
+    if topology["configured"]:
+        if not topology["ok"]:
+            parser.error(topology["error"])
+        if engine != "vllm":
+            parser.error("multihost cluster config requires vllm")
+        expected = {
+            "world_size": topology["num_nodes"] * topology["chips_per_node"],
+            "num_nodes": topology["num_nodes"],
+            "num_per_node": topology["chips_per_node"],
+        }
+        for key, value in expected.items():
+            supplied = getattr(args, key)
+            if supplied is not None and supplied != value:
+                parser.error(f"--{key.replace('_', '-')} conflicts with cluster config ({value})")
+        world_size = expected["world_size"]
+        args.num_nodes = expected["num_nodes"]
+        args.num_per_node = expected["num_per_node"]
+        source["cluster_config"] = topology["path"]
+        deployment = {"type": "multihost", "cluster_config_sha256": topology["sha256"]}
+    if world_size <= 0:
+        parser.error("--world-size is required without a cluster config")
     num_nodes = int(args.num_nodes or 1)
     num_per_node = int(args.num_per_node or world_size // num_nodes)
     memory_gb = float(args.memory_gb or 0)
@@ -401,6 +426,8 @@ def main():
         ),
     }
     context["source"] = source
+    if deployment:
+        context["deployment"] = deployment
     # -----------------------------------------------------------------------
     write_json(Path(args.run_dir) / "context.json", context)
 

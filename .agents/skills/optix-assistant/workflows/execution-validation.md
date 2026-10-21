@@ -13,6 +13,9 @@ benchmark 执行、候选校验、失败分类、进程清理全部由 optix 完
 组合约束；生成候选时已做过筛选，执行时由 optix 用 `validate_candidate` 再校验
 一遍，无效候选自动跳过，本流程不重复校验。
 
+多机的引擎 CLI 使用 `-e multihost_infer`，配置与预检仍使用 `[vllm]` / `--engine vllm`。
+保持同一绝对路径的 `CLUSTER_CONFIG_PATH` 生效；采集与每次预检传 `--cluster-config`。
+
 ## 启动前检查（全部通过才启动）
 
 1. 重跑只读 config 门禁：
@@ -104,6 +107,8 @@ benchmark 执行、候选校验、失败分类、进程清理全部由 optix 完
    （未跑 apply_launch_config）；若 shell 里手动 export 过临时变量，整轮结束自行清理。
 
 ## 本轮 context 归档
+
+多机运行时自动保存执行输入的 `context.round-N.json`；进程退出后核对它与结果对应，已有归档不再复制覆盖。单机按下面规则归档。
 
 确认 OptiX 进程已退出，并核对本轮 `results.round-N.json` 已写入后，在修改 context 或准备下一轮前执行：
 

@@ -17,6 +17,8 @@
 """Ownership: lib. Shared helpers for optix-assistant scripts."""
 
 import json
+import os
+import hashlib
 import re
 import shlex
 import tomlkit
@@ -311,3 +313,105 @@ def bad_json_tokens(others: str) -> List[str]:
         except ValueError:
             bad.append(token)
     return bad
+
+
+CLUSTER_CONFIG_ENV = "CLUSTER_CONFIG_PATH"
+
+
+def resolve_cluster_config_path(explicit: str | None = None) -> Path | None:
+    """Resolve the cluster config path: explicit arg > CLUSTER_CONFIG_PATH env."""
+    raw = explicit or os.environ.get(CLUSTER_CONFIG_ENV, "")
+    return Path(raw).resolve() if raw else None
+
+
+def _load_toml_file(path: Path) -> Dict[str, Any]:
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover - py<3.11 only
+        import tomli as tomllib
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def _cluster_host(entry: Dict[str, Any]) -> str:
+    return str(entry.get("host") or "").strip()
+
+
+def load_cluster_topology(path: str | None = None) -> Dict[str, Any]:
+    """Parse the multihost plugin's cluster config into a normalized dict.
+
+    Always returns a dict. ``ok`` is False — with ``configured`` telling apart
+    "no cluster config given" from "given but broken" — when the file is
+    absent/unparsable or lacks the ``[vllm_mix]`` section, so callers can turn
+    that into an ERROR without exception handling.
+
+    On success:
+        {ok, configured, path, chips_per_node, master_host, nodes, workers,
+         num_nodes, data_parallel_rpc_port, ready_log_pattern, docker_use_sudo}
+    where ``nodes``/``workers`` are the raw node dicts and ``num_nodes`` is
+    master + workers (``all_nodes`` order in the plugin: master first).
+    """
+    resolved = resolve_cluster_config_path(path)
+    if resolved is None:
+        return {
+            "ok": False,
+            "configured": False,
+            "path": "",
+            "error": f"未配置集群配置（--cluster-config 与 {CLUSTER_CONFIG_ENV} 均为空）",
+        }
+    if not resolved.exists():
+        return {"ok": False, "configured": True, "path": str(resolved), "error": f"集群配置不存在: {resolved}"}
+    try:
+        data = _load_toml_file(resolved)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "configured": True, "path": str(resolved), "error": f"集群配置解析失败: {exc}"}
+
+    section = data.get("vllm_mix")
+    if not isinstance(section, dict):
+        return {
+            "ok": False,
+            "configured": True,
+            "path": str(resolved),
+            "error": "集群配置缺少 [vllm_mix] 段（multihost_infer 插件专用格式）",
+        }
+
+    nodes = [n for n in (section.get("node") or []) if isinstance(n, dict)]
+    workers = [w for w in (section.get("workers") or []) if isinstance(w, dict)]
+    if len(nodes) != 1 or not all(_cluster_host(node) for node in nodes + workers):
+        return {
+            "ok": False,
+            "configured": True,
+            "path": str(resolved),
+            "error": "Exactly one master and a host for every worker are required",
+        }
+    if len({_cluster_host(node) for node in nodes + workers}) != len(nodes) + len(workers):
+        return {"ok": False, "configured": True, "path": str(resolved), "error": "Cluster node hosts must be unique"}
+    chips_per_node = section.get("chips_per_node", 8)
+    try:
+        if isinstance(chips_per_node, bool) or float(chips_per_node) != int(chips_per_node):
+            raise ValueError("chips_per_node must be a positive integer")
+        chips_per_node = int(chips_per_node)
+    except (TypeError, ValueError):
+        chips_per_node = 0
+
+    if chips_per_node <= 0:
+        return {"ok": False, "configured": True, "path": str(resolved), "error": "chips_per_node must be positive"}
+    return {
+        "ok": True,
+        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+        "configured": True,
+        "path": str(resolved),
+        "chips_per_node": chips_per_node,
+        "master_host": _cluster_host(nodes[0]) if nodes else "",
+        "nodes": nodes,
+        "workers": workers,
+        "num_nodes": len(nodes) + len(workers),
+        "data_parallel_rpc_port": section.get("data_parallel_rpc_port", 0),
+        "ready_log_pattern": section.get("ready_log_pattern", ""),
+        "docker_use_sudo": bool(data.get("docker_use_sudo", False)),
+        # [vllm_mix.env] is the static base exported into every node script
+        "env": {
+            str(key): str(value).lower() if isinstance(value, bool) else str(value)
+            for key, value in (section.get("env") or {}).items()
+        },
+    }

@@ -2,7 +2,7 @@
 name: optix-assistant
 description: optix 寻优统一入口。当用户需要初始化或修改 config.toml、推荐 MindIE/vLLM 寻优参数与搜索范围、执行 PSO 参数寻优、或使用 agent 模式闭环调优时使用。agent 模式的候选生成与失败恢复必须结合 knowledge 知识库（方法卡路由 + 组合合法性校验）。触发词：寻优、参数推荐、生成寻优范围、配置 config.toml、config_writer、agent 模式寻优、推荐 optix 参数。
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   source: https://gitcode.com/Ascend/msmodeling/pull/778
   status: active
 ---
@@ -18,6 +18,8 @@ msmodeling optix 寻优的唯一用户入口，覆盖三种意图：
 | **config 模式** | 只想初始化/修改 config.toml，不跑寻优 | 本节「入口」→ config 分支（流程内联，无独立文档） |
 | **PSO 模式** | 用 optix 内置 PSO 做参数寻优 | 共享前置 → `references/pso-mode.md` |
 | **agent 模式** | AI agent 逐轮生成候选的闭环调优 | 共享前置 → `workflows/agent.md`（执行按 workflows/ 下阶段流程文件编排） |
+
+agent 多机混部使用原 `multihost_infer` 插件；进入该场景先读 [多机约定](references/multihost.md)。
 
 三种模式共享同一条前置链（见下「共享前置流程」），差异只在执行分支。
 
