@@ -29,7 +29,7 @@
 python -m venv .venv
 .venv\Scripts\activate
 # 2. 安装 msmodeling（以下为示例链接）
-pip install https://gitcode.com/Ascend/msmodeling/releases/download/tag_MindStudio_26.1.0.B100_002/msmodeling-26.1.0-py3-none-any.whl
+pip install https://gitcode.com/Ascend/msmodeling/releases/download/tag_MindStudio_26.2.0.B110_001/msmodeling-26.2.0-py3-none-any.whl
 ```
 
 ### 2.2 离线安装

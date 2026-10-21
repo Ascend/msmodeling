@@ -3,12 +3,12 @@
 <div align="center">
 <p><b><span style="font-size:24px;">Ascend AI Model Performance Modeling and Simulation Tool</span></b></p>
 
- [![Quick Start](https://badgen.net/badge/快速入门/QuickStart/blue)](./docs/en/quick_start/tensorcast_throughput_optimizer_quick_start.md)
- [![AI Q&A (DeepWiki)](https://badgen.net/badge/AI问答/DeepWiki/blue)](https://deepwiki.com/Ascend/msmodeling)
- [![AI Q&A (ZRead)](https://badgen.net/badge/AI问答/ZRead/blue)](https://zread.ai/mindstudio-docs/master)
- [![Precise Search](https://badgen.net/badge/精确搜索/ReadTheDocs/blue)](https://mindstudio-docs-master.readthedocs.io)
- [![Ascend Community](https://badgen.net/badge/昇腾社区/Community/blue)](https://www.hiascend.com/cn/developer/software/mindstudio)
- [![Report an Issue](https://badgen.net/badge/报告问题/Issues/blue)](https://gitcode.com/Ascend/msmodeling/issues)
+ [![Quick Start](https://badgen.net/badge/Quick%20Start/QuickStart/blue)](./docs/en/quick_start/tensorcast_throughput_optimizer_quick_start.md)
+ [![AI Q&A (DeepWiki)](https://badgen.net/badge/AI%20Q%26A/DeepWiki/blue)](https://deepwiki.com/Ascend/msmodeling)
+ [![AI Q&A (ZRead)](https://badgen.net/badge/AI%20Q%26A/ZRead/blue)](https://zread.ai/mindstudio-docs/26.2.0)
+ [![Precise Search](https://badgen.net/badge/Exact%20Search/ReadTheDocs/blue)](https://mindstudio-docs-26.2.0.readthedocs.io)
+ [![Ascend Community](https://badgen.net/badge/Ascend%20Community/Community/blue)](https://www.hiascend.com/eng/developer/software/mindstudio)
+ [![Report an Issue](https://badgen.net/badge/Report%20Issues/Issues/blue)](https://atomgit.com/Ascend/msmodeling/issues)
 
 </div>
 
@@ -18,14 +18,14 @@ English | [简体中文](./README.md)
 
 <span style="font-size:14px;">
 
-We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, GLM, and MiniMax. Click a series name to expand and view the newly added support entries.
+We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, GLM, and MiniMax. Click a series name to expand and view the newly added support entries.<br>
 
 <details>
 <summary><b>DeepSeek Series</b></summary>
 
 🔹 **[Jun 4, 2026]**: msModeling adds support for the **DeepSeek-V4** model.<br>
 🔹 **[Apr 20, 2026]**: msModeling adds support for the **DeepSeek V3.2** model.<br>
-🔹 **[Sep 6, 2025]**: msModeling adds support for the **DeepSeek V3** model.
+🔹 **[Sep 6, 2025]**: msModeling adds support for the **DeepSeek V3** model.<br>
 
 </details>
 
@@ -34,34 +34,38 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 
 🔹 **[Jun 11, 2026]**: msModeling adds support for the **Kimi-K2.6** model.<br>
 🔹 **[May 27, 2026]**: msModeling adds support for the **Kimi-K2.5** model.<br>
-🔹 **[Sep 6, 2025]**: msModeling adds support for the **Kimi-K2** model.
+🔹 **[Sep 6, 2025]**: msModeling adds support for the **Kimi-K2** model.<br>
 
 </details>
 
 <details>
 <summary><b>Qwen Series</b></summary>
 
+🔹 **[Jul 14, 2026]**: msModeling adds image-input support for **Qwen3.6**.<br>
+🔹 **[Jul 14, 2026]**: msModeling adds text-input support for **Qwen3.6 Dense/MoE**.<br>
 🔹 **[Apr 20, 2026]**: msModeling adds image-input support for **Qwen3.5**.<br>
-🔹 **[Mar 31, 2026]**: msModeling adds text-input support for **Qwen3.5 Dense / MoE**.<br>
+🔹 **[Mar 31, 2026]**: msModeling adds text-input support for **Qwen3.5 Dense/MoE**.<br>
 🔹 **[Dec 25, 2025]**: msModeling adds support for the **Qwen3 MoE** model.<br>
 🔹 **[Sep 18, 2025]**: msModeling adds support for the **Qwen3-Next** model.<br>
-🔹 **[Aug 18, 2025]**: msModeling adds support for the **Qwen3 Dense** model.
+🔹 **[Aug 18, 2025]**: msModeling adds support for the **Qwen3 Dense** model.<br>
 
 </details>
 
 <details>
 <summary><b>GLM Series</b></summary>
 
+🔹 **[Jul 7, 2026]**: msModeling adds support for the **GLM5.2** model.<br>
 🔹 **[Jun 4, 2026]**: msModeling adds support for the **GLM5.1** model.<br>
 🔹 **[Apr 30, 2026]**: msModeling adds support for the **GLM5** model.<br>
-🔹 **[Mar 31, 2026]**: msModeling adds support for the **GLM-4 MoE** model.
+🔹 **[Mar 31, 2026]**: msModeling adds support for the **GLM-4 MoE** model.<br>
 
 </details>
 
 <details>
 <summary><b>MiniMax Series</b></summary>
-
-🔹 **[Dec 18, 2025]**: msModeling adds support for the **MiniMax M2** model.
+🔹 **[Jul 31, 2026]**: msModeling adds support for the **MiniMax M3** model.<br>
+🔹 **[Jun 25, 2026]**: msModeling adds support for the **MiniMax M2.7** model.<br>
+🔹 **[May 29, 2026]**: msModeling adds support for the **MiniMax M2.5** model.<br>
 
 </details>
 
@@ -69,12 +73,12 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 
 <span style="font-size:14px; display:block; margin-top:24px;">
 
-Click a module name to expand the list of **supported features**.
+Click a module name to expand the list of **supported features**.<br>
 
 <details>
 <summary><b>Model Inference Performance Simulation</b></summary>
 
-🔹 Multi-hardware simulation for Ascend devices, including Atlas 800 A2/A3 and Atlas 350, with support for custom device profiles<br>
+🔹 Multi-hardware simulation for Ascend devices, including Atlas 800 A2/A3 and Atlas 350/850/850E/950, with support for custom device profiles<br>
 🔹 Separate simulation of the LLM prefill and decode stages<br>
 🔹 Prefix Cache simulation<br>
 🔹 MTP speculative decoding simulation<br>
@@ -83,7 +87,7 @@ Click a module name to expand the list of **supported features**.
 🔹 Parallelism and MoE extensions, including TP, DP, EP, and fine-grained parallelism such as Embedding TP and Vision TP<br>
 🔹 Switching between the Roofline and Profiling performance models<br>
 🔹 Chrome Trace and debugging<br>
-🔹 DiT simulation for video generation, including Ulysses, CFG, and DiT Cache
+🔹 DiT simulation for video generation, including Ulysses, CFG, and DiT Cache<br>
 
 </details>
 
@@ -98,7 +102,7 @@ Click a module name to expand the list of **supported features**.
 🔹 Prefix Cache simulation<br>
 🔹 Variable-length workload simulation<br>
 🔹 Multi-stream compute-communication overlap<br>
-🔹 Cross-hardware comparison
+🔹 Cross-hardware comparison<br>
 
 </details>
 
@@ -108,7 +112,7 @@ Click a module name to expand the list of **supported features**.
 🔹 LLM and VL forward-pass simulation, and video generation simulation<br>
 🔹 Throughput optimization experiments, including PD colocation, disaggregation, and ratio-based deployment<br>
 🔹 Command preview and task caching<br>
-🔹 Result display and export, including charts, tables, device memory and operator details, and Excel files
+🔹 Result display and export, including charts, tables, device memory and operator details, and Excel files<br>
 
 </details>
 
@@ -117,7 +121,7 @@ Click a module name to expand the list of **supported features**.
 
 🔹 Serving framework optimization based on real-world measurements using particle swarm optimization (PSO) and Early Rejection<br>
 🔹 Multi-engine support, including vLLM and MindIE, as well as evaluation strategies<br>
-🔹 Custom optimization configurations and checkpoint-based resumption
+🔹 Custom optimization configurations and checkpoint-based resumption<br>
 
 </details>
 
@@ -135,7 +139,7 @@ msModeling provides modules for model inference performance simulation, serving 
 |---------|--------|
 | [**Model Inference Performance Simulation**](./docs/en/user_guide/msmodeling_tensor_cast_user_guide.md) | The model simulation module intercepts PyTorch computation graphs, simulates inference using specified device profiles, and outputs operator-level performance breakdowns, memory usage, operator shapes, and Chrome Trace. |
 | [**Serving Performance Simulation**](./docs/en/user_guide/msmodeling_throughput_optimizer_user_guide.md) | The throughput optimization simulation module automatically searches for the optimal parallelism strategy and batch configuration under SLO constraints. It supports PD colocation, PD disaggregation, and PD ratio-based deployment. |
-| [**Serving Optimization Based on Real-World Measurements**](./docs/en/user_guide/optix_user_guide.md) | Serving optimization based on real-world measurements uses the PSO algorithm to automatically search for optimal deployment parameters that satisfy latency constraints on real serving frameworks such as vLLM and MindIE. |
+| [**Serving Optimization Based on Real-World Measurements**](./docs/en/user_guide/msmodeling_optix_user_guide.md) | Serving optimization based on real-world measurements uses the PSO algorithm to automatically search for optimal deployment parameters that satisfy latency constraints on real serving frameworks such as vLLM and MindIE. msModeling and OptiX must be installed in a uv virtual environment. vLLM, MindIE, and benchmark tools use the system deployment environment by default. |
 
 ## 🚀 Quick Start
 
@@ -155,45 +159,59 @@ To help you understand and master the tools through typical problem scenarios, s
 
 ## ❓ FAQ
 
-For common issues and solutions, open an [issue](https://gitcode.com/Ascend/msmodeling/issues) or see the user guide for the relevant module.
+For common issues and solutions, open an [issue](https://atomgit.com/Ascend/msmodeling/issues) or see the user guide for the relevant module.
 
 ## 🌌 Intelligent Search
 
 To improve documentation search efficiency, we provide multiple efficient search methods:<br>
 🔹 [AI Q&A (DeepWiki)](https://deepwiki.com/Ascend/msmodeling): Ask questions in natural language to quickly understand the project architecture and relationships between modules.<br>
-🔹 [AI Q&A (ZRead)](https://zread.ai/mindstudio-docs/master): Provides a better Chinese Q&A experience and accurately locates feature usage and details.<br>
-🔹 [Precise Search (ReadTheDocs)](https://mindstudio-docs-master.readthedocs.io): Search the full text by keyword to find information about interfaces, parameters, and error messages directly.
+🔹 [AI Q&A (ZRead)](https://zread.ai/mindstudio-docs/26.2.0): Provides a better Chinese Q&A experience and accurately locates feature usage and details.<br>
+🔹 [Precise Search (ReadTheDocs)](https://mindstudio-docs-26.2.0.readthedocs.io): Search the full text by keyword to find information about interfaces, parameters, and error messages directly.
 
 ## 🛠️ Contribution Guide
 
-Contributions to the project are welcome. For detailed contribution procedures, coding standards, commit conventions, testing requirements, and more, see [CONTRIBUTING.md](CONTRIBUTING.md). If you have questions, open an [issue](https://gitcode.com/Ascend/msmodeling/issues).
+Contributions to the project are welcome. For detailed contribution procedures, coding standards, commit conventions, testing requirements, and more, see the [msModeling Contribution Guide](CONTRIBUTING.md). If you have questions, open an [issue](https://atomgit.com/Ascend/msmodeling/issues).
+
+### Dev Container Development Environment
+
+The repository provides a VS Code Dev Container based on Python 3.11. For the startup method, automatic initialization content, and the unified build and UT entry point, see the [Dev Container Guide](.devcontainer/README.md).
+
+### AI Native Development
+
+This repository supports AI-assisted issue drafting and review, end-to-end delivery from issue to PR/CI, multi-role and inline PR review, and
+closed-loop handling of openLiBing CI failures. The unified entry point for AI is [AGENTS.md](AGENTS.md). For workflow descriptions and business examples, see
+the [AI Native Development Guide](docs/ai-native/README.md).
+
+- Use the `gitcode` CLI for all AtomGit remote operations.
+- By default, confirm each stage. You can also explicitly authorize automatic progress within a limited scope.
+- Record key decisions and verification evidence in issue/PR comments.
+- You can pause, modify the plan, take over, or resume at any time.
+- AI does not automatically approve, merge, force push, or bypass gates.
+
+Example: `Implement Issue 123. First provide the requirement analysis and solution, have me confirm each key stage, and leave an audit record in the issue/PR.`
 
 ## ⚖️ Related Information
 
-🔹 [Release Notes](https://gitcode.com/Ascend/msmodeling/releases)<br>
+🔹 [Release Notes](https://atomgit.com/Ascend/msmodeling/releases)<br>
 🔹 [License Notice](./docs/en/legal/LICENSE)<br>
 🔹 [Security Statement](./docs/en/legal/SECURITY.md)<br>
 🔹 Disclaimer: The simulation and optimization results provided by this tool are for performance evaluation only. Use measurements from a real environment as the final reference for actual performance.
 
 ## 🤝 Suggestions and Communication
 
-Everyone is welcome to contribute to the community. If you have any questions or suggestions, open an [issue](https://gitcode.com/Ascend/msmodeling/issues), and we will respond as soon as possible. Thank you for your support.
+Everyone is welcome to contribute to the community. If you have any questions or suggestions, open an [issue](https://atomgit.com/Ascend/msmodeling/issues), and we will respond as soon as possible. Thank you for your support.
 
 **SIG Weekly Meeting**: The MindStudio Modeling Weekly Meeting is held every Wednesday from 10:00 to 12:00 (UTC+8). For meeting minutes and topics, see [sig-msit-modeling](https://etherpad.ascend.osinfra.cn/p/sig-msit-modeling). You can also use the [Time Zone Converter](https://dateful.com/convert/gmt8?t=15) to view the local time.
 
 | Instant Interaction (WeChat Group) | Official Updates (Official Account) | In-Depth Support (Assistant/Forum) |
 |:--:|:--:|:--|
-| <img src="https://raw.gitcode.com/mengguangxin/docs/files/dev_0526/common/Writing_Template/figures/qr_code_wechat_work.png" width="120"><br><sub>*Scan to join the technical discussion group*</sub> | <img src="https://raw.gitcode.com/mengguangxin/docs/files/dev_0526/common/Writing_Template/figures/qr_code_wechat_official_account.png" width="120"><br><sub>*Scan to follow the official account*</sub> | Scan the QR codes to join the group and follow the official account, providing the fastest way to connect with MindStudio users and developers:<br>**Ask questions quickly:** Discuss technical issues with community members in real time.<br>**Stay up to date:** Get first-hand notifications about releases and feature updates.<br>**Share experience:** Exchange best practices and hands-on experience with developers.<br><br>**More support channels:** 👉 Ascend Assistant: [![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white)](https://gitcode.com/Ascend/msit/blob/master/docs/zh/figures/readme/xiaozhushou.png) 👉 Ascend Forum: [![Website](https://img.shields.io/badge/Website-%231e37ff?style=flat-square&logo=RSS&logoColor=white)](https://www.hiascend.com/forum/) |
+|  <img src="https://raw.gitcode.com/Ascend/docs/files/master/common/Writing_Template/figures/qr_code_wechat_work.png" width="120"><br><sub>*Scan to join the technical discussion group*</sub> | <img src="https://raw.gitcode.com/Ascend/docs/files/master/common/Writing_Template/figures/qr_code_wechat_official_account.png" width="120"><br><sub>*Scan to follow the official account*</sub> | Scan the QR codes to join the group and follow the official account, providing the fastest way to connect with MindStudio users and developers:<br>**Ask questions quickly:** Discuss technical issues with community members in real time.<br>**Stay up to date:** Get first-hand notifications about releases and feature updates.<br>**Share experience:** Exchange best practices and hands-on experience with developers.<br><br>**More support channels:** 👉 Ascend Assistant: [![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white)](https://atomgit.com/Ascend/msit/blob/master/docs/zh/figures/readme/xiaozhushou.png) 👉 Ascend Forum: [![Website](https://img.shields.io/badge/Website-%231e37ff?style=flat-square&logo=RSS&logoColor=white)](https://www.hiascend.com/forum/) |
 
 ## 🙏 Acknowledgments
 
-This tool is jointly contributed by the following companies and departments, in no particular order:
+This tool is jointly contributed by the following companies, in no particular order:
 
-🔹 **Huawei**<br>
-&emsp;&emsp;Ascend Computing Products Department<br>
-&emsp;&emsp;Zhanlu and AI Workload<br>
-&emsp;&emsp;2012 Network Technology Laboratory and 2012 Markov Laboratory<br>
-&emsp;&emsp;Xiaoqiaoling Strike Team and OTT Systems Department
+🔹 **Huawei Technologies Co., Ltd.**
 
 🔹 **Ant Group**
 

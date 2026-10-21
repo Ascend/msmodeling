@@ -9,11 +9,11 @@ This document summarizes the currently supported model types and simulation feat
 - For detailed usage of each module, read the following user guides:
   - [Model Inference Performance Simulation User Guide](../msmodeling_tensor_cast_user_guide.md)
   - [Serving Performance Simulation User Guide](../msmodeling_throughput_optimizer_user_guide.md)
-  - [Measured Serving Optimization User Guide](../optix_user_guide.md)
+  - [Measured Serving Optimization User Guide](../msmodeling_optix_user_guide.md)
   - [Web UI User Guide](../msmodeling_web_ui_user_guide.md)
   - [TensorCast New Model Adaptation Development Guide](../msmodeling_tensor_cast_new_model_adaptation_user_guide.md)
-  - [OptiX Plugin Developer Guide](../optix_plugin_user_guide.md)
-- For experimental serving simulation capabilities, see [Fine-Grained Serving Simulation User Guide](../msmodeling_serving_cast_simulation_user_guide.md).
+  - [OptiX Plugin Developer Guide](../msmodeling_optix_plugin_user_guide.md)
+- For experimental serving simulation capabilities, see the [Fine-Grained Serving Simulation User Guide](../msmodeling_serving_cast_simulation_user_guide.md).
 
 ## Currently Supported Models
 
@@ -23,12 +23,12 @@ This document summarizes the currently supported model types and simulation feat
 | --- | --- | --- |
 | Text models | DeepSeek | DeepSeek V4, DeepSeek V3.2, DeepSeek V3 |
 | Text models | Kimi | Kimi-K2.6, Kimi-K2.5, Kimi-K2 (supported through the DeepSeek V3 compatibility path) |
-| Text models | Qwen | Qwen3.5, Qwen3.5 MoE, Qwen3-Next, Qwen3 Dense, Qwen3 MoE |
-| Text models | GLM | GLM5.1, GLM5, GLM-4 MoE |
+| Text models | Qwen | Qwen3.6, Qwen3.6 MoE, Qwen3.5, Qwen3.5 MoE, Qwen3-Next, Qwen3 Dense, Qwen3 MoE |
+| Text models | GLM | GLM5.2, GLM5.1, GLM5, GLM-4 MoE |
 | Text models | ERNIE | ERNIE 4.5 MoE |
-| Text models | Bailing/MiMo/MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2 |
+| Text models | Bailing/MiMo/MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2.7, MiniMax M2.5, MiniMax M3 |
 | Vision-language models | VL Models | Qwen3-VL, Qwen3-VL MoE, GLM-4V, GLM-4V MoE, InternVL |
-| Image generation/editing models | Diffusers DiT image models | FLUX.1-dev, Qwen-Image-Edit |
+| Image generation/editing models | Diffusers DiT | FLUX.1-dev, Qwen-Image-Edit |
 | Video generation models | Diffusers DiT | Wan, HunyuanVideo, HunyuanVideo1.5 |
 
 ## Feature Support
@@ -37,7 +37,7 @@ This document summarizes the currently supported model types and simulation feat
 
 | Feature | Description |
 | --- | --- |
-| Multi-hardware simulation | Supports built-in profiles for Ascend devices such as Atlas 800 A2/A3 and Atlas 350, as well as custom device profiles, estimating operator latency, communication overhead, and memory usage in multi-device scenarios without real hardware. |
+| Multi-hardware simulation | Supports built-in profiles for Ascend devices such as Atlas 800 A2/A3 and Atlas 350/850/850E/950, as well as custom device profiles, estimating operator latency, communication overhead, and memory usage in multi-device scenarios without real hardware. |
 | Phased LLM prefill/decode simulation | Differentiates the two compute paths of prefill and decode, and models the attention, KV cache growth, and per-token generation overhead of each phase. |
 | Prefix cache simulation | Approximately models the prefill reuse benefit of prefix cache hits and evaluates the impact of the cache on first-token latency. |
 | MTP speculative decoding simulation | Models the extra draft/verify computation of Multi-Token Prediction (MTP) and evaluates the impact of MTP on latency and throughput. |
@@ -49,7 +49,7 @@ This document summarizes the currently supported model types and simulation feat
 | Model configuration sources | Supports local model directories and loading model configurations from remote sources such as Hugging Face and ModelScope. |
 | Performance model switching | Supports Roofline-based analytical estimation and performance modeling based on measured data, allowing you to combine and compare results from different estimation paths as needed. |
 | Chrome Trace/Debug | Outputs operator-level timeline, shape, graph structure, and bound analysis information for bottleneck identification, result validation, and visual analysis. |
-| Image generation DiT simulation | Supports multi-step denoising workload simulation for FLUX.1-dev and Qwen-Image-Edit series, covering output/source image sizes, text condition length, sampling steps, and quantization. |
+| Image generation DiT simulation | Supports multi-step denoising workload simulation for the FLUX.1-dev and Qwen-Image-Edit series, covering output/source image dimensions, text condition length, sampling steps, and quantization. |
 | Video generation DiT simulation | Supports multi-step denoising simulation for Diffusers DiT video models such as Wan and HunyuanVideo, covering resolution, frame count, sampling steps, and quantization configuration. |
 | Ulysses parallelism simulation | Models the attention communication and compute overhead under sequence-dimension Ulysses parallel splitting, supporting multi-device image/video DiT inference performance analysis. |
 | CFG simulation | Models the forward overhead of the conditional and unconditional paths under Classifier-Free Guidance (CFG) and evaluates the impact of guidance on single-step denoising time. |
@@ -64,7 +64,8 @@ This document summarizes the currently supported model types and simulation feat
 | PD aggregation | Jointly evaluates prefill and decode in the same instance to quickly obtain overall serving throughput and parallel configuration recommendations. |
 | PD disaggregation | Searches for the optimal configurations of prefill and decode instances separately, suitable for evaluating PD disaggregated deployment scenarios. |
 | PD ratio optimization | Searches for the optimal prefill/decode instance ratio under a fixed hardware scale, balancing resource investment and serving capability between the two instance types. |
-| Parallel strategy search | Performs combinatorial search across dimensions such as TP, EP, and MoE-DP. |
+| Parallel strategy search | Performs combinatorial search across dimensions such as TP, EP, MoE-DP, and PP. |
+| Pipeline parallelism (PP) search | Enables PP search through `--pp-sizes`, derives DP/MoE-TP with stage-local arithmetic, and uses a forward blocking scheduler to compute the makespan, bubble ratio, bottleneck stage, and schedule-aware throughput of candidates with PP>1. It supports explicit layer partitioning through `--pp-layer-partitions` and can be searched jointly with DCP. PP=1 follows the original path and remains fully backward compatible. |
 | MTP configuration search | Searches configurations such as the MTP token count and acceptance rate to evaluate the impact of speculative decoding on serving throughput. |
 | Batch and concurrency search | Automatically searches for batch size and request concurrency combinations that satisfy the SLO, considering service constraints such as the maximum number of batched tokens per step. |
 | Chunked prefill simulation | When the effective input length exceeds the per-step prefill token budget, automatically splits the long prompt into multiple prefill chunks for step-by-step modeling, providing a more accurate evaluation of TTFT, P-phase throughput, aggregation scheduling behavior, and memory usage. This can be analyzed in combination with Prefix Cache. |
@@ -77,7 +78,7 @@ This document summarizes the currently supported model types and simulation feat
 
 ### Fine-Grained Serving Simulation
 
-> Note: This module is an experimental feature. See [Fine-Grained Serving Simulation User Guide](../msmodeling_serving_cast_simulation_user_guide.md).
+> Note: This module is an experimental feature. See the [Fine-Grained Serving Simulation User Guide](../msmodeling_serving_cast_simulation_user_guide.md).
 
 | Feature | Description |
 | --- | --- |

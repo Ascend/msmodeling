@@ -48,7 +48,7 @@ When you provide input files to the tool as command input, you are advised to en
 
 ## Vulnerability Security Statement
 
-- Huawei's rules on product vulnerability management follow the Vulnerability Handling Process. For details, see [Vulnerability Handling Process](https://www.huawei.com/cn/psirt/vul-response-process).
+- The rules of Huawei Technologies Co., Ltd. on product vulnerability management follow the Vulnerability Handling Process. For details, see [Vulnerability Handling Process](https://www.huawei.com/cn/psirt/vul-response-process).
 - If enterprise customers need to obtain vulnerability information, see [Security Notices](https://securitybulletin.huawei.com/enterprise/cn/security-advisory).
 - When installing dependencies, use newer software packages that meet the requirements, and pay attention to and fix existing vulnerabilities, especially publicly disclosed high-risk vulnerabilities with a CVSS score greater than 7.
 
@@ -74,12 +74,16 @@ If the runtime environment depends on CANN or NPU-related dynamic libraries, you
 
 The msModeling project is developed in Python and provides a CLI entry point and Python APIs externally. All public interfaces are described in the user guide and quick start documentation. Scripting languages such as Python are released in source code form. You are advised to use the public interfaces described in the documentation directly and avoid calling internal modules or interfaces that are not explicitly public.
 
+## Instructions for Using Security Functions
+
+While unsafe functions are not forcibly disabled, you are advised to use their safe variants that explicitly take a buffer length parameter, for example, `memset_s` and `memcpy_s`.
+
 ## Communication Security Hardening
 
 - The msModeling Web UI binds to `127.0.0.1` by default. When the browser and the service run on the same machine, communication occurs within localhost.
 - If you bind the Web UI to a non-local address or access it remotely through a proxy, port forwarding, shared links, or other methods, this is a non-default secure usage mode. You are responsible for monitoring the security risks introduced by remote communication.
 - To mitigate security risks, you are advised to harden communication security with firewalls, iptables, access control lists, reverse proxy tools such as VPN and Nginx, and HTTPS, and limit the range of clients that can access the service.
-- When collecting performance data of communication operators, the performance database collection tool uses `torchrun` to establish TCP communication. Use it only in a trusted network environment, and perform security hardening before using scripts for communication data collection. For details, see [Communication security hardening of the Ascend PyTorch repository](https://gitcode.com/Ascend/pytorch/blob/v2.7.1-26.1.0/docs/en/SECURITYNOTE.md#%E9%80%9A%E4%BF%A1%E5%AE%89%E5%85%A8%E5%8A%A0%E5%9B%BA). In addition, ensure that environment variables such as `MASTER_ADDR` and `MASTER_PORT` are configured as expected.
+- When collecting performance data of communication operators, the performance database collection tool uses `torchrun` to establish TCP communication. Use it only in a trusted network environment, and perform security hardening before using scripts for communication data collection. For details, see [Communication security hardening of the Ascend PyTorch repository](https://gitcode.com/Ascend/pytorch/blob/master/SECURITYNOTE.en.md#communication-security-hardening). In addition, ensure that environment variables such as `MASTER_ADDR` and `MASTER_PORT` are configured as expected.
 
 ## Communication Matrix
 
