@@ -783,6 +783,8 @@ class TestModelRunnerProfilingMetrics:
         runner.perf_models = [pm]
         runner.model = FakePipelineModel()
         runner.device_profile = _make_device()
+        runner.engram_host_resident_size_gb = 0.0
+        runner.engram_host_resident_per_rank_gb = 0.0
         runner.user_input = SimpleNamespace(
             num_queries=1,
             query_len=1,
@@ -864,6 +866,8 @@ class TestModelRunnerProfilingMetrics:
         runner.device_profile = _make_device()
         runner.total_device_memory_gb = 1.0
         runner.model_weight_size_gb = 0.0
+        runner.engram_host_resident_size_gb = 0.0
+        runner.engram_host_resident_per_rank_gb = 0.0
         runner.user_input = SimpleNamespace(
             num_queries=1,
             query_len=1,

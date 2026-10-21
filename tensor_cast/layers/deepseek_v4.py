@@ -952,11 +952,15 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
             }
         # 4-6. scatter + compressor + sparse_attn (model.py:518-533).
         slot_mapping = attention_meta.slot_mapping if attention_meta is not None else None
-        window_valid_len = (
-            torch.clamp(meta_seq_lens, max=W)
-            if meta_seq_lens is not None
-            else torch.full((batch_size,), min(sl, W), dtype=torch.long, device=hidden_states.device)
-        )
+        # V4 compressors consume full sequence lengths; only CSA2 attention
+        # needs the window-clamped lengths.
+        window_valid_len = meta_seq_lens
+        if is_v41:
+            window_valid_len = (
+                torch.clamp(meta_seq_lens, max=W)
+                if meta_seq_lens is not None
+                else torch.full((batch_size,), min(sl, W), dtype=torch.long, device=hidden_states.device)
+            )
         published_compressed_stream = None
         published_compressed_scale_stream = None
 
