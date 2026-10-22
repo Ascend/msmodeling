@@ -1,0 +1,32 @@
+# Merge these sections into an existing OptiX engine configuration.
+# Call the original tool directly; no result-selection wrapper is needed.
+# The plugin selects the final logged experiment and preserves all raw rounds.
+# --prefix_test uses the formal pass; normal datasets with --repeat N use pass N.
+# See README.md for result validation and selection details.
+use_request_rate_calibration = false
+
+[aisbench_auto]
+work_path = "/opt/aisbench_auto_tools_prefix"
+# Relative to work_path; must match OUTPUT_DIR in the external tool.
+output_path = "outputs/default"
+
+[aisbench_auto.command]
+executable = "python3"
+script = "aisbench_test.py"
+others = "--dataset_type prefix_cache --prefix_test --repeat 1 --repeat_rate 50% --prefix_num 1 --seed 2 --input_len 2048 --output_len 512 --data_num 128"
+
+[[aisbench_auto.target_field]]
+name = "CONCURRENCY"
+config_position = "env"
+min = 8
+max = 128
+dtype = "int"
+value = 32
+
+[[aisbench_auto.target_field]]
+name = "REQUESTRATE"
+config_position = "env"
+min = 0
+max = 0
+dtype = "float"
+value = 0

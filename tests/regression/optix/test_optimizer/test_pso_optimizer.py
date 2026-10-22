@@ -224,6 +224,31 @@ class TestPSOOptimizer:
         f, p, pi = opt.best_params(fitness_list, params_list, perf_list)
         assert pi.generate_speed == 10
 
+    @pytest.mark.parametrize(
+        "speeds,ttfts,expected",
+        [
+            ([440.7755, 480.8392], [0.9632, 0.5023], 1),
+            ([500, 1000], [0.8, 1.2], 0),
+            ([1000, 400], [1.5, 1.1], 1),
+            ([1000, 400], [None, 0.9], 1),
+        ],
+    )
+    def test_best_params_with_only_ttft_penalty(self, speeds, ttfts, expected):
+        opt = self._create_optimizer(ttft_penalty=1.0, tpot_penalty=0)
+        opt.fine_tune = _make_fine_tune_mock(ttft_upper_bound=1.0)
+        perf_list = [
+            PerformanceIndex(generate_speed=speed, time_to_first_token=ttft, time_per_output_token=0.02)
+            for speed, ttft in zip(speeds, ttfts)
+        ]
+        fitness_list = [5.0, 4.0]
+        params_list = [np.array([10]), np.array([20])]
+
+        fitness, params, performance = opt.best_params(fitness_list, params_list, perf_list)
+
+        assert performance is perf_list[expected]
+        assert fitness == fitness_list[expected]
+        np.testing.assert_array_equal(params, params_list[expected])
+
     def test_best_params_with_both_penalties(self):
         opt = self._create_optimizer(ttft_penalty=1.0, tpot_penalty=1.0)
         opt.fine_tune = _make_fine_tune_mock(tpot_upper_bound=0.05, ttft_upper_bound=0.15)

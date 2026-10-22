@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aisbench-auto-optix"
+version = "0.1.0"
+description = "OptiX benchmark plugin backed by aisbench_auto_tools_prefix"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.entry-points."optix.plugins"]
+aisbench_auto = "aisbench_auto:register"
+
+[tool.setuptools.packages.find]
+include = ["aisbench_auto*"]

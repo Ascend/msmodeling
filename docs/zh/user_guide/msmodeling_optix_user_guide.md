@@ -423,12 +423,14 @@ dtype_param = "max_batch_size"
 
 ### 结果存储与精调
 
+仅启用 TTFT 惩罚（`ttft_penalty > 0`、`tpot_penalty = 0`）时，最终判优优先选择 TTFT 低于 SLO 的候选，再在其中选择生成吞吐最高者；如果所有候选均超出 TTFT SLO，则选择 TTFT 最低者。关闭 FineTune 时，工具在复测后停止自己管理的服务；`manage_simulator_lifecycle=false` 的外部服务由调用方管理。
+
 PSO 阶段结束后，工具会从结果中选出若干组候选进入精调（fine-tune）阶段，`pso_top_k` 控制选取数量，结果存储与精调配置位于 `config.toml` 中的 `[data_storage]`：
 
 |参数|可选/必选| 说明                                                                    |
 |---|---|-----------------------------------------------------------------------|
 |`store_dir`|可选| 结果 CSV 存储目录，默认 `store`。                                               |
-|`pso_top_k`|可选| 从 PSO 结果中选取的候选组数，默认为 0，功能不开启。选取逻辑：取 fitness 最小的 top-k；深度精调场景建议 `3~5`。 |
+|`pso_top_k`|可选| 从 PSO 结果中选取的候选组数，默认为 0，关闭 FineTune，但仍复测最佳 PSO 候选。选取逻辑：取 fitness 最小的 top-k；深度精调场景建议 `3~5`。 |
 
 ```toml
 [data_storage]
