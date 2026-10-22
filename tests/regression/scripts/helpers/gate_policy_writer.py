@@ -34,10 +34,10 @@ DEFAULT_GATE_ROOTS: Final = (
 DEFAULT_TEST_INCLUDE: Final = ("tests/**/test_*.py", "tests/**/*_test.py")
 DEFAULT_TEST_EXCLUDE: Final = ("tests/helpers/**", "tests/assets/**")
 DEFAULT_CONFIG_INCLUDE: Final = (
-    "pyproject.toml",
-    "requirements.txt",
-    "requirements-ci.txt",
-    "uv.lock",
+    "/pyproject.toml",
+    "/requirements.txt",
+    "/requirements-ci.txt",
+    "/uv.lock",
     "tests/**/conftest.py",
 )
 DEFAULT_APPROVERS: Final = ("fangkai", "hexiaowu", "gongjiong", "liujiawang")

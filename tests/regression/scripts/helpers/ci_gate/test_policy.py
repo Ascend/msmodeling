@@ -132,8 +132,12 @@ def test_is_policy_config_path_uses_policy_configs(tmp_path: Path) -> None:
     _write_gate_policy(repo)
     policy = load_gate_policy(repo)
     assert is_policy_config_path("pyproject.toml", policy.configs) is True
+    assert is_policy_config_path("requirements.txt", policy.configs) is True
     assert is_policy_config_path("requirements-ci.txt", policy.configs) is True
+    assert is_policy_config_path("uv.lock", policy.configs) is True
     assert is_policy_config_path("tests/regression/conftest.py", policy.configs) is True
+    assert is_policy_config_path("contrib/optix/aisbench_auto/pyproject.toml", policy.configs) is False
+    assert is_policy_config_path("pre-commit/pyproject.toml", policy.configs) is False
     assert is_policy_config_path("tests/.ci/gate_policy.yaml", policy.configs) is False
     assert is_policy_config_path("cli/main.py", policy.configs) is False
 
@@ -141,6 +145,9 @@ def test_is_policy_config_path_uses_policy_configs(tmp_path: Path) -> None:
 def test_is_policy_config_path_build_py_not_config() -> None:
     policy = load_gate_policy(REPO_ROOT)
     assert is_policy_config_path("build.py", policy.configs) is False
+    assert is_policy_config_path("pyproject.toml", policy.configs) is True
+    assert is_policy_config_path("contrib/optix/aisbench_auto/pyproject.toml", policy.configs) is False
+    assert is_policy_config_path("pre-commit/pyproject.toml", policy.configs) is False
 
 
 def test_matches_path_patterns_respects_exclude(tmp_path: Path) -> None:

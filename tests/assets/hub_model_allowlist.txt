@@ -36,6 +36,7 @@ mistralai/MiniMaxM2-8x7B-v0.1
 moonshotai/Kimi-K2-Base
 moonshotai/Kimi-K2-Thinking
 moonshotai/Kimi-K2.5
+moonshotai/Kimi-K2.6
 tencent/HunyuanVideo-1.5
 zai-org/GLM-4.5
 zai-org/GLM-4.5V

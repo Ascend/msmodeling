@@ -17,10 +17,10 @@ tests:
 
 configs:
   include:
-    - "pyproject.toml"
-    - "requirements.txt"
-    - "requirements-ci.txt"
-    - "uv.lock"
+    - "/pyproject.toml"
+    - "/requirements.txt"
+    - "/requirements-ci.txt"
+    - "/uv.lock"
     - "tests/**/conftest.py"
   exclude: []
 

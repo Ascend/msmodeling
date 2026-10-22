@@ -122,7 +122,10 @@ def _make_pd(**overrides):
     obj.run_log_fp = None
     obj.run_log_offset = 0
     obj._ssh_cmd_timeout = 30
-    obj._remote_tmp_dir = "/tmp"
+    # Parallel smoke tests share cluster ids. A fixed /tmp staging directory lets one
+    # test's _reset_round_dir delete another test's run.sh before upload.
+    obj._remote_tmp_holder = tempfile.TemporaryDirectory(prefix="vllm_pd_smoke_")
+    obj._remote_tmp_dir = obj._remote_tmp_holder.name
     # TP/DP sizes and MoE flag are simulator instance attributes (not config fields)
     obj._prefill_tp_size = 1
     obj._prefill_dp_size = 1
@@ -553,14 +556,14 @@ class TestPdGenDirSeparation(unittest.TestCase):
     def test_gen_dir_has_gen_suffix(self):
         obj = _make_pd()
         obj._cluster_id = 0
-        self.assertEqual(obj._gen_dir, "/tmp/vllm_pd_0_gen")
+        self.assertEqual(obj._gen_dir, f"{obj._remote_tmp_dir}/vllm_pd_0_gen")
         obj._cluster_id = 3
-        self.assertEqual(obj._gen_dir, "/tmp/vllm_pd_3_gen")
+        self.assertEqual(obj._gen_dir, f"{obj._remote_tmp_dir}/vllm_pd_3_gen")
 
     def test_remote_dir_unchanged_and_differs_from_gen_dir(self):
         obj = _make_pd()
         obj._cluster_id = 0
-        self.assertEqual(obj._remote_dir, "/tmp/vllm_pd_0")
+        self.assertEqual(obj._remote_dir, f"{obj._remote_tmp_dir}/vllm_pd_0")
         self.assertNotEqual(obj._gen_dir, obj._remote_dir)
 
     def test_get_round_dir_points_to_gen_dir(self):
@@ -1111,9 +1114,9 @@ class TestPdRemoteDir(unittest.TestCase):
     def test_remote_dir_reflects_cluster_id(self):
         obj = _make_pd()
         obj._cluster_id = 0
-        self.assertEqual(obj._remote_dir, "/tmp/vllm_pd_0")
+        self.assertEqual(obj._remote_dir, f"{obj._remote_tmp_dir}/vllm_pd_0")
         obj._cluster_id = 3
-        self.assertEqual(obj._remote_dir, "/tmp/vllm_pd_3")
+        self.assertEqual(obj._remote_dir, f"{obj._remote_tmp_dir}/vllm_pd_3")
 
     def test_different_cluster_ids_produce_different_dirs(self):
         a = _make_pd(_cluster_id=1)
@@ -1138,7 +1141,7 @@ class TestPdRemoteDir(unittest.TestCase):
             str(c.kwargs.get("command") or (c.args[0] if c.args else "")) for c in executor.run.call_args_list
         )
         self.assertIn("REMOTE_DIR=", cmds)
-        self.assertIn("/tmp/vllm_pd_5", cmds)
+        self.assertIn(f"{obj._remote_tmp_dir}/vllm_pd_5", cmds)
 
 
 class TestPdRestartNodeCleanup(unittest.TestCase):
