@@ -26,7 +26,9 @@ import sys
 from typing import Dict, List, Tuple
 
 CURRENT_DIR = Path(__file__).resolve().parent
-PERF_DATA_COLLECTION_DIR = CURRENT_DIR if (CURRENT_DIR / "op_replay").is_dir() else CURRENT_DIR.parent
+PERF_DATA_COLLECTION_DIR = (
+    CURRENT_DIR if (CURRENT_DIR / "op_replay").is_dir() else CURRENT_DIR.parent
+)
 OP_REPLAY_DIR = PERF_DATA_COLLECTION_DIR / "op_replay"
 if str(OP_REPLAY_DIR) not in sys.path:
     sys.path.insert(0, str(OP_REPLAY_DIR))
@@ -54,6 +56,17 @@ try:
     from fia_common import parse_shape_or_none, shape_to_text, split_metadata_field
 except ModuleNotFoundError:
     from .fia_common import parse_shape_or_none, shape_to_text, split_metadata_field
+
+try:
+    from mla_preprocess_schema import (
+        MLA_PREPROCESS_KERNEL,
+        MLA_PREPROCESS_RUNTIME_COLUMNS,
+    )
+except ModuleNotFoundError:
+    from .op_replay.mla_preprocess_schema import (
+        MLA_PREPROCESS_KERNEL,
+        MLA_PREPROCESS_RUNTIME_COLUMNS,
+    )
 
 INPUT_SHAPES = "Input Shapes"
 INPUT_DTYPES = "Input Data Types"
@@ -114,6 +127,59 @@ FIA_RUNTIME_COLUMNS = [
     "Runtime kv_cache_mode",
     "Runtime metadata_completeness",
 ]
+# The two sub-kernels of the DSA composite operator share the same attention
+# runtime semantic context as FIA (required_context_fields of
+# _query_by_attn_params); their CSV headers must carry Runtime columns,
+# otherwise the query side reports semantic_context_missing:csv:Runtime
+# avg_seq_len and the composite operator falls back to analytic as a whole.
+# The column set matches the corresponding CSV schema of the production
+# database (vllm0.23.0rc1); Runtime values of measured rows cannot be
+# statically derived from shapes and are left empty for the generation-side
+# query_trace rows to fill in.
+_LIGHTNING_INDEXER_RUNTIME_COLUMNS = [
+    "Runtime source_profile",
+    "Runtime sparse_mode",
+    "Runtime num_key_value_heads",
+    "Runtime input_layout",
+    "Runtime topk",
+    "Runtime block_size",
+    "Runtime case_id",
+    "Runtime actual_seq_lengths_shape",
+    "Runtime actual_seq_lengths_values",
+    "Runtime actual_seq_lengths_kv_shape",
+    "Runtime actual_seq_lengths_kv_values",
+    "Runtime avg_seq_len",
+    "Runtime block_table_shape",
+    "Runtime block_table_valid_blocks",
+    "Runtime num_heads",
+    "Runtime cache_layout",
+    "Runtime kv_cache_mode",
+    "Runtime metadata_completeness",
+]
+_SPARSE_FLASH_ATTENTION_RUNTIME_COLUMNS = [
+    *_LIGHTNING_INDEXER_RUNTIME_COLUMNS,
+    "Runtime sparse_block_size",
+    "Runtime sparse_indices_pattern",
+    "Runtime sparse_indices_valid_count",
+    "Runtime sparse_indices_seed",
+]
+# The CSV header of the GLM-5 decode MLAPO composite operator must carry
+# Runtime columns, otherwise the required_columns check of
+# _query_mlapo_preprocess on the query side skips this CSV and the
+# mlapo_preprocess semantic query falls back to analytic as a whole. The
+# column set directly references MLA_PREPROCESS_RUNTIME_COLUMNS from
+# op_replay/mla_preprocess_schema.py to keep a single source of truth;
+# Runtime values of measured rows cannot be statically derived from shapes
+# and are left empty for the generation-side query_trace rows to fill in.
+_LIGHTNING_INDEXER_OP_TYPE = "LightningIndexer"
+_SPARSE_FLASH_ATTENTION_OP_TYPE = "SparseFlashAttention"
+_MLA_PREPROCESS_OP_TYPE = MLA_PREPROCESS_KERNEL
+_RUNTIME_METADATA_COLUMNS_BY_OP: Dict[str, List[str]] = {
+    FIA_OP_TYPE: FIA_RUNTIME_COLUMNS,
+    _LIGHTNING_INDEXER_OP_TYPE: _LIGHTNING_INDEXER_RUNTIME_COLUMNS,
+    _SPARSE_FLASH_ATTENTION_OP_TYPE: _SPARSE_FLASH_ATTENTION_RUNTIME_COLUMNS,
+    _MLA_PREPROCESS_OP_TYPE: list(MLA_PREPROCESS_RUNTIME_COLUMNS),
+}
 
 
 @dataclass
@@ -632,8 +698,8 @@ class KernelDetailsParser:
         ):
             output_path = self.output_dir / f"{self._sanitize_filename(op_type)}.csv"
             ordered_columns = list(base_ordered_columns)
-            if op_type == FIA_OP_TYPE:
-                ordered_columns.extend(FIA_RUNTIME_COLUMNS)
+            if op_type in _RUNTIME_METADATA_COLUMNS_BY_OP:
+                ordered_columns.extend(_RUNTIME_METADATA_COLUMNS_BY_OP[op_type])
             normalized_rows = []
             for row in type_rows:
                 normalized_rows.append(

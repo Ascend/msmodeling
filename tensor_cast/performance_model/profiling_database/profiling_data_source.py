@@ -58,6 +58,7 @@ CANN version upgrade:
 
 import logging
 import math
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -2084,6 +2085,36 @@ class _FiaColInfo:
     has_sparse_indices_valid_count: bool
 
 
+def _check_profiling_database(data_dir: str | Path) -> None:
+    """Validate a profiling database directory before building this data source.
+
+    A missing ``op_mapping.yaml`` (or CSV data) makes every profiling lookup
+    miss, so the simulation silently degrades to the analytic (roofline)
+    fallback model. Default CLI log level is ``error``, so the library-level
+    warning is never seen — print an explicit ``[WARNING]`` notice to stderr
+    instead. Called from ``ProfilingDataSource.__init__`` so every construction
+    path (ModelRunner, EmpiricalPerformanceModel, replay) is covered.
+    """
+    db_dir = Path(data_dir)
+    try:
+        if not db_dir.is_dir():
+            message = f"Profiling database directory does not exist: {db_dir.resolve()}"
+        elif not (db_dir / "op_mapping.yaml").exists():
+            message = f"op_mapping.yaml not found in profiling database: {db_dir.resolve()}"
+        elif not any(db_dir.glob("*.csv")):
+            message = f"no kernel CSV data found in profiling database: {db_dir.resolve()}"
+        else:
+            return
+    except (OSError, RuntimeError) as exc:
+        logger.warning("Profiling database check skipped due to filesystem error: %s", exc)
+        return
+    print(
+        f"[WARNING] {message}. Profiling lookups will all miss and the simulation "
+        "falls back to the analytic (roofline) baseline.",
+        file=sys.stderr,
+    )
+
+
 class ProfilingDataSource(DataSourcePerformanceModel):
     """CSV-backed data source with op_mapping.yaml + FRACTAL_NZ.
 
@@ -2103,6 +2134,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         parallel_config: Optional["ParallelConfig"] = None,
     ):
         self.data_dir = Path(data_dir)
+        _check_profiling_database(self.data_dir)
         self.comm_grid = device_profile.comm_grid if device_profile else None
         self.ep_size = parallel_config.expert_parallel_size if parallel_config else None
         self.tp_size = parallel_config.tensor_parallel_size if parallel_config else None

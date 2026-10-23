@@ -21,9 +21,18 @@ from pathlib import Path
 
 import pytest
 
+from tools.perf_data_collection.op_replay.mla_preprocess_schema import (
+    MLA_PREPROCESS_RUNTIME_COLUMNS,
+)
 from tools.perf_data_collection.parsers.parse_kernel_details import (
     DEFAULT_DEVICE,
+    FIA_OP_TYPE,
+    FIA_RUNTIME_COLUMNS,
     KernelDetailsParser,
+    _LIGHTNING_INDEXER_RUNTIME_COLUMNS,
+    _MLA_PREPROCESS_OP_TYPE,
+    _RUNTIME_METADATA_COLUMNS_BY_OP,
+    _SPARSE_FLASH_ATTENTION_RUNTIME_COLUMNS,
     build_argparser,
 )
 
@@ -173,9 +182,9 @@ KERNEL_DETAILS_FIELDNAMES = [
 ]
 
 
-def _kernel_details_row(dtype: str, duration: int) -> dict:
+def _kernel_details_row(dtype: str, duration: int, op_type: str = "Add") -> dict:
     return {
-        "Type": "Add",
+        "Type": op_type,
         "OP State": "static",
         "Accelerator Core": "AI_VECTOR_CORE",
         "Input Shapes": "4,8;4,8",
@@ -190,17 +199,24 @@ def _kernel_details_row(dtype: str, duration: int) -> dict:
     }
 
 
-def _write_kernel_details_csv(path: Path, specs: list[tuple[str, int]]) -> None:
+def _write_kernel_details_csv(path: Path, specs: list[tuple[str, int]], op_type: str = "Add") -> None:
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=KERNEL_DETAILS_FIELDNAMES)
         writer.writeheader()
         for dtype, duration in specs:
-            writer.writerow(_kernel_details_row(dtype, duration))
+            writer.writerow(_kernel_details_row(dtype, duration, op_type))
 
 
 def _parse_csv(tmp_path: Path, name: str, specs: list[tuple[str, int]]) -> list[dict]:
+    header, rows = _parse_typed_csv(tmp_path, name, specs, op_type="Add")
+    return rows
+
+
+def _parse_typed_csv(
+    tmp_path: Path, name: str, specs: list[tuple[str, int]], op_type: str
+) -> tuple[list[str], list[dict]]:
     csv_path = tmp_path / f"{name}.csv"
-    _write_kernel_details_csv(csv_path, specs)
+    _write_kernel_details_csv(csv_path, specs, op_type)
     parser = KernelDetailsParser(
         device=DEFAULT_DEVICE,
         kernel_details_path=str(csv_path),
@@ -209,7 +225,9 @@ def _parse_csv(tmp_path: Path, name: str, specs: list[tuple[str, int]]) -> list[
     output_files = parser.parse_and_export()
     assert len(output_files) == 1
     with output_files[0].open("r", encoding="utf-8-sig", newline="") as f:
-        return list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        return list(reader.fieldnames or []), rows
 
 
 class TestAggregationKeepsDtypeIdentity:
@@ -263,3 +281,65 @@ class TestAggregationKeepsDtypeIdentity:
         assert row["Profiling Average Duration(us)"] == "12.000000"
         assert row["Profiling Median Duration(us)"] == "12.000000"
         assert row["Profiling Std Duration(us)"] == "2.000000"
+
+
+class TestRuntimeMetadataColumnsByOp:
+    """Runtime column sets appended to exported CSV headers per op type."""
+
+    def test_fia_columns_preserved(self):
+        assert _RUNTIME_METADATA_COLUMNS_BY_OP[FIA_OP_TYPE] == FIA_RUNTIME_COLUMNS
+
+    def test_mla_preprocess_columns_single_source_of_truth(self):
+        assert _RUNTIME_METADATA_COLUMNS_BY_OP[_MLA_PREPROCESS_OP_TYPE] == list(MLA_PREPROCESS_RUNTIME_COLUMNS)
+
+    def test_sparse_flash_attention_extends_lightning_indexer(self):
+        li_columns = _LIGHTNING_INDEXER_RUNTIME_COLUMNS
+        sfa_columns = _SPARSE_FLASH_ATTENTION_RUNTIME_COLUMNS
+        assert sfa_columns[: len(li_columns)] == li_columns
+        assert set(sfa_columns[len(li_columns) :]) == {
+            "Runtime sparse_block_size",
+            "Runtime sparse_indices_pattern",
+            "Runtime sparse_indices_valid_count",
+            "Runtime sparse_indices_seed",
+        }
+
+    def test_unknown_op_type_absent(self):
+        assert "Add" not in _RUNTIME_METADATA_COLUMNS_BY_OP
+
+
+class TestRuntimeColumnsInExportedCsv:
+    """Exported CSVs of runtime-aware kernels must carry Runtime columns (#DSA/MLAPO).
+
+    Without the columns the query side skips the whole CSV
+    (semantic_context_missing:csv) and the composite operator falls back
+    to analytic. Measured rows leave Runtime values empty for the
+    generation-side query_trace rows to fill in.
+    """
+
+    def test_lightning_indexer_csv_has_runtime_columns(self, tmp_path: Path):
+        header, rows = _parse_typed_csv(tmp_path, "li", [("DT_BF16", 10)], "LightningIndexer")
+        for column in _LIGHTNING_INDEXER_RUNTIME_COLUMNS:
+            assert column in header
+        assert rows[0]["Runtime avg_seq_len"] == ""
+        assert rows[0]["Runtime metadata_completeness"] == ""
+
+    def test_sparse_flash_attention_csv_has_runtime_columns(self, tmp_path: Path):
+        header, rows = _parse_typed_csv(tmp_path, "sfa", [("DT_BF16", 10)], "SparseFlashAttention")
+        for column in _SPARSE_FLASH_ATTENTION_RUNTIME_COLUMNS:
+            assert column in header
+        assert "Runtime sparse_block_size" in header
+
+    def test_mla_preprocess_csv_has_runtime_columns(self, tmp_path: Path):
+        header, rows = _parse_typed_csv(tmp_path, "mlapo", [("DT_BF16", 10)], _MLA_PREPROCESS_OP_TYPE)
+        for column in MLA_PREPROCESS_RUNTIME_COLUMNS:
+            assert column in header
+        assert rows[0]["Runtime case_id"] == ""
+
+    def test_fia_csv_has_runtime_columns(self, tmp_path: Path):
+        header, _ = _parse_typed_csv(tmp_path, "fia", [("DT_BF16", 10)], FIA_OP_TYPE)
+        for column in FIA_RUNTIME_COLUMNS:
+            assert column in header
+
+    def test_plain_op_csv_has_no_runtime_columns(self, tmp_path: Path):
+        header, _ = _parse_typed_csv(tmp_path, "add", [("DT_FLOAT16", 10)], "Add")
+        assert not [column for column in header if column.startswith("Runtime ")]
