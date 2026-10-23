@@ -112,6 +112,8 @@ uv pip uninstall msmodeling
 
 ### Agent 模式工作方式
 
+PD 分离 Agent 模式的安装与使用步骤见[从环境准备到 Agent 驱动的 PD 分离寻优](../use_cases/optix_agent_pd_disaggregation.md)。
+
 Agent 模式下，工具不在内部运行 PSO，而是从 `[agent_optimizer].run_dir` 对应的运行目录读取 AI agent 生成的候选文件 `candidates.round-N.json`，校验通过后逐个执行实测，并写回 `results.round-N.json` 与 `progress.round-N.json`；仅当下一轮候选文件尚未生成时，本轮执行完成即退出。收敛退出需同时满足趋势条件（连续 `convergence_rounds` 轮改善幅度低于 1%）与覆盖条件（已完成轮次不少于 `min_rounds`、已完成 trial 不少于 `min_trials`），并受 `max_rounds` 轮数上限约束，每轮 trial 执行受 `time_limit_minutes` 时长限制。
 
 `[agent_optimizer]` 配置节字段说明（均可选）：
