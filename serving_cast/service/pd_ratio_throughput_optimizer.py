@@ -18,7 +18,7 @@ import logging
 
 import pandas as pd
 
-from serving_cast.service.optimizer_summary import PP_RESULT_COLUMNS
+from serving_cast.service.optimizer_summary import PP_RESULT_COLUMNS, _steady_pp_prefill_request_qps
 from serving_cast.service.utils import PREFILL_PHASE_MAKESPAN_COLUMN
 from serving_cast.utils import rank_pd_ratio_rows
 
@@ -34,7 +34,10 @@ class PDRatioThroughputOptimizer:
 
     QPS Formulas:
         P QPS = p_concurrency / prefill_phase_makespan_ms * 1000 (req/s)
-                (legacy rows fall back to ttft)
+                (legacy rows fall back to ttft; PP>1 rows use the steady-state
+                token/s / input_length — full-prompt token basis of the
+                throughput numerator — via the shared per-row helper
+                ``_steady_pp_prefill_request_qps``; Issues #543 and review P1/P8)
         D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000 (req/s)
 
     PD Ratio Calculation:
@@ -89,6 +92,18 @@ class PDRatioThroughputOptimizer:
             p_df["_p_qps_denominator"] = pd.to_numeric(p_df["ttft"], errors="coerce")
         p_df = p_df[p_df["_p_qps_denominator"] > 0]
         p_df["p_qps"] = p_df["concurrency"] / p_df["_p_qps_denominator"] * 1000
+        # PP>1 prefill rows report steady-state throughput (anchored on the
+        # steady wave interval, PR !821); override their P QPS with the
+        # shared per-row steady-state helper so summary QPS, p_qps and
+        # capacity planning cannot drift apart (Issue #543, review P1/P8).
+        # The helper guards PP=1 and missing operands itself; rows it cannot
+        # resolve keep the phase-makespan formula above.
+        steady_qps = p_df.apply(_steady_pp_prefill_request_qps, axis=1)
+        take_steady = steady_qps.notna() & (steady_qps > 0)
+        # Guard the empty case: assigning an all-False object Series slice
+        # into the float p_qps column raises LossySetitemError on pandas.
+        if take_steady.any():
+            p_df.loc[take_steady, "p_qps"] = steady_qps[take_steady].astype(float)
         p_df = p_df.drop(columns="_p_qps_denominator")
         p_df = p_df[p_df["p_qps"] > 0]
 

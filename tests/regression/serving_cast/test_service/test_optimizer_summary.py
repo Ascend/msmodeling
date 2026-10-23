@@ -77,6 +77,82 @@ class TestSummary(unittest.TestCase):
 
         self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 5 / 25 * 1000)
 
+    def test_pp_prefill_qps_uses_steady_throughput_time_base(self):
+        # Issue #543: PP>1 prefill rows carry steady-state token/s
+        # (measured_interval_s denominator, PR !821); request QPS must share
+        # that time base instead of the wave-1 warm-up makespan. The divisor
+        # is the full input_length: the throughput numerator counts the
+        # complete prompt even with prefix cache (review P1).
+        row = pd.Series(
+            {
+                "concurrency": 6,
+                "ttft": 7822.5,
+                "tpot": None,
+                "prefill_phase_makespan_ms": 9789.9,
+                "pp_size": 4,
+                "token/s": 40000.0,
+                "input_length": 50000.0,
+                "effective_input_length": 43268.0,
+            }
+        )
+
+        self.assertAlmostEqual(
+            _compute_disagg_request_qps(row, output_length=None),
+            40000.0 / 50000.0,
+        )
+
+    def test_pp_prefill_qps_uses_full_prompt_basis_under_prefix_cache(self):
+        # Review P1 counterexample: input_length=200 with 50% prefix cache
+        # (effective=100). The producer's token/s keeps the full-prompt
+        # numerator, so request QPS must divide by input_length — dividing by
+        # the cache-miss length would double the request rate.
+        row = pd.Series(
+            {
+                "concurrency": 4,
+                "ttft": 996.9,
+                "tpot": None,
+                "prefill_phase_makespan_ms": 996.9,
+                "pp_size": 2,
+                "token/s": 4 * 200 / 4.005,
+                "input_length": 200.0,
+                "effective_input_length": 100.0,
+            }
+        )
+
+        # token/s = 4 requests * 200 tokens / 4.005s; QPS = 4 / 4.005.
+        self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 4 / 4.005, places=10)
+
+    def test_pp_prefill_qps_falls_back_to_phase_makespan_without_steady_operands(self):
+        row = pd.Series(
+            {
+                "concurrency": 6,
+                "ttft": 7822.5,
+                "tpot": None,
+                "prefill_phase_makespan_ms": 9789.9,
+                "pp_size": 4,
+                "token/s": 40000.0,
+            }
+        )
+
+        self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 6 / 9789.9 * 1000)
+
+    def test_pp1_prefill_qps_keeps_phase_makespan_time_base(self):
+        # PP=1 keeps the #527 contract: token/s and QPS both stay on the
+        # drain-makespan time base.
+        row = pd.Series(
+            {
+                "concurrency": 5,
+                "ttft": 25.0,
+                "tpot": None,
+                "prefill_phase_makespan_ms": 37.0,
+                "pp_size": 1,
+                "token/s": 120.0,
+                "effective_input_length": 100.0,
+            }
+        )
+
+        self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 5 / 37 * 1000)
+
     def test_set_and_get_summary_df(self):
         """Test setting and getting summary DataFrame"""
         test_df = pd.DataFrame({"col1": [1, 2], "col2": [3, 4]})

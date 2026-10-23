@@ -260,6 +260,32 @@ class TestExtrapolateAggDisagg(unittest.TestCase):
         expected_qps = 32 / 500 * 1000
         self.assertAlmostEqual(row["per_replica_qps"], expected_qps, places=1)
 
+    def test_disagg_prefill_qps_pp_gt1_uses_steady_throughput_time_base(self):
+        # Issue #543: PP>1 prefill rows carry steady-state token/s; the
+        # per-instance QPS must share that denominator instead of the wave-1
+        # warm-up makespan. The divisor is the full input_length: the
+        # throughput numerator counts the complete prompt even under prefix
+        # cache (review P1), so QPS here is NOT token/s / effective_input_length.
+        row = _disagg_prefill_row(
+            token_s=40000.0,
+            ttft=7822.5,
+            concurrency=6,
+            dp_size=1,
+            pp_size=4,
+            batch_size=6,
+            parallel="TP=8 | PP=4 | DP=1",
+        )
+        row["prefill_phase_makespan_ms"] = 9789.9
+        row["input_length"] = 1024
+        row["effective_input_length"] = 512
+        df = pd.DataFrame([row])
+        rows = self.planner._extrapolate_agg_disagg(df, output_length=512)
+        self.assertEqual(len(rows), 1)
+        # Steady-state QPS = token/s / input_length = 40000 / 1024 (full
+        # prompt), NOT token/s / effective (40000 / 512, the P1 bug) and NOT
+        # concurrency / wave-1 makespan (6 / 9789.9 * 1000).
+        self.assertAlmostEqual(rows[0]["per_replica_qps"], 40000.0 / 1024.0, places=6)
+
     def test_disagg_decode_qps(self):
         df = pd.DataFrame([_disagg_decode_row(token_s=5000, tpot=20, concurrency=64, dp_size=1)])
         rows = self.planner._extrapolate_agg_disagg(df, output_length=512)

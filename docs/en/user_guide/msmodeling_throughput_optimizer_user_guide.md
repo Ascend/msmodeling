@@ -716,11 +716,12 @@ PD ratio mode uses QPS (Queries Per Second) as the primary metric for matching p
 
   P QPS represents the request processing capacity of a single prefill instance.
 
-  `P QPS = p_concurrency / ttft * 1000` (req/s)
+  `P QPS = p_concurrency / prefill_phase_makespan_ms * 1000` (req/s)
 
   Where:
   - `p_concurrency`: The batch size (number of concurrent requests) in prefill phase
-  - `ttft`: Time-to-first-token in milliseconds
+  - `prefill_phase_makespan_ms`: The prefill phase drain time in milliseconds; legacy result rows without that column fall back to `ttft`
+  - PP>1 (pipeline parallel) rows: the throughput column is anchored on the steady wave interval, so P QPS is `token/s / input_length` (full-prompt token basis, matching the throughput numerator; under prefix cache the numerator still counts the complete prompt, so the divisor must NOT be the cache-miss length `effective_input_length`)
 
 - **Decode QPS (D QPS)**:
 
@@ -777,7 +778,7 @@ Capacity planning reuses the optimizer results: it runs the optimizer at candida
 
   - Per-instance request QPS:
     - Aggregation: `per_replica_qps = token/s ÷ output_length ÷ dp_size`
-    - PD disaggregation prefill: `per_replica_qps = concurrency ÷ prefill_phase_makespan_ms × 1000`
+    - PD disaggregation prefill: `per_replica_qps = concurrency ÷ prefill_phase_makespan_ms × 1000`; PP>1 rows use the steady-state `token/s ÷ input_length` (full-prompt token basis, matching the throughput numerator)
     - PD disaggregation decode: `per_replica_qps = concurrency ÷ (tpot × output_length) × 1000`
   - Instances required: `replicas_needed = ceil(target_qps ÷ per_replica_qps)`
   - Total devices: `total_gpus = replicas_needed × per_replica_gpus`

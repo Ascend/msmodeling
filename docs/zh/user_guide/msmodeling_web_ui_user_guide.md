@@ -632,11 +632,13 @@ PD 配比的核心思想是分别计算 Prefill QPS 和 Decode QPS，再寻找�
 近似理解：
 
 ```text
-Prefill QPS = prefill_concurrency / ttft_ms * 1000
+Prefill QPS = prefill_concurrency / prefill_phase_makespan_ms * 1000
 Decode QPS  = decode_concurrency / (tpot_ms * output_length) * 1000
 PD 配比    = Decode QPS / Prefill QPS
 Balanced QPS = min(Prefill QPS, Decode QPS)
 ```
+
+其中 Prefill QPS 使用 Prefill 相位排空耗时（`prefill_phase_makespan_ms`）；PP>1（流水线并行）结果行的吞吐按稳态波次间隔计算，此时 Prefill QPS 取 `token/s / input_length`（完整 prompt token 口径，与吞吐分子一致）。
 
 当 `PD 配比 > 1` 时，Decode 侧相对更强，可能需要更多 Prefill 实例；当 `PD 配比 < 1` 时，Decode 侧可能成为瓶颈。
 

@@ -580,11 +580,13 @@ The core idea of PD ratio is to calculate the Prefill QPS and Decode QPS separat
 For a rough understanding:
 
 ```text
-Prefill QPS = prefill_concurrency / ttft_ms * 1000
+Prefill QPS = prefill_concurrency / prefill_phase_makespan_ms * 1000
 Decode QPS  = decode_concurrency / (tpot_ms * output_length) * 1000
 PD Ratio = Decode QPS / Prefill QPS
 Balanced QPS = min(Prefill QPS, Decode QPS)
 ```
+
+Prefill QPS uses the prefill phase drain time (`prefill_phase_makespan_ms`); for PP>1 (pipeline parallel) rows the throughput is anchored on the steady wave interval, so Prefill QPS is `token/s / input_length` (full-prompt token basis, matching the throughput numerator).
 
 When `PD ratio > 1`, the decode side is relatively stronger and may need more prefill instances. When `PD ratio < 1`, the decode side may become the bottleneck.
 

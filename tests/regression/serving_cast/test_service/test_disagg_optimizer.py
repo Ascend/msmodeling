@@ -1356,6 +1356,84 @@ class TestDisaggPipelineParallel(unittest.TestCase):
         # period (measured_interval_s = K*b = 4.0s) plus serving cost.
         self.assertAlmostEqual(row["token/s"], 2 * 200 * 2 / (4.0 + 0.005), places=3)
 
+    def test_prefill_cached_prefix_qps_matches_request_rate_across_consumers(self):
+        """PP>1 prefix-cache rows: every consumer derives QPS = concurrency / steady interval.
+
+        The producer's steady token/s keeps the full-prompt numerator
+        (``batch_size * dp * input_length``), so the request-level QPS derived
+        by the summary helper, the PD-ratio optimizer and the capacity
+        planner must all equal ``concurrency / (steady interval + serving
+        cost)``. Dividing by the cache-miss length (``effective_input_length``)
+        would over-state request QPS by the prefix-cache factor (review P1 on
+        Issue #543).
+        """
+        from serving_cast.service.capacity_planner import CapacityPlanConfig, CapacityPlanner
+        from serving_cast.service.optimizer_summary import _compute_disagg_request_qps
+        from serving_cast.service.pd_ratio_throughput_optimizer import PDRatioThroughputOptimizer
+        from serving_cast.service.utils import ParallelSearchCandidate
+
+        strategy = _make_pp_disagg_strategy(dp=2, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=2,
+            input_length=200,
+            output_length=8,
+            prefix_cache_hit_rate=0.5,
+            max_batched_tokens=400,
+            serving_cost=5,
+            num_devices=4,
+        )
+        # The PP search path stamps the candidate on the optimizer data, which
+        # is what makes _add_pp_result_columns publish the real pp_size/dp_size
+        # instead of the PP=1 defaults; attach one so this row matches the
+        # production chain end to end.
+        optimizer_data.parallel_search_candidate = ParallelSearchCandidate(
+            tp_size=1,
+            pp_size=2,
+            dp_size=2,
+            ep_size=1,
+            moe_dp_size=1,
+            moe_tp_size=1,
+            num_mtp_tokens=0,
+            layer_partition=(1, 1),
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        steady_interval_s = 4.0 + 0.005
+        expected_qps = row["concurrency"] / steady_interval_s
+        # The producer keeps the full-prompt token basis under 50% cache.
+        self.assertAlmostEqual(row["token/s"], 2 * 200 * 2 / steady_interval_s, places=3)
+
+        # The token/s column is rounded to 3 decimals by the summary frame,
+        # so derived QPS assertions use 4 places; dividing by the cache-miss
+        # length instead would read ~1.9975 here (2x over-statement).
+        # Summary helper: request QPS = token/s / full input_length.
+        self.assertAlmostEqual(_compute_disagg_request_qps(row, None), expected_qps, places=4)
+
+        # PD ratio: p_qps uses the same shared derivation.
+        d_row = {
+            "ttft": 0.0,
+            "tpot": 10.0,
+            "concurrency": 4,
+            "parallel": "tp1pp2dp2",
+            "batch_size": 2,
+            "num_devices": 4,
+        }
+        pd_optimizer = PDRatioThroughputOptimizer(output_length=8)
+        pd_optimizer.set_p_results(pd.DataFrame([row.to_dict()]))
+        pd_optimizer.set_d_results(pd.DataFrame([d_row]))
+        merged = pd_optimizer.optimize()
+        self.assertAlmostEqual(merged.iloc[0]["p_qps"], expected_qps, places=4)
+
+        # Capacity planner: per-DP-replica QPS scales the request rate by dp.
+        planner = CapacityPlanner(CapacityPlanConfig(target_qps=1.0, mode="aggregation"))
+        plan_rows = planner._extrapolate_agg_disagg(pd.DataFrame([row.to_dict()]), output_length=8)
+        self.assertAlmostEqual(plan_rows[0]["per_replica_qps"], expected_qps / row["dp_size"], places=4)
+
     def test_decode_formula_separates_worst_tpot_and_measured_interval(self):
         strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
         profile = _pp_profile((2.0, 2.0), include_transfers=False)

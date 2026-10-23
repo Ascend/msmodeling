@@ -153,6 +153,43 @@ class TestPDRatioThroughputOptimizer(unittest.TestCase):
 
         self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 5 / 37 * 1000)
 
+    def test_optimize_uses_steady_throughput_time_base_for_pp_prefill_rows(self):
+        # Issue #543: PP>1 prefill rows report steady-state token/s; p_qps
+        # must share that denominator instead of the wave-1 warm-up makespan.
+        # The divisor is the full input_length (throughput numerator counts
+        # the complete prompt even under prefix cache — review P1).
+        self.optimizer.set_p_results(
+            _prefill_df(
+                ttft=[25.0],
+                prefill_phase_makespan_ms=[9789.9],
+                concurrency=[6],
+                pp_size=[4],
+                **{"token/s": [40000.0], "input_length": [50000.0], "effective_input_length": [43268.0]},
+            )
+        )
+        self.optimizer.set_d_results(_decode_df())
+
+        result_df = self.optimizer.optimize()
+
+        self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 40000.0 / 50000.0)
+
+    def test_optimize_keeps_phase_makespan_qps_for_pp1_prefill_rows(self):
+        # PP=1 keeps the #527 drain-makespan contract for both token/s and QPS.
+        self.optimizer.set_p_results(
+            _prefill_df(
+                ttft=[25.0],
+                prefill_phase_makespan_ms=[37.0],
+                concurrency=[5],
+                pp_size=[1],
+                **{"token/s": [120.0], "input_length": [100.0], "effective_input_length": [100.0]},
+            )
+        )
+        self.optimizer.set_d_results(_decode_df())
+
+        result_df = self.optimizer.optimize()
+
+        self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 5 / 37 * 1000)
+
     def test_optimize_excludes_invalid_prefill_phase_makespan(self):
         self.optimizer.set_p_results(_prefill_df(prefill_phase_makespan_ms=[None]))
         self.optimizer.set_d_results(_decode_df())

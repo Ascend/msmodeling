@@ -798,11 +798,12 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
 
   P QPS 表示单个 Prefill 实例的请求处理能力。
 
-  `P QPS = p_concurrency / ttft * 1000` (req/s)
+  `P QPS = p_concurrency / prefill_phase_makespan_ms * 1000` (req/s)
 
   其中：
   - `p_concurrency`：Prefill 阶段的批大小（并发请求数）
-  - `ttft`：首 token 时间，单位为毫秒
+  - `prefill_phase_makespan_ms`：Prefill 相位排空耗时（毫秒）；旧结果行缺失该列时回退使用 `ttft`
+  - PP>1（流水线并行）行：吞吐列按稳态波次间隔计算，P QPS 相应取 `token/s / input_length`（完整 prompt token 口径，与吞吐分子一致；prefix cache 命中时吞吐分子仍计完整输入，分母不得用 cache-miss 长度 `effective_input_length`）
 
 - **Decode QPS（D QPS）**：
 
@@ -858,7 +859,7 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
 
   - 每实例请求 QPS：
     - 聚合：`per_replica_qps = token/s ÷ output_length ÷ dp_size`
-    - PD 分离 Prefill：`per_replica_qps = concurrency ÷ prefill_phase_makespan_ms × 1000`
+    - PD 分离 Prefill：`per_replica_qps = concurrency ÷ prefill_phase_makespan_ms × 1000`；PP>1 行使用稳态口径 `token/s ÷ input_length`（完整 prompt token 口径，与吞吐分子一致）
     - PD 分离 Decode：`per_replica_qps = concurrency ÷ (tpot × output_length) × 1000`
   - 所需实例数：`replicas_needed = ceil(target_qps ÷ per_replica_qps)`
   - 总卡数：`total_gpus = replicas_needed × per_replica_gpus`
