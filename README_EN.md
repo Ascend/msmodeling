@@ -23,6 +23,7 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>DeepSeek Series</b></summary>
 
+🔹 **[Oct 20, 2026]**: msModeling adds support for the **DeepSeek-V4.1-Flash** model with text and image inputs.<br>
 🔹 **[Jun 4, 2026]**: msModeling adds support for the **DeepSeek-V4** model.<br>
 🔹 **[Apr 20, 2026]**: msModeling adds support for the **DeepSeek V3.2** model.<br>
 🔹 **[Sep 6, 2025]**: msModeling adds support for the **DeepSeek V3** model.

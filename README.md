@@ -23,6 +23,7 @@
 <details>
 <summary><b>DeepSeek 系列</b></summary>
 
+🔹 [2026.10.20] msModeling 新增 **DeepSeek-V4.1-Flash** 模型支持（文本与图像输入）<br>
 🔹 [2026.06.04] msModeling 新增 **DeepSeek-V4** 模型支持<br>
 🔹 [2026.04.20] msModeling 新增 **DeepSeek V3.2** 模型支持<br>
 🔹 [2025.09.06] msModeling 新增 **DeepSeek V3** 模型支持<br>
