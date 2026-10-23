@@ -1,0 +1,48 @@
+# DSv4 + vLLM + AISBench：通过 Proxy 压测完整 PD 服务
+# 配套指南：../../optix_pd_disaggregation_quickstart.md
+optimizer_strategy = "pso"
+output = "./result/pd_dsv4_fine_tune"
+skip_pso = true
+manage_simulator_lifecycle = false
+use_request_rate_calibration = false
+fine_tune_mode = "pd_mixed"
+max_fine_tune = 10
+ttft_slo = 3
+tpot_slo = 0.05
+ttft_penalty = 1
+tpot_penalty = 1
+
+[vllm.command]
+host = "127.0.0.1"
+port = "8900"
+model = "/dl/weight/DeepSeek-V4-Flash-w8a8-mtp"
+served_model_name = "dsv4"
+others = ""
+
+[[vllm.target_field]]
+name = "CONCURRENCY"
+config_position = "env"
+min = 20
+max = 32
+dtype = "int" # 完整链路微调使用 20～32 的整数并发；搜索模板仍保留步长 4
+value = 24
+
+[[vllm.target_field]]
+name = "NUM_PROMPTS"
+config_position = "env"
+dtype = "times"
+value = 96 # 初始并发 24 × 4，运行时随并发重新计算
+dtype_param = {target_name = "CONCURRENCY", product = 4, dtype = "int"}
+
+[[vllm.target_field]]
+name = "REQUESTRATE"
+config_position = "env"
+min = 0
+max = 0
+dtype = "float"
+value = 0
+
+[ais_bench.command]
+models = "optix_dsv4_proxy"
+mode = "perf"
+others = "--datasets gsm8k_gen_0_shot_cot_str_perf --num-prompts $NUM_PROMPTS"
