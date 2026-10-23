@@ -432,7 +432,7 @@ def check_positive_integer_and_string(value):
     except argparse.ArgumentTypeError:
         input_length_path = Path(value)
         if input_length_path.is_file():
-            return str(input_length_path)
+            return value
         raise argparse.ArgumentTypeError(
             f"{value!r} must be a positive integer or an existing length distribution YAML file"
         ) from None

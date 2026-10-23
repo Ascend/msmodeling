@@ -166,7 +166,43 @@ class ModelRunner:
 
         logger.info("Initializing Sampler")
         self.sampler = Sampler()
+        self._static_meta_forward = None
         logger.debug("Sampler initialized: %s", self.sampler)
+
+    def enable_static_meta_capture(self) -> bool:
+        """Enable the validated static V4 serving path without changing model config.
+
+        Other models, dynamic/partial graphs and scheduling-sensitive compiler
+        modes retain the Dynamo path. The compiler captures each exact workload;
+        this does not interpolate shapes or share device performance results.
+        """
+        from .. import config
+
+        native = getattr(self.model, "_orig_mod", None)
+        if (
+            not self.user_input.do_compile
+            or self.user_input.dynamic_shapes
+            or self.user_input.allow_graph_break
+            or native is None
+            or getattr(native, "is_vl_model", False)
+            or getattr(getattr(native, "hf_config", None), "model_type", None) != "deepseek_v4"
+            or native.model_config.parallel_config.pipeline_parallel_size != 1
+            or self.user_input.dflash
+            or self.user_input.dspark
+            or getattr(self.user_input, "enable_prefill_kv_offload", False)
+            or getattr(self.user_input, "enable_decode_kv_offload", False)
+            or not config.compilation.enable_freezing
+            or config.compilation.multistream.enable
+            or config.compilation.passes.enable_sequence_parallel
+        ):
+            self._static_meta_forward = None
+            return False
+        from ..compilation import get_backend
+        from ..compilation.static_meta import StaticMetaForward
+
+        self._static_meta_forward = StaticMetaForward(native, get_backend(device_name=self.user_input.device))
+        logger.info("Aggregation uses exact static FX capture for DeepSeek V4")
+        return True
 
     @staticmethod
     def create_performance_models(
@@ -669,7 +705,20 @@ class ModelRunner:
             ) as runtime,
             torch.no_grad(),
         ):
-            primary = _primary_model_output(self.model.forward(**input_kwargs))
+            static_forward = getattr(self, "_static_meta_forward", None)
+            if static_forward is None:
+                output = self.model.forward(**input_kwargs)
+            else:
+                from ..compilation.static_meta import StaticMetaCaptureUnsupported
+
+                try:
+                    output = static_forward(**input_kwargs)
+                except StaticMetaCaptureUnsupported as exc:
+                    # Validation fails before executing/capturing the model.
+                    # Unsupported inputs keep the existing guarded compiler.
+                    logger.debug("Static meta capture bypassed: %s", exc)
+                    output = self.model.forward(**input_kwargs)
+            primary = _primary_model_output(output)
             if with_sampler and not _spec_decode_skips_runner_sampler(self.model, input_kwargs):
                 _ = self.sampler(primary, input_kwargs["sampling_metadata"])
         run_end = time.perf_counter()

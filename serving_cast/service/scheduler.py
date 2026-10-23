@@ -39,6 +39,8 @@ class SchedulerState:
     chunk_query_len: int
     # Scheduler-wide token budget for one prefill or mixed prefill/decode step.
     max_batched_tokens: int
+    # Verification queries consume physical tokens, independently of accepted output.
+    decode_query_len: int = 1
 
 
 class Scheduler(ABC):
@@ -49,13 +51,8 @@ class Scheduler(ABC):
         """Return how many prefill and decode requests should run next.
 
         Implementations must base the decision only on SchedulerState. Latency is unavailable
-        during dry-run schedule construction and is applied later during replay via step_latency().
+        during selection; the selected batch is evaluated by the model runner.
         """
-        ...
-
-    @abstractmethod
-    def step_latency(self, prefill_latency: float, decode_latency: float) -> float:
-        """Combine the modeled latency of prefill and decode work in one step."""
         ...
 
 
@@ -66,24 +63,21 @@ class DecodeFirstWithSlack(Scheduler):
 
     def decide(self, state: SchedulerState) -> StepDecision:
         """Prefer ready decode work, then admit prefill within the slack-adjusted budget."""
-        # Slack only affects mixed-step admission; chunk sizes still respect max_batched_tokens.
+        # Preserve slack admission even with no ready decode; each chunk still respects the base budget.
         limit = math.floor(state.max_batched_tokens * self.slack_ratio)
         # Decode is prioritized because ready requests already exposed their first token to users.
-        d_step = min(state.ready_decode, state.max_batched_tokens)
+        if state.decode_query_len <= 0:
+            raise ValueError("decode_query_len must be positive")
+        d_step = min(state.ready_decode, state.max_batched_tokens // state.decode_query_len)
         if state.chunk_query_len <= 0:
             p_step = 0
         else:
-            # Each prefill request consumes chunk_query_len budget; each decode request consumes one.
+            # Count physical verification queries, independently of accepted output tokens.
             p_step = max(
                 0,
                 min(
                     state.pending_prefill,
-                    math.floor((limit - d_step) / state.chunk_query_len),
+                    math.floor((limit - d_step * state.decode_query_len) / state.chunk_query_len),
                 ),
             )
         return StepDecision(p_step=p_step, d_step=d_step)
-
-    def step_latency(self, prefill_latency: float, decode_latency: float) -> float:
-        """Model mixed prefill/decode work as overlapped in one scheduling step."""
-        # Prefill and decode are modeled as overlapped within a mixed step.
-        return max(prefill_latency, decode_latency)

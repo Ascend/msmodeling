@@ -1808,8 +1808,9 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     )
 
     sampling_meta = SamplingMetadata(query_start_loc=query_start_loc)
-    # Spec metadata is only valid when every active decode request has a full target+bonus window;
-    # mixed or short-window batches intentionally fall back to ordinary per-request selection.
+    # Pure decode batches use the common verification window. Mixed MTP batches
+    # instead record one selection row for prefill and a window for each decode.
+    # Short decode windows use ordinary per-request selection.
     # When enabled, pass the per-request query_lens list so packed offsets honor varlen batches.
     use_mtp_spec_decode = (
         num_mtp_tokens > 0 and all(is_decode_list) and all(query_len >= num_mtp_tokens + 1 for query_len in query_lens)
@@ -1817,7 +1818,25 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     use_dflash_spec_decode = (
         dflash_spec_tokens > 0 and all(is_decode_list) and all(query_len >= draft_block for query_len in query_lens)
     )
-    if use_mtp_spec_decode:
+    if num_mtp_tokens > 0 and any(is_decode_list) and not all(is_decode_list):
+        indices = []
+        lengths = []
+        offset = 0
+        for ql, decode in zip(query_lens, is_decode_list):
+            length = num_mtp_tokens + 1 if decode else 1
+            if ql < length:
+                raise ValueError("Mixed MTP decode requires a full verification window")
+            indices.extend(range(offset + ql - length, offset + ql))
+            lengths.append(length)
+            offset += ql
+        sampling_meta.spec_decode_metadata = SpecDecodeMetadata(
+            torch.tensor(indices, device=query_start_loc.device, dtype=torch.long),
+            len(lengths),
+            num_mtp_tokens,
+            tuple(lengths),
+        )
+        sampling_meta.selected_token_indices = None
+    elif use_mtp_spec_decode:
         sampling_meta.spec_decode_metadata = _build_spec_decode_metadata(
             query_start_loc,
             query_lens,

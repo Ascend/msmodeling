@@ -24,7 +24,7 @@ import pytest
 
 from serving_cast.parallel_runner import ParallelRunner
 from serving_cast.service.optimizer_summary import OptimizerSummary
-from serving_cast.service.utils import OptimizerData, UnsupportedPPConfigurationError
+from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData, UnsupportedPPConfigurationError
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
 from tests.helpers.model_assets import vendored_model_config_path
@@ -614,6 +614,27 @@ class TestTaskRunner(unittest.TestCase):
             row = summary.get_summary_df().iloc[0]
             self._assert_pp_schedule_schema(row, expected_pp_size=2)
 
+    def test_run_pp2_agg_variable_length_uses_real_pipeline_profiles(self):
+        self.args.num_devices = 2
+        self.args.tp_sizes = [1]
+        self.args.ep_sizes = [1]
+        self.args.pp_sizes = [2]
+        self.args.num_hidden_layers_override = 2
+        self.args.batch_range = [2, 2]
+        self.args.input_length = "variable-length-test.yaml"
+        self.args.output_length = 2
+        self.args.max_batched_tokens = 8
+        self.args.compile = False
+        distribution = LengthDistribution(bins=[LengthBin(2, 3, 1), LengthBin(4, 5, 1)])
+
+        with patch("serving_cast.parallel_runner.load_length_distribution", return_value=distribution):
+            result = ParallelRunner(self.args).run_agg()
+
+        row = result[0].get_summary_df().iloc[0]
+        self._assert_pp_schedule_schema(row, expected_pp_size=2)
+        self.assertEqual(row["concurrency"], 2)
+        self.assertGreater(row["qps"], 0)
+
     def test_given_mocked_executor_when_called_then_returns_empty_list_and_verifies_executor_initialization(
         self,
     ):
@@ -721,6 +742,25 @@ class TestTaskRunner(unittest.TestCase):
         task_runner.run_disagg()
 
         self.assertEqual(task_runner.recorded_mtp, [(0, {0}), (1, {1})])
+
+    def test_submit_task_clears_compiler_cache_after_success(self):
+        user_config = UserInputConfig.from_args(self.args)
+        optimizer_data = OptimizerData(input_length=8, output_length=8, max_batched_tokens=32)
+        task_runner = ParallelRunner(self.args)
+        summary = OptimizerSummary(optimizer_data)
+        summary.set_summary_df(pd.DataFrame([{"token/s": 1.0}]))
+        model_runner = Mock()
+        model_runner.model.model_config.parallel_config.tensor_parallel_size = user_config.tp_size
+        strategy = Mock()
+        strategy.run.return_value = summary
+
+        with (
+            patch.object(task_runner, "_build_static_runner", return_value=(model_runner, strategy)),
+            patch("serving_cast.parallel_runner.torch.compiler.reset") as reset,
+        ):
+            self.assertIs(task_runner._submit_task(user_config, optimizer_data), summary)
+
+        self.assertEqual(reset.call_count, 2)
 
     @pytest.mark.nightly
     def test_submit_task(self):

@@ -384,6 +384,25 @@ class TestGetAggTableBuf(unittest.TestCase):
         self.assertIn("1", result)  # Top rank
         self.assertIn("100.00", result)  # Throughput value
 
+    def test_aggregation_optional_metrics_allow_partial_columns_and_nan(self):
+        df = pd.DataFrame(
+            {
+                "token/s": [100.0],
+                "ttft": [100.0],
+                "tpot": [20.0],
+                "concurrency": [1],
+                "num_devices": [1],
+                "parallel": ["TP=1"],
+                "batch_size": [1],
+                "qps": [float("nan")],
+            }
+        )
+        result = _get_agg_table_buf(df)
+        self.assertIn("QPS (req/s)", result)
+        self.assertNotIn("Makespan (ms)", result)
+        self.assertNotIn("E2E mean (ms)", result)
+        self.assertNotIn("nan", result)
+
 
 class TestFormatMemory(unittest.TestCase):
     def test_fmt_memory_formats_values_and_missing_entries(self):

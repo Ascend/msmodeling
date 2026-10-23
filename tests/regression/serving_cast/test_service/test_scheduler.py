@@ -48,9 +48,18 @@ class TestDecodeFirstWithSlack(unittest.TestCase):
         self.assertEqual(decision.d_step, 700)
         self.assertEqual(decision.p_step, 0)
 
-    def test_step_latency_uses_max_latency(self):
+    def test_verification_queries_consume_physical_tokens(self):
         scheduler = DecodeFirstWithSlack()
-        self.assertEqual(scheduler.step_latency(3.0, 5.0), 5.0)
+        # 200 requests x 4 verify queries exceed the 600-token slack.
+        decision = scheduler.decide(SchedulerState(200, 1, 4000, 4000, decode_query_len=4))
+        self.assertEqual((decision.d_step, decision.p_step), (200, 0))
+        # 100 x 4 + 4000 fits the existing floor(1.15 * 4000) limit.
+        decision = scheduler.decide(SchedulerState(100, 1, 4000, 4000, decode_query_len=4))
+        self.assertEqual((decision.d_step, decision.p_step), (100, 1))
+
+    def test_decode_cannot_exceed_physical_base_budget(self):
+        decision = DecodeFirstWithSlack().decide(SchedulerState(2000, 0, 0, 4000, decode_query_len=4))
+        self.assertEqual(decision.d_step, 1000)
 
 
 if __name__ == "__main__":

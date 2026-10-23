@@ -41,6 +41,43 @@ def _spec_metadata(logits_indices=None, num_active_requests=2, num_speculative_t
     )
 
 
+def test_mixed_speculative_sampling_preserves_request_boundaries():
+    # One prefill last row, then a three-row decode verification window.
+    spec = SpecDecodeMetadata(torch.tensor([4, 5, 6, 7]), 2, 2, (1, 3))
+    metadata = SamplingMetadata(query_start_loc=torch.tensor([0, 5, 8]), spec_decode_metadata=spec)
+    hidden = torch.arange(8, dtype=torch.float32).reshape(8, 1)
+    target = select_lm_head_hidden_states(hidden, metadata)
+    proposal = select_lm_head_hidden_states(hidden, metadata, mode="proposal")
+    assert target.flatten().tolist() == [4, 5, 6, 7]
+    assert proposal.flatten().tolist() == [4, 7]
+    logits = torch.eye(4)
+    tokens = Sampler()(logits, metadata)
+    assert tokens.tolist() == [[0, 0, 0], [1, 2, 3]]
+    assert Sampler()(torch.eye(2), metadata, mode="proposal").tolist() == [[0], [1]]
+
+
+def test_all_single_row_mixed_requests_distinguish_target_and_proposal():
+    spec = SpecDecodeMetadata(torch.tensor([0, 1]), 2, 2, (1, 1))
+    metadata = SamplingMetadata(spec_decode_metadata=spec)
+    logits = torch.eye(2)
+    assert Sampler()(logits, metadata, mode="target").tolist() == [[0, 0, 0], [1, 1, 1]]
+    assert Sampler()(logits, metadata, mode="proposal").tolist() == [[0], [1]]
+
+
+def test_mixed_speculative_metadata_rejects_invalid_window():
+    spec = SpecDecodeMetadata(torch.tensor([0, 1, 2]), 2, 2, (1, 2))
+    with pytest.raises(ValueError, match="Mixed verification lengths"):
+        select_lm_head_hidden_states(torch.zeros(3, 4), SamplingMetadata(spec_decode_metadata=spec))
+
+
+def test_mixed_sampler_can_be_captured_with_fake_tensors():
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    metadata = SamplingMetadata(spec_decode_metadata=SpecDecodeMetadata(torch.tensor([0, 1, 2, 3, 4]), 2, 3, (1, 4)))
+    graph = make_fx(lambda logits: Sampler()(logits, metadata), tracing_mode="fake")(torch.empty(5, 8, device="meta"))
+    assert graph(torch.empty(5, 8, device="meta")).shape == (2, 4)
+
+
 def _lm_head_weight():
     return torch.tensor(
         [

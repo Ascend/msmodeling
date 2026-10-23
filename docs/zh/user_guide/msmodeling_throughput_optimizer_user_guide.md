@@ -23,7 +23,16 @@
 
 PD 混部针对 Prefill-Decode 合一的服务架构优化吞吐量，两个阶段运行在同一实例上。优化器会在所有可行的 TP（Tensor Parallelism，张量并行）与 DP（Data Parallelism，数据并行）配置中搜索，在 SLO 约束下找到最佳吞吐量。
 
-PD 混部报告的 TPOT 是**服务摊销 TPOT**：候选配置用于计算吞吐的端到端耗时除以输出 token 数，包含首 token 的 TTFT 开销。`--tpot-limit` 按此值筛选；它不同于相邻输出 token 的纯解码间隔。PP=1、PP>1 和分块 Prefill 都使用这一指标定义，具体端到端耗时由各自的调度模型估算。若输出长度为 `O`、并发数为 `C`、端到端耗时为 `E` 毫秒，则 `TPOT = E / O`，`QPS = C * 1000 / E = token/s / O`。从报告 TPOT 换算 QPS 时，不要再次加上 TTFT。PD 分离的 Decode TPOT 属于单独的解码阶段指标，不采用这里的服务摊销定义。
+PD 混部按有限批次时间线计算以下指标。设 `C` 为并发请求数，每个请求输出 `O` 个 token；请求 `i` 的到达、首 token 和完成时刻分别为 `arrival_i`、`first_i`、`finish_i`，单位均为 ms。批次排空时间 `M = max(finish_i) - min(arrival_i)`；当前模型中所有请求同时到达，`arrival_i = 0`。
+
+| 指标 | 计算公式 | 单位 |
+| --- | --- | --- |
+| TTFT | `mean(first_i - arrival_i)` | ms |
+| TPOT | `mean(finish_i - first_i) / (O - 1)`；`O = 1` 时为 `0` | ms/token |
+| QPS | `1000 × C / M` | req/s |
+| 输出吞吐 | `1000 × C × O / M = QPS × O` | token/s |
+
+`--ttft-limit` 和 `--tpot-limit` 分别检查 TTFT、TPOT。TPOT 只衡量首 token 之后的平均生成间隔，不包含 TTFT；QPS 和输出吞吐使用整个批次的排空时间，不能由 `TTFT + TPOT × O` 直接换算。PP=1、PP>1、分块 Prefill 和变长输入沿用这些定义，各自的调度时间线决定 `first_i`、`finish_i` 和 `M`。PD 分离的 Decode TPOT 是单独的阶段指标，不使用此处的逐请求混部时间线。
 
 #### 示例
 

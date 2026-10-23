@@ -906,6 +906,11 @@ class ParallelRunner:
             raise RuntimeError(
                 f"Optimizer worker failed (TP={user_input.tp_size}): {type(exc).__name__}: {exc}"
             ) from None
+        finally:
+            # Each task starts with a fresh compiler cache. Clear its compiled
+            # forward variants on exit as well, so later tasks in this process
+            # do not inherit stale guards that exhaust the recompile limit.
+            torch.compiler.reset()
 
     def _run_pd_phase(
         self,

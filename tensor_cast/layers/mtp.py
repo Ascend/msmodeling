@@ -405,6 +405,6 @@ class MtpWrapper(ModelWrapperBase):
                 spec_step_idx=i,
                 **kwargs,
             )
-            next_tokens = self.sampler(logits, sampling_metadata)
+            next_tokens = self.sampler(logits, sampling_metadata, mode="proposal")
             output[:, i + 1] = next_tokens[:, -1]
         return output

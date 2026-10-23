@@ -879,7 +879,10 @@ def _get_agg_table_buf(df: pd.DataFrame):
     table_buf = []
     table_buf.append(f"Top {show_len} PD Aggregated Configurations: ")
     table = PrettyTable()
-    table.field_names = SHOW_COLUMNS
+    local_columns = SHOW_COLUMNS.copy()
+    if "qps" in df.columns:
+        local_columns.append("QPS (req/s)")
+    table.field_names = local_columns
     for i in range(show_len):
         row = df.loc[i]
         row_data = [
@@ -896,7 +899,9 @@ def _get_agg_table_buf(df: pd.DataFrame):
             _fmt_memory(row, "activation_GB"),
             _fmt_memory(row, "avail_GB"),
         ]
-        _add_table_row(table, row_data, SHOW_COLUMNS)
+        if "qps" in df.columns:
+            row_data.append("-" if pd.isna(row["qps"]) else f"{row['qps']:.4f}")
+        _add_table_row(table, row_data, local_columns)
     table_buf.append(table.get_string())
     return "\n".join(table_buf)
 

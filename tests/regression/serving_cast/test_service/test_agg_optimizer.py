@@ -15,33 +15,31 @@
 # -------------------------------------------------------------------------
 
 import unittest
-from collections import deque
+from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pandas as pd
+import torch
+
 from serving_cast.service.agg_throughput_optimizer import (
     AggThroughputOptimizer,
-    _DecodeGroup,
-    _PrefillGroup,
-    _ScheduleStep,
+    _overlap_pipeline_profiles,
+    _reserved_kv_cache_size_gb,
+    _reserved_pp_kv_bytes,
+    _resident_pp_kv_bytes,
 )
-from serving_cast.service.latency_table import ForwardLatencyRecord, ForwardShapeKey
-from serving_cast.service.scheduler import DecodeFirstWithSlack
-from serving_cast.service.utils import BYTES_TO_GB, LengthBin, LengthDistribution, OptimizerData, PrefillChunk
-from tensor_cast.core.input_generator import generate_inputs_varlen
-from tensor_cast.core.model_runner import ModelRunner
-from tensor_cast.core.user_config import UserInputConfig
-from tensor_cast.device import DeviceProfile
+from serving_cast.service.aggregation_timeline import RequestShape, TimelineResult
+from serving_cast.service.latency_table import ForwardLatencyRecord
+from serving_cast.service.optimizer_summary import EARLY_STOP_TPOT_LIMIT
+from serving_cast.service.scheduler import DecodeFirstWithSlack, StepDecision
+from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
 
-from .test_common import SimpleArgs
 from .test_disagg_optimizer import (
     _make_pp_strategy,
     _pp_prefill_validation_cases,
     _pp_profile,
     _run_pp_scaling_case,
-    _pp_schedule_estimates,
     _PPMetrics,
 )
 
@@ -54,887 +52,464 @@ _AGG_PP_SCALING_MATRIX = (
 
 
 class TestAggThroughputOptimizer(unittest.TestCase):
-    def setUp(self):
-        """Set up test fixtures before each test method."""
-        self.strategy = AggThroughputOptimizer()
-        self.args = SimpleArgs()
-        self.args.model_id = "Qwen/Qwen3-32B"
+    """Finite-batch metrics use timestamps rather than inclusive latency formulas."""
 
-        self.device_profile = DeviceProfile.all_device_profiles[self.args.device]
+    def test_empty_timeline_metrics_are_unavailable(self):
+        timeline = TimelineResult(requests=[])
+        self.assertEqual(timeline.ttft, float("inf"))
+        self.assertEqual(timeline.e2e, float("inf"))
 
-        self.user_input = UserInputConfig.from_args(self.args)
-        self.model_runner = ModelRunner(self.user_input)
-        # Initialize strategy
-        self.strategy.initialize(self.model_runner)
-
-    def test_name_attribute(self):
-        """Test that name attribute is set correctly"""
-        self.assertEqual(self.strategy.name, "aggregation")
-
-    def test_initialize_sets_aggregation_scheduler(self):
-        self.assertIsInstance(self.strategy.scheduler, DecodeFirstWithSlack)
-
-    def test_count_front_prefill_group_counts_only_front_chunk_shape(self):
-        pending_prefill = deque(
-            [
-                _PrefillGroup(count=2, chunk_index=0),
-                _PrefillGroup(count=3, chunk_index=0),
-                _PrefillGroup(count=4, chunk_index=1),
-            ]
-        )
-
-        self.assertEqual(self.strategy._count_front_prefill_group(pending_prefill), 5)
-        self.assertEqual(self.strategy._count_front_prefill_group(deque()), 0)
-
-    def test_advance_prefill_groups_requeues_non_final_and_moves_final_to_decode(self):
-        pending_prefill = deque(
-            [
-                _PrefillGroup(count=3, chunk_index=0),
-                _PrefillGroup(count=2, chunk_index=1),
-            ]
-        )
-        ready_decode = deque()
-        chunk_plan = [
-            PrefillChunk(index=0, query_len=3, seq_len=3),
-            PrefillChunk(index=1, query_len=2, seq_len=5),
-        ]
-
-        first_token_time_sum, finished, max_finish_time = self.strategy._advance_prefill_groups(
-            pending_prefill,
-            ready_decode,
-            chunk_plan,
-            p_step=4,
-            current_time=10.0,
-            remaining_decode_tokens=2,
-            first_token_time_sum=5.0,
-            finished=1,
-            max_finish_time=7.0,
-        )
-
-        self.assertEqual(first_token_time_sum, 15.0)
-        self.assertEqual(finished, 1)
-        self.assertEqual(max_finish_time, 7.0)
-        self.assertEqual(
-            list(pending_prefill),
-            [
-                _PrefillGroup(count=1, chunk_index=1),
-                _PrefillGroup(count=3, chunk_index=1),
-            ],
-        )
-        self.assertEqual(
-            list(ready_decode),
-            [_DecodeGroup(count=1, remaining_decode_tokens=2, first_token_time=10.0)],
-        )
-
-    def test_advance_prefill_groups_finishes_when_first_token_is_final_output(self):
-        pending_prefill = deque([_PrefillGroup(count=2, chunk_index=0)])
-        ready_decode = deque()
-        chunk_plan = [PrefillChunk(index=0, query_len=5, seq_len=5)]
-
-        first_token_time_sum, finished, max_finish_time = self.strategy._advance_prefill_groups(
-            pending_prefill,
-            ready_decode,
-            chunk_plan,
-            p_step=2,
-            current_time=3.5,
-            remaining_decode_tokens=0,
-            first_token_time_sum=0.0,
-            finished=0,
-            max_finish_time=0.0,
-        )
-
-        self.assertEqual(first_token_time_sum, 7.0)
-        self.assertEqual(finished, 2)
-        self.assertEqual(max_finish_time, 3.5)
-        self.assertEqual(list(pending_prefill), [])
-        self.assertEqual(list(ready_decode), [])
-
-    def test_advance_decode_groups_finishes_and_requeues_partial_groups(self):
-        ready_decode = deque(
-            [
-                _DecodeGroup(count=3, remaining_decode_tokens=1, first_token_time=4.0),
-                _DecodeGroup(count=2, remaining_decode_tokens=3, first_token_time=5.0),
-            ]
-        )
-
-        tpot_sum, finished, max_finish_time = self.strategy._advance_decode_groups(
-            ready_decode,
-            d_step=4,
-            current_time=10.0,
-            initial_decode_tokens=3,
-            tpot_sum=2.0,
-            finished=1,
-            max_finish_time=7.0,
-        )
-
-        self.assertEqual(tpot_sum, 8.0)
-        self.assertEqual(finished, 4)
-        self.assertEqual(max_finish_time, 10.0)
-        self.assertEqual(
-            list(ready_decode),
-            [
-                _DecodeGroup(count=1, remaining_decode_tokens=3, first_token_time=5.0),
-                _DecodeGroup(count=1, remaining_decode_tokens=2, first_token_time=5.0),
-            ],
-        )
-
-    def test_get_full_prefill_metrics_accounts_for_remainder_wave_and_memory(self):
-        optimizer_data = OptimizerData(
-            input_length=10,
-            output_length=5,
-            batch_size=3,
-            max_batched_tokens=20,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-        calls = []
-
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            calls.append((batch_size, is_decode))
-            if not is_decode and batch_size == 2:
-                return (10.0, 8.0, "prefill", None)
-            if not is_decode and batch_size == 1:
-                return (4.0, 6.0, "remainder", None)
-            if is_decode and batch_size == 3:
-                return (2.0, 7.0, "decode", None)
-            raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
-
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
-            metrics = self.strategy._get_full_prefill_metrics(optimizer_data, concurrency=5)
-
-        self.assertEqual(calls, [(2, False), (1, False), (3, True)])
-        self.assertAlmostEqual(metrics.ttft, 16.8)
-        self.assertAlmostEqual(metrics.tpot, 5.36)
-        self.assertAlmostEqual(metrics.output_throughput, 932.8358209)
-        self.assertEqual(metrics.memory_left_gb, 6.0)
-        self.assertEqual(metrics.prefill_latency, 10.0)
-        self.assertEqual(metrics.prefill_last_latency, 4.0)
-        self.assertEqual(metrics.prefill_memory_left_gb, 6.0)
-        self.assertEqual(metrics.decode_latency, 2.0)
-        self.assertEqual(metrics.prefill_breakdowns, "prefill")
-        self.assertEqual(metrics.decode_breakdowns, "decode")
-
-    def test_get_full_prefill_metrics_uses_the_combined_dp_token_budget(self):
-        """Each DP replica may independently consume max_batched_tokens."""
-        self.strategy.dp = 4
-        optimizer_data = OptimizerData(
-            input_length=10,
-            output_length=5,
-            batch_size=2,
-            max_batched_tokens=20,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-        calls = []
-
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            calls.append((batch_size, is_decode))
-            if not is_decode and batch_size == 8:
-                return (10.0, 8.0, "prefill", None)
-            if is_decode and batch_size == 2:
-                return (2.0, 7.0, "decode", None)
-            raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
-
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
-            metrics = self.strategy._get_full_prefill_metrics(optimizer_data, concurrency=8)
-
-        self.assertEqual(calls, [(8, False), (2, True)])
-        self.assertEqual(metrics.ttft, 10.0)
-        self.assertEqual(metrics.tpot, 4.0)
-        self.assertEqual(metrics.output_throughput, 2000.0)
-
-    def test_get_full_prefill_metrics_stops_before_decode_when_prefill_memory_is_negative(
-        self,
-    ):
-        optimizer_data = OptimizerData(
-            input_length=10,
-            output_length=5,
-            batch_size=3,
-            max_batched_tokens=20,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-        calls = []
-
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            calls.append((batch_size, is_decode))
-            if is_decode:
-                raise AssertionError("decode should not be computed after negative prefill memory")
-            return (10.0, -1.0, "prefill-oom", None)
-
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
-            metrics = self.strategy._get_full_prefill_metrics(optimizer_data, concurrency=5)
-
-        self.assertEqual(calls, [(2, False)])
-        self.assertEqual(metrics.ttft, float("inf"))
-        self.assertEqual(metrics.tpot, float("inf"))
-        self.assertEqual(metrics.output_throughput, 0)
-        self.assertLess(metrics.memory_left_gb, 0)
-        self.assertEqual(metrics.decode_latency, 0)
-        self.assertEqual(metrics.decode_breakdowns, "")
-
-    def test_get_full_prefill_metrics_stops_before_decode_when_remainder_memory_is_negative(
-        self,
-    ):
-        optimizer_data = OptimizerData(
-            input_length=10,
-            output_length=5,
-            batch_size=3,
-            max_batched_tokens=20,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-        calls = []
-
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            calls.append((batch_size, is_decode))
-            if is_decode:
-                raise AssertionError("decode should not be computed after negative prefill memory")
-            if batch_size == 1:
-                return (4.0, -1.0, "remainder-oom", None)
-            return (10.0, 8.0, "prefill", None)
-
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
-            metrics = self.strategy._get_full_prefill_metrics(optimizer_data, concurrency=5)
-
-        self.assertEqual(calls, [(2, False), (1, False)])
-        self.assertEqual(metrics.ttft, float("inf"))
-        self.assertEqual(metrics.tpot, float("inf"))
-        self.assertEqual(metrics.output_throughput, 0)
-        self.assertLess(metrics.memory_left_gb, 0)
-        self.assertEqual(metrics.prefill_memory_left_gb, -1.0)
-        self.assertEqual(metrics.decode_latency, 0)
-
-    def test_get_inference_info_variable_mode_splits_prefill_by_token_budget(self):
-        optimizer_data = OptimizerData(
-            length_distribution=LengthDistribution(
-                bins=[
-                    LengthBin(min_tokens=0, max_tokens=100, weight=1.0),
-                    LengthBin(min_tokens=100, max_tokens=200, weight=1.0),
-                ]
+    def make_strategy(self, dp=1, latency=None):
+        strategy = AggThroughputOptimizer()
+        strategy.dp, strategy.tp, strategy.ep, strategy.pp = dp, 1, 1, 1
+        strategy.num_mtp_tokens = 0
+        strategy.scheduler = DecodeFirstWithSlack()
+        strategy._mixed_record_cache = {}
+        strategy._resident_kv_cache = {}
+        strategy.is_moe_model = False
+        strategy.model_runner = SimpleNamespace(
+            user_input=SimpleNamespace(
+                block_size=128,
+                model_id="test",
+                device="test",
+                reserved_memory_gb=0,
+                quantize_linear_action="none",
+                quantize_attention_action="none",
             ),
-            output_length=5,
-            batch_size=4,
-            max_batched_tokens=200,
-            num_devices=1,
-            serving_cost=0,
+            model=SimpleNamespace(is_vl_model=False, model_config=SimpleNamespace(parallel_config=SimpleNamespace())),
+        )
+        strategy._compute_forward_latency_record = lambda key, data: ForwardLatencyRecord(
+            latency(key.is_decode) if latency else (2.0 if key.is_decode else 10.0), 20.0, "pure"
+        )
+        strategy.model_runner.run_inference = lambda requests, **kw: requests
+        strategy._build_forward_latency_record = lambda requests: ForwardLatencyRecord(17.0, 20.0, "mixed")
+        return strategy
+
+    def data(self, **kw):
+        values = dict(
+            input_length=10,
+            output_length=3,
+            batch_size=2,
+            max_batched_tokens=10,
             num_mtp_tokens=0,
             mtp_acceptance_rate=[],
         )
+        values.update(kw)
+        return OptimizerData(**values)
 
-        batch_result = SimpleNamespace(
-            execution_time_s={"analytic": 0.01},
-            total_device_memory_gb=64.0,
-            model_weight_size_gb=20.0,
-            kv_cache_size_gb=4.0,
-            model_activation_size_gb=1.0,
-            reserved_memory_gb=0.0,
-            device_memory_available_gb=8.0,
-            breakdowns={},
-        )
-        with (
-            patch.object(self.strategy.model_runner, "run_inference", return_value=batch_result) as mock_run_inference,
-            patch.object(self.strategy, "_get_or_compute_latency", return_value=(2.0, 7.0, "decode", None)),
-        ):
-            summary = self.strategy.get_inference_info(optimizer_data)
+    def test_one_request_tpot_excludes_prefill(self):
+        strategy = self.make_strategy()
+        metrics = strategy._get_timeline_metrics(self.data(batch_size=1), 1)
+        self.assertEqual((metrics.ttft, metrics.tpot, metrics.e2e, metrics.makespan), (10, 2, 14, 14))
+        self.assertAlmostEqual(metrics.output_throughput, 3000 / 14)
 
-        self.assertEqual(mock_run_inference.call_count, 2)
-        self.assertEqual(
-            [
-                [(request.query_len, request.seq_len) for request in call.args[0]]
-                for call in mock_run_inference.call_args_list
-            ],
-            [
-                [(50, 50), (50, 50), (100, 100)],
-                [(50, 150), (150, 150)],
-            ],
+    def test_one_output_has_no_decode_and_zero_tpot(self):
+        strategy = self.make_strategy()
+        metrics = strategy._get_timeline_metrics(self.data(output_length=1), 2)
+        self.assertEqual((metrics.ttft, metrics.tpot, metrics.e2e, metrics.makespan), (15, 0, 15, 20))
+        self.assertEqual(metrics.output_throughput, 100)
+        self.assertEqual(metrics.decode_latency, 0)
+
+    def test_mixed_forward_uses_max_of_pure_costs(self):
+        strategy = self.make_strategy()
+        metrics = strategy._get_timeline_metrics(self.data(), 2)
+        self.assertEqual(metrics.makespan, 24)
+        self.assertEqual(metrics.ttft, 15)
+        self.assertEqual(metrics.e2e, 23)
+        self.assertEqual(metrics.tpot, 4)
+        self.assertEqual(metrics.mixed_steps, 1)
+        self.assertEqual(metrics.mixed_latency_source, "phase_max_approx")
+        self.assertAlmostEqual(metrics.output_throughput, 6000 / 24)
+
+    def test_vl_mixed_step_uses_marked_phase_fallback(self):
+        strategy = self.make_strategy()
+        strategy.model_runner.model.is_vl_model = True
+        strategy.model_runner.run_inference = lambda *args, **kwargs: self.fail(
+            "VL heterogeneous forward is unsupported"
         )
+
+        def phase_record(key, data):
+            activation = 2.0 if key.is_decode else 3.0
+            info = {
+                "total_device_memory_gb": 40.0,
+                "reserved_memory_gb": 0.0,
+                "model_weight_size_gb": 10.0,
+                "model_activation_size_gb": activation,
+                "kv_cache_size_gb": 1.0,
+                "device_memory_available_gb": 40.0 - 10.0 - activation - 1.0,
+            }
+            return ForwardLatencyRecord(
+                2.0 if key.is_decode else 10.0, info["device_memory_available_gb"], "pure", info
+            )
+
+        strategy._compute_forward_latency_record = phase_record
+        metrics = strategy._get_timeline_metrics(self.data(), 2)
+        self.assertEqual(metrics.mixed_latency_source, "phase_max_approx")
+        self.assertEqual(metrics.mixed_steps, 1)
+        self.assertEqual(strategy._last_aggregation_timeline.steps[1][1], 10.0)
+        self.assertEqual(metrics.makespan, 24.0)
+
+    def test_mtp_verification_pays_raw_cost_and_rounds_tail_iterations(self):
+        strategy = self.make_strategy()
+        strategy.num_mtp_tokens = 3
+        data = self.data(batch_size=1, output_length=5, num_mtp_tokens=3, mtp_acceptance_rate=[0.9, 0.6, 0.4])
+        metrics = strategy._get_timeline_metrics(data, 1)
+        # 4 remaining / 2.9 expected outputs => two physical iterations, never 4 iterations / 2.9.
+        self.assertEqual(metrics.makespan, 14)
+        self.assertEqual(metrics.tpot, 1)
+        self.assertEqual(len(strategy._last_aggregation_timeline.steps), 3)
+
+    def test_mtp_does_not_discount_prefill_in_mixed_step(self):
+        strategy = self.make_strategy()
+        strategy.num_mtp_tokens = 3
+        metrics = strategy._get_timeline_metrics(
+            self.data(
+                output_length=5,
+                max_batched_tokens=100,
+                input_length=100,
+                num_mtp_tokens=3,
+                mtp_acceptance_rate=[0.9, 0.6, 0.4],
+            ),
+            2,
+        )
+        self.assertEqual(strategy._last_aggregation_timeline.steps[1][1], 10)
+        self.assertGreaterEqual(metrics.makespan, 20)
+
+    def test_multichunk_and_dp_share_same_metric_identity(self):
+        for dp in (1, 2):
+            strategy = self.make_strategy(dp)
+            data = self.data(input_length=25)
+            metrics = strategy._get_timeline_metrics(data, 2 * dp)
+            self.assertAlmostEqual(metrics.tpot, (metrics.e2e - metrics.ttft) / 2)
+            self.assertAlmostEqual(metrics.output_throughput, 1000 * 2 * dp * 3 / metrics.makespan)
+            for request in strategy._last_aggregation_timeline.requests:
+                self.assertLessEqual(request.first_token_ms, request.finish_ms)
+                self.assertLessEqual(request.finish_ms, metrics.makespan)
+
+    def test_variable_lengths_keep_each_requests_context(self):
+        from serving_cast.service.aggregation_timeline import build_requests
+
+        data = self.data(
+            input_length=None, length_distribution=LengthDistribution(bins=[LengthBin(10, 10, 1), LengthBin(30, 30, 1)])
+        )
+        strategy = self.make_strategy()
+        metrics = strategy._get_timeline_metrics(data, 2)
+        self.assertEqual(sorted(r.prompt_length for r in strategy._last_aggregation_timeline.requests), [10, 30])
+        self.assertAlmostEqual(metrics.tpot, (metrics.e2e - metrics.ttft) / 2)
+        self.assertTrue(all(c.query_len <= 10 for r in build_requests(data, 2) for c in r.chunks))
+
+    def test_variable_length_pure_decode_keeps_diagnostic_latency(self):
+        strategy = self.make_strategy()
+        strategy.scheduler = SimpleNamespace(
+            decide=lambda state: StepDecision(min(state.pending_prefill, 1), 0)
+            if state.pending_prefill
+            else StepDecision(0, state.ready_decode)
+        )
+        data = self.data(
+            input_length=None,
+            length_distribution=LengthDistribution(bins=[LengthBin(10, 10, 1), LengthBin(30, 30, 1)]),
+        )
+        metrics = strategy._get_timeline_metrics(data, 2)
+        self.assertTrue(
+            any(
+                all(shape.is_decode for shape in shapes) and len({shape.seq_len for shape in shapes}) > 1
+                for shapes, _ in strategy._last_aggregation_timeline.steps
+            )
+        )
+        self.assertEqual((metrics.decode_latency, metrics.decode_breakdowns), (17, "mixed"))
+
+    def test_heterogeneous_pure_phases_keep_diagnostic_latencies(self):
+        strategy = self.make_strategy()
+        strategy._build_forward_latency_record = lambda requests: ForwardLatencyRecord(
+            13.0 if requests[0].is_decode else 11.0,
+            20.0,
+            "decode varlen" if requests[0].is_decode else "prefill varlen",
+        )
+
+        def simulate_heterogeneous_phases(requests, data, scheduler, query_len, accepted, evaluate):
+            prefill_shapes = (RequestShape(False, 10, 10), RequestShape(False, 20, 20))
+            decode_shapes = (RequestShape(True, 1, 15), RequestShape(True, 1, 25))
+            prefill_record = evaluate(prefill_shapes, prefill_shapes)
+            decode_record = evaluate(decode_shapes, decode_shapes)
+            for request in requests:
+                request.first_token_ms = prefill_record.latency_ms
+                request.finish_ms = prefill_record.latency_ms + decode_record.latency_ms
+            return TimelineResult(requests, elapsed_ms=requests[0].finish_ms)
+
+        with patch("serving_cast.service.aggregation_timeline.simulate", side_effect=simulate_heterogeneous_phases):
+            metrics = strategy._get_timeline_metrics(self.data(), 2)
+        self.assertEqual((metrics.prefill_latency, metrics.prefill_last_latency, metrics.decode_latency), (11, 11, 13))
+        self.assertEqual((metrics.prefill_breakdowns, metrics.decode_breakdowns), ("prefill varlen", "decode varlen"))
+
+    def test_prefix_cache_reduces_queries_but_preserves_full_context(self):
+        strategy = self.make_strategy()
+        metrics = strategy._get_timeline_metrics(
+            self.data(input_length=100, max_batched_tokens=100, prefix_cache_hit_rate=0.5), 2
+        )
+        shapes = strategy._last_aggregation_timeline.steps[0][0]
+        self.assertEqual([(s.query_len, s.seq_len) for s in shapes], [(50, 100), (50, 100)])
+        self.assertEqual(metrics.ttft, 10)
+        self.assertTrue(all(r.prompt_length == 100 for r in strategy._last_aggregation_timeline.requests))
+
+    def test_dp_replicates_completions_without_sharing_token_budgets(self):
+        single = self.make_strategy()._get_timeline_metrics(self.data(), 2)
+        replicated = self.make_strategy(dp=2)._get_timeline_metrics(self.data(), 4)
+        self.assertEqual(replicated.ttft, single.ttft)
+        self.assertEqual(replicated.makespan, single.makespan)
+        self.assertEqual(replicated.output_throughput, single.output_throughput * 2)
+
+    def test_homogeneous_forward_key_uses_global_concurrency_for_dp_input_generator(self):
+        strategy = self.make_strategy(dp=2)
+        keys = []
+        original = strategy._compute_forward_latency_record
+
+        def record(key, data):
+            keys.append(key)
+            return original(key, data)
+
+        strategy._compute_forward_latency_record = record
+        strategy._get_timeline_metrics(self.data(max_batched_tokens=20), 4)
+        # generate_inputs divides RequestInfo.concurrency by DP; the local P2
+        # forward therefore uses a global-concurrency key of four.
+        self.assertTrue(any(not key.is_decode and key.model_concurrency == 4 for key in keys))
+
+    def test_mixed_graph_is_not_run_across_candidates(self):
+        strategy = self.make_strategy()
+        with patch.object(strategy.model_runner, "run_inference", wraps=strategy.model_runner.run_inference) as run:
+            strategy._get_timeline_metrics(self.data(), 2)
+            strategy._get_timeline_metrics(self.data(), 2)
+        self.assertEqual(run.call_count, 0)
+
+    def test_mixed_steps_use_prefill_dominated_phase_max(self):
+        strategy = self.make_strategy()
+        strategy.scheduler = SimpleNamespace(
+            decide=lambda state: StepDecision(min(state.pending_prefill, 1), state.ready_decode)
+        )
+        with patch.object(strategy.model_runner, "run_inference", wraps=strategy.model_runner.run_inference) as run:
+            metrics = strategy._get_timeline_metrics(self.data(batch_size=4, output_length=10), 4)
+        self.assertGreater(metrics.mixed_steps, 1)
+        self.assertEqual(run.call_count, 0)
+        self.assertEqual(metrics.mixed_latency_source, "phase_max_approx")
         self.assertTrue(
             all(
-                call.kwargs["generate_inputs_func"] is generate_inputs_varlen
-                for call in mock_run_inference.call_args_list
+                latency == 10
+                for shapes, latency in strategy._last_aggregation_timeline.steps
+                if any(s.is_decode for s in shapes) and any(not s.is_decode for s in shapes)
             )
         )
-        df = summary.get_summary_df()
-        self.assertEqual(list(df["num_input_tokens"]), ["all", 50, 150])
-        self.assertEqual(list(df["samples"]), [4, 2, 2])
-        self.assertEqual(df.iloc[0]["prefill_num_chunks"], 2)
-        self.assertEqual(df.iloc[0]["ttft"], 15.0)
-        self.assertEqual(df.iloc[0]["tpot"], 5.0)
-        self.assertTrue(pd.isna(df.iloc[1]["ttft"]))
 
-    def test_variable_length_decode_uses_speculative_shape_resolution(self):
-        batch_result = SimpleNamespace(
-            execution_time_s={"analytic": 0.01},
-            total_device_memory_gb=64.0,
-            model_weight_size_gb=20.0,
-            kv_cache_size_gb=4.0,
-            model_activation_size_gb=1.0,
-            reserved_memory_gb=0.0,
-            device_memory_available_gb=8.0,
-            breakdowns={},
-        )
-
-        for block_field, acceptance_field in (
-            ("dspark", "dspark_acceptance_length"),
-            ("dflash", "dflash_acceptance_length"),
-        ):
-            with self.subTest(block_field=block_field):
-                optimizer_data = OptimizerData(
-                    length_distribution=LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=1000, weight=1.0)]),
-                    output_length=256,
-                    batch_size=4,
-                    **{f"{block_field}_block_size": 8, acceptance_field: 5.0},
-                )
-                resolved_shapes = []
-
-                def fake_latency(batch_size, data, is_decode=False, **kwargs):
-                    resolved_shapes.append(self.strategy._resolve_forward_shape(data, is_decode, **kwargs))
-                    return 2.0, 7.0, "decode", None
-
-                with (
-                    patch.object(
-                        self.strategy,
-                        "_get_batched_forward_info",
-                        return_value=([(batch_result, 4)], [{"samples": 4}]),
-                    ),
-                    patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency) as latency,
-                ):
-                    self.strategy._get_batched_full_prefill_metrics(optimizer_data, concurrency=4, chunk_plan=[])
-
-                self.assertTrue(latency.call_args.kwargs["is_decode"])
-                self.assertNotIn("query_len", latency.call_args.kwargs)
-                self.assertNotIn("seq_len", latency.call_args.kwargs)
-                self.assertEqual(resolved_shapes, [(8, 636)])
-
-    def test_get_inference_info_variable_mode_aggregates_prefill_breakdowns(self):
-        optimizer_data = OptimizerData(
-            length_distribution=LengthDistribution(
-                bins=[
-                    LengthBin(min_tokens=0, max_tokens=100, weight=1.0),
-                    LengthBin(min_tokens=100, max_tokens=200, weight=1.0),
-                ]
-            ),
-            output_length=5,
-            batch_size=4,
-            max_batched_tokens=200,
-            num_devices=1,
-            serving_cost=0,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-
-        def make_batch_result(latency_s, breakdowns):
-            return SimpleNamespace(
-                execution_time_s={"analytic": latency_s},
-                total_device_memory_gb=64.0,
-                model_weight_size_gb=20.0,
-                kv_cache_size_gb=4.0,
-                model_activation_size_gb=1.0,
-                reserved_memory_gb=0.0,
-                device_memory_available_gb=8.0,
-                breakdowns=breakdowns,
+    def test_mixed_phase_max_reused_across_prefill_batch_counts(self):
+        strategy = self.make_strategy()
+        strategy.scheduler = SimpleNamespace(
+            decide=lambda state: StepDecision(
+                min(state.pending_prefill, 2 if state.ready_decode else 1), state.ready_decode
             )
+        )
+        with patch.object(strategy.model_runner, "run_inference", wraps=strategy.model_runner.run_inference) as run:
+            metrics = strategy._get_timeline_metrics(self.data(batch_size=4, output_length=5, max_batched_tokens=40), 4)
+        self.assertGreater(metrics.mixed_steps, 1)
+        self.assertEqual(run.call_count, 0)
 
-        # Two chunks with different latencies: the aggregated breakdown must be
-        # normalized per chunk and weighted by each chunk's latency.
-        batch_results = [
-            make_batch_result(0.01, {"prefill": {"Mem": 1.0, "Comm": 1.0, "Cube": 1.0, "Vec": 1.0}}),
-            make_batch_result(0.03, {"prefill": {"Mem": 4.0, "Comm": 0.0, "Cube": 0.0, "Vec": 0.0}}),
-        ]
+    def test_decode_dominated_mixed_steps_use_decode_phase(self):
+        strategy = self.make_strategy(latency=lambda is_decode: 12 if is_decode else 10)
+        strategy.scheduler = SimpleNamespace(
+            decide=lambda state: StepDecision(min(state.pending_prefill, 1), state.ready_decode)
+        )
+        with patch.object(strategy.model_runner, "run_inference", wraps=strategy.model_runner.run_inference) as run:
+            metrics = strategy._get_timeline_metrics(self.data(batch_size=4, output_length=10), 4)
+        self.assertEqual(run.call_count, 0)
+        self.assertEqual(metrics.mixed_latency_source, "phase_max_approx")
+        self.assertTrue(
+            any(
+                latency == 12
+                for shapes, latency in strategy._last_aggregation_timeline.steps
+                if any(s.is_decode for s in shapes) and any(not s.is_decode for s in shapes)
+            )
+        )
+
+    def test_mixed_memory_reserves_both_activations_and_full_kv(self):
+        strategy = self.make_strategy()
+        strategy.scheduler = SimpleNamespace(
+            decide=lambda state: StepDecision(min(state.pending_prefill, 1), state.ready_decode)
+        )
+
+        def record(latency, activation):
+            info = {
+                "total_device_memory_gb": 100.0,
+                "reserved_memory_gb": 0.0,
+                "model_weight_size_gb": 10.0,
+                "model_activation_size_gb": activation,
+                "kv_cache_size_gb": 1.0,
+                "device_memory_available_gb": 89.0 - activation,
+            }
+            return ForwardLatencyRecord(latency, info["device_memory_available_gb"], "", memory_info=info)
+
+        strategy._compute_forward_latency_record = lambda key, data: record(
+            2 if key.is_decode else 10, 3 if key.is_decode else 2
+        )
+        strategy._build_forward_latency_record = lambda requests: record(17, 4)
+        strategy.model_runner.get_resident_kv_cache_size_gb = lambda requests: float(len(requests))
+        metrics = strategy._get_timeline_metrics(self.data(batch_size=4, output_length=10), 4)
+        self.assertEqual(metrics.mixed_latency_source, "phase_max_approx")
+        self.assertEqual(metrics.memory_info["model_activation_size_gb"], 5)
+        self.assertGreaterEqual(metrics.memory_info["kv_cache_size_gb"], 4)
+
+    def test_mixed_memory_near_limit_does_not_run_actual_graph(self):
+        strategy = self.make_strategy()
+        strategy.scheduler = SimpleNamespace(
+            decide=lambda state: StepDecision(min(state.pending_prefill, 1), state.ready_decode)
+        )
+
+        def record(latency, activation):
+            info = {
+                "total_device_memory_gb": 20.0,
+                "reserved_memory_gb": 0.0,
+                "model_weight_size_gb": 10.0,
+                "model_activation_size_gb": activation,
+                "kv_cache_size_gb": 1.0,
+                "device_memory_available_gb": 9.0 - activation,
+            }
+            return ForwardLatencyRecord(latency, info["device_memory_available_gb"], "", memory_info=info)
+
+        strategy._compute_forward_latency_record = lambda key, data: record(
+            2 if key.is_decode else 10, 3 if key.is_decode else 2
+        )
+        strategy._build_forward_latency_record = lambda requests: record(17, 4)
+        strategy.model_runner.get_resident_kv_cache_size_gb = lambda requests: float(len(requests))
+        with patch.object(strategy.model_runner, "run_inference", wraps=strategy.model_runner.run_inference) as run:
+            metrics = strategy._get_timeline_metrics(self.data(batch_size=4, output_length=10), 4)
+        self.assertEqual(run.call_count, 0)
+        self.assertEqual(metrics.mixed_latency_source, "phase_max_approx")
+
+    def test_pure_decode_interpolates_between_power_of_two_anchors(self):
+        strategy = self.make_strategy()
+        strategy.scheduler = SimpleNamespace(
+            decide=lambda state: StepDecision(min(state.pending_prefill, 1), state.ready_decode)
+        )
+        decode_sizes = []
+
+        def counted(key, data):
+            if key.is_decode:
+                decode_sizes.append(key.model_concurrency)
+                return ForwardLatencyRecord(float(key.model_concurrency), 20.0, "decode")
+            return ForwardLatencyRecord(10.0, 20.0, "prefill")
+
+        strategy._compute_forward_latency_record = counted
+        metrics = strategy._get_timeline_metrics(
+            self.data(batch_size=20, output_length=100, max_batched_tokens=100, tpot_limits=50), 20
+        )
+        self.assertEqual(metrics.decode_latency_source, "interpolated")
+        self.assertEqual(metrics.decode_latency, 20)
+        self.assertNotIn(19, decode_sizes)
+        self.assertIn(16, decode_sizes)
+        self.assertIn(32, decode_sizes)
+        self.assertTrue(
+            any(
+                len(shapes) == 20 and all(s.is_decode for s in shapes) and latency == 20
+                for shapes, latency in strategy._last_aggregation_timeline.steps
+            )
+        )
+
+    def test_decode_anchor_does_not_exceed_budget_when_schedule_uses_slack(self):
+        strategy = self.make_strategy()
+        strategy.scheduler = SimpleNamespace(
+            decide=lambda state: StepDecision(min(state.pending_prefill, 1), state.ready_decode)
+        )
+        decode_sizes = []
+        original = strategy._compute_forward_latency_record
+
+        def counted(key, data):
+            if key.is_decode:
+                decode_sizes.append(key.model_concurrency)
+            return original(key, data)
+
+        strategy._compute_forward_latency_record = counted
+        strategy._get_timeline_metrics(self.data(batch_size=20, output_length=100), 20)
+        self.assertIn(20, decode_sizes)
+        self.assertLessEqual(max(decode_sizes), 20)
+
+    def test_summary_exports_only_qps(self):
+        strategy = self.make_strategy()
+        data = self.data(output_length=1, num_devices=1)
+        with patch("serving_cast.service.agg_throughput_optimizer.format_parallel_label", return_value="TP=1"):
+            row = strategy.get_inference_info(data).get_summary_df().iloc[0]
+        self.assertEqual(row["qps"], 100)
+        self.assertNotIn("e2e_mean_ms", row.index)
+        self.assertNotIn("makespan_ms", row.index)
+        self.assertNotIn("metric_version", row.index)
+
+    def test_resident_kv_includes_ready_requests_not_in_the_forward(self):
+        strategy = self.make_strategy()
+        resident_shapes = []
+
+        def resident_kv(requests):
+            resident_shapes.append(tuple((r.is_decode, r.query_len, r.seq_len) for r in requests))
+            return 3.0
+
+        strategy.model_runner.get_resident_kv_cache_size_gb = resident_kv
+        strategy._compute_forward_latency_record = lambda key, data: ForwardLatencyRecord(
+            2 if key.is_decode else 10, 20, "", memory_info={"kv_cache_size_gb": 1, "device_memory_available_gb": 20}
+        )
+        strategy._build_forward_latency_record = lambda requests: ForwardLatencyRecord(
+            17, 20, "", memory_info={"kv_cache_size_gb": 2, "device_memory_available_gb": 20}
+        )
+        metrics = strategy._get_timeline_metrics(self.data(output_length=200), 2)
+        self.assertLess(metrics.memory_left_gb, 20)
+        self.assertGreater(metrics.memory_info["kv_cache_size_gb"], 1)
+        self.assertTrue(any(is_decode for shapes in resident_shapes for is_decode, _, _ in shapes))
+
+    def test_waiting_requests_reserve_kv_before_prefill(self):
+        strategy = self.make_strategy()
+        strategy.model_runner.get_resident_kv_cache_size_gb = lambda requests: float(len(requests))
+        info = {"kv_cache_size_gb": 1.0, "device_memory_available_gb": 20.0}
+        strategy._compute_forward_latency_record = lambda key, data: ForwardLatencyRecord(2.0, 20.0, "", info)
+        strategy._build_forward_latency_record = lambda requests: ForwardLatencyRecord(2.0, 20.0, "", info)
+
+        small = strategy._get_timeline_metrics(self.data(batch_size=2), 2)
+        large = strategy._get_timeline_metrics(self.data(batch_size=4), 4)
+
+        self.assertEqual(small.memory_left_gb, 19.0)
+        self.assertEqual(large.memory_left_gb, 17.0)
+        self.assertEqual(large.memory_info["kv_cache_size_gb"], 4.0)
+
+    def test_waiting_kv_reservation_rounds_pages_per_request(self):
+        shape = RequestShape(True, 1, 8)
+        caches = {"kv_cache_by_layers": {0: torch.empty(128, dtype=torch.uint8)}}
         with (
-            patch.object(self.strategy.model_runner, "run_inference", side_effect=batch_results),
-            patch.object(self.strategy, "_get_or_compute_latency", return_value=(2.0, 7.0, "decode", None)),
+            patch("serving_cast.service.agg_throughput_optimizer.generate_inputs_varlen", return_value=caches) as gen,
+            patch("serving_cast.service.agg_throughput_optimizer.kv_cache_excluded_layer_indices", return_value=set()),
         ):
-            summary = self.strategy.get_inference_info(optimizer_data)
-
-        df = summary.get_summary_df()
-        # chunk1: 10ms at 25% each; chunk2: 30ms at 100% Mem ->
-        # Mem (25*10+100*30)/40=81.25, others (25*10+0)/40=6.25.
-        self.assertEqual(
-            df.iloc[0]["percentage_breakdowns(p)"],
-            "Mem 81.25 | Comm 6.25 | Cube 6.25 | Vec 6.25",
-        )
-        self.assertEqual(df.iloc[0]["percentage_breakdowns(d)"], "decode")
-
-    def test_simulate_chunked_prefill_accumulates_scheduler_metrics(self):
-        optimizer_data = OptimizerData(
-            input_length=5,
-            output_length=3,
-            batch_size=1,
-            max_batched_tokens=3,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-        chunk_plan = optimizer_data.get_prefill_chunk_plan()
-        calls = []
-
-        class ScriptedScheduler:
-            def __init__(self):
-                self.decisions = deque([(2, 0), (2, 0), (0, 2), (0, 2)])
-                self.states = []
-
-            def decide(self, state):
-                self.states.append(state)
-                p_step, d_step = self.decisions.popleft()
-                return SimpleNamespace(p_step=p_step, d_step=d_step)
-
-            def step_latency(self, prefill_step_latency, decode_step_latency):
-                return max(prefill_step_latency, decode_step_latency)
-
-        scheduler = ScriptedScheduler()
-
-        def fake_record(key, optimizer_data):
-            calls.append((key.model_concurrency, key.is_decode, key.query_len, key.seq_len))
-            if key.is_decode:
-                return ForwardLatencyRecord(5.0, 7.0, "decode")
-            if key.query_len == 3:
-                return ForwardLatencyRecord(10.0, 9.0, "prefill-0")
-            if key.query_len == 2:
-                return ForwardLatencyRecord(20.0, 8.0, "prefill-1")
-            raise AssertionError(f"unexpected key: {key}")
-
-        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
-            metrics = self.strategy._simulate_chunked_prefill(
-                optimizer_data,
-                chunk_plan,
-                concurrency=2,
-                scheduler=scheduler,
+            reserved = _reserved_kv_cache_size_gb(
+                SimpleNamespace(model=object(), user_input=SimpleNamespace(block_size=128)), (shape,) * 4
             )
+        self.assertEqual(reserved * 1024**3, 4 * 128)
+        gen.assert_called_once()
 
-        self.assertEqual(
-            calls,
-            [
-                (2, False, 3, 3),
-                (2, False, 2, 5),
-                (2, True, 1, 7),
-            ],
+    def test_oom_stops_and_returns_no_throughput(self):
+        strategy = self.make_strategy()
+        strategy._compute_forward_latency_record = lambda key, data: ForwardLatencyRecord(10, -1, "")
+        metrics = strategy._get_timeline_metrics(self.data(), 2)
+        self.assertEqual(metrics.output_throughput, 0)
+        self.assertEqual(metrics.ttft, float("inf"))
+        self.assertEqual(metrics.makespan, float("inf"))
+        self.assertLess(metrics.prefill_memory_left_gb, 0)
+
+    def test_decode_oom_does_not_get_misclassified_as_prefill_oom(self):
+        strategy = self.make_strategy()
+        strategy._compute_forward_latency_record = lambda key, data: ForwardLatencyRecord(
+            2 if key.is_decode else 10, -1 if key.is_decode else 20, ""
         )
-        self.assertEqual(
-            [(state.ready_decode, state.pending_prefill, state.chunk_query_len) for state in scheduler.states],
-            [(0, 2, 3), (0, 2, 2), (2, 0, 3), (2, 0, 3)],
-        )
-        self.assertEqual(metrics.ttft, 30.0)
-        self.assertEqual(metrics.tpot, 40.0 / 3)
-        self.assertEqual(metrics.output_throughput, 150.0)
-        self.assertAlmostEqual(metrics.output_throughput / 3, 1000 * 2 / (3 * metrics.tpot))
-        self.assertEqual(metrics.memory_left_gb, 7.0)
-        self.assertEqual(metrics.prefill_memory_left_gb, 8.0)
-        self.assertEqual(metrics.prefill_latency, 20.0)
-        self.assertEqual(metrics.prefill_last_latency, 20.0)
-        self.assertEqual(metrics.decode_latency, 5.0)
-        self.assertEqual(metrics.prefill_breakdowns, "prefill-0")
-        self.assertEqual(metrics.decode_breakdowns, "decode")
-
-    def test_simulate_chunked_prefill_rejects_scheduler_without_progress(self):
-        optimizer_data = OptimizerData(input_length=5, output_length=3, batch_size=1, max_batched_tokens=3)
-
-        class StalledScheduler:
-            def decide(self, state):
-                return SimpleNamespace(p_step=0, d_step=0)
-
-            def step_latency(self, prefill_step_latency, decode_step_latency):
-                return 0
-
-        with self.assertRaises(RuntimeError):
-            self.strategy._simulate_chunked_prefill(
-                optimizer_data,
-                optimizer_data.get_prefill_chunk_plan(),
-                concurrency=1,
-                scheduler=StalledScheduler(),
-            )
-
-    def test_collect_schedule_keys_preserves_step_order_and_skips_empty_slots(self):
-        prefill_key = ForwardShapeKey(False, 2, 3, 3)
-        decode_key = ForwardShapeKey(True, 2, 1, 7)
-        later_prefill_key = ForwardShapeKey(False, 1, 2, 5)
-        schedule = [
-            _ScheduleStep(prefill_key=prefill_key, decode_key=None, p_step=2, d_step=0),
-            _ScheduleStep(prefill_key=None, decode_key=decode_key, p_step=0, d_step=2),
-            _ScheduleStep(prefill_key=later_prefill_key, decode_key=decode_key, p_step=1, d_step=1),
-        ]
-
-        keys = self.strategy._collect_schedule_keys(schedule)
-
-        self.assertEqual(keys, [prefill_key, decode_key, later_prefill_key, decode_key])
-
-    def test_simulate_chunked_prefill_stops_when_any_record_memory_is_negative(self):
-        optimizer_data = OptimizerData(
-            input_length=10,
-            output_length=1,
-            batch_size=1,
-            max_batched_tokens=4,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-        chunk_plan = optimizer_data.get_prefill_chunk_plan()
-        calls = []
-
-        def fake_record(key, optimizer_data):
-            calls.append((key.query_len, key.seq_len))
-            if key.seq_len == 8:
-                return ForwardLatencyRecord(2.0, -1.0, "oom")
-            if key.seq_len == 10:
-                raise AssertionError("chunk after negative memory should not be computed")
-            return ForwardLatencyRecord(1.0, 1.0, "ok")
-
-        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
-            metrics = self.strategy._simulate_chunked_prefill(
-                optimizer_data,
-                chunk_plan,
-                concurrency=1,
-                scheduler=self.strategy.scheduler,
-            )
-
-        self.assertEqual(calls, [(4, 4), (4, 8)])
+        metrics = strategy._get_timeline_metrics(self.data(batch_size=1), 1)
         self.assertLess(metrics.memory_left_gb, 0)
+        self.assertGreater(metrics.prefill_memory_left_gb, 0)
+        self.assertEqual(metrics.makespan, float("inf"))
 
-    def test_get_or_compute_prefill_latency_cached(self):
-        """Test _get_or_compute_prefill_latency with cached value"""
-        optimizer_data = OptimizerData(input_length=10, output_length=10)
-        key = self.strategy._make_forward_shape_key(4, optimizer_data, is_decode=False)
-        self.strategy._forward_record_cache[key] = ForwardLatencyRecord(50.0, 2.0, "")
+    def test_zero_query_length_raises_clear_error(self):
+        from serving_cast.service.aggregation_timeline import simulate, TimelineRequest
 
-        latency, memory_left, _, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=False)
-
-        self.assertEqual(latency, 50.0)
-        self.assertEqual(memory_left, 2.0)
-
-    def test_get_or_compute_prefill_latency_new(self):
-        """Test _get_or_compute_prefill_latency with new value"""
-        optimizer_data = OptimizerData(
-            input_length=10,
-            output_length=10,
-        )
-        latency, memory_left, breakdown, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=False)
-
-        # Should cache the result
-        key = self.strategy._make_forward_shape_key(4, optimizer_data, is_decode=False)
-        record = self.strategy._forward_record_cache[key]
-        self.assertEqual(record.latency_ms, latency)
-        self.assertEqual(record.memory_left_gb, memory_left)
-        self.assertEqual(record.breakdowns, breakdown)
-
-    def test_get_or_compute_decode_latency_cached(self):
-        """Test _get_or_compute_decode_latency with cached value"""
-        optimizer_data = OptimizerData(input_length=10, output_length=10)
-        key = self.strategy._make_forward_shape_key(4, optimizer_data, is_decode=True)
-        self.strategy._forward_record_cache[key] = ForwardLatencyRecord(10.0, 2.0, "")
-
-        latency, memory_left, _, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=True)
-
-        self.assertEqual(latency, 10.0)
-        self.assertEqual(memory_left, 2.0)
-
-    def test_get_or_compute_decode_latency_applies_current_mtp_rate_to_cached_raw_record(
-        self,
-    ):
-        optimizer_data_a = OptimizerData(
-            input_length=10,
-            output_length=10,
-            batch_size=4,
-            num_mtp_tokens=2,
-            mtp_acceptance_rate=[0.5, 0.5],
-        )
-        optimizer_data_b = OptimizerData(
-            input_length=10,
-            output_length=10,
-            batch_size=4,
-            num_mtp_tokens=2,
-            mtp_acceptance_rate=[1.0, 1.0],
-        )
-        calls = []
-
-        class DummyMetrics:
-            execution_time_s = {"analytic": 0.1}
-            total_device_memory_gb = 64.0
-            model_weight_size_gb = 20.0
-            kv_cache_size_gb = 4.0
-            model_activation_size_gb = 1.0
-            reserved_memory_gb = 10.0
-            device_memory_available_gb = 2.0
-            breakdowns = {}
-
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
-            calls.append((concurrency, is_decode, query_len, seq_len))
-            return DummyMetrics()
-
-        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
-            latency_a, _, _, _ = self.strategy._get_or_compute_latency(
-                4,
-                optimizer_data_a,
-                is_decode=True,
-                query_len=3,
-                seq_len=20,
-            )
-            latency_b, _, _, _ = self.strategy._get_or_compute_latency(
-                4,
-                optimizer_data_b,
-                is_decode=True,
-                query_len=3,
-                seq_len=20,
-            )
-
-        self.assertEqual(calls, [(4, True, 3, 20)])
-        self.assertAlmostEqual(latency_a, 50.0)
-        self.assertAlmostEqual(latency_b, 100.0 / 3.0)
-
-    def test_get_or_compute_latency_separates_image_shape_cache_entries(self):
-        optimizer_data_a = OptimizerData(
-            input_length=10,
-            output_length=10,
-            batch_size=4,
-            image_height=224,
-            image_width=224,
-        )
-        optimizer_data_b = OptimizerData(
-            input_length=10,
-            output_length=10,
-            batch_size=4,
-            image_height=448,
-            image_width=224,
-        )
-        calls = []
-
-        class DummyMetrics:
-            execution_time_s = {"analytic": 0.01}
-            total_device_memory_gb = 64.0
-            model_weight_size_gb = 20.0
-            kv_cache_size_gb = 4.0
-            model_activation_size_gb = 1.0
-            reserved_memory_gb = 10.0
-            device_memory_available_gb = 2.0
-            breakdowns = {}
-
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
-            calls.append((optimizer_data.image_height, optimizer_data.image_width))
-            return DummyMetrics()
-
-        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
-            self.strategy._get_or_compute_latency(4, optimizer_data_a, is_decode=False)
-            self.strategy._get_or_compute_latency(4, optimizer_data_b, is_decode=False)
-
-        self.assertEqual(calls, [(224, 224), (448, 224)])
-
-    def test_get_inference_info_prefill_batch_size_uses_effective_input_length(self):
-        optimizer_data = OptimizerData(
-            input_length=200,
-            output_length=10,
-            batch_size=2,
-            max_batched_tokens=200,
-            prefix_cache_hit_rate=0.5,
-            num_devices=1,
-            serving_cost=0,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-
-        captured_calls = []
-
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            captured_calls.append((batch_size, is_decode))
-            return (1.0, 1.0, "", None)
-
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
-            self.strategy.get_inference_info(optimizer_data)
-
-        self.assertEqual(captured_calls[0], (2, False))
-
-    def test_get_inference_info_uses_chunked_prefill_for_long_prompt(self):
-        optimizer_data = OptimizerData(
-            input_length=10,
-            output_length=3,
-            batch_size=2,
-            max_batched_tokens=4,
-            num_devices=1,
-            serving_cost=0,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-
-        def fake_record(key, optimizer_data):
-            return ForwardLatencyRecord(1.0, 1.0, "")
-
-        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
-            summary = self.strategy.get_inference_info(optimizer_data)
-
-        row = summary.get_summary_df().iloc[0]
-        self.assertEqual(row["effective_input_length"], 10)
-        self.assertEqual(row["max_batched_tokens"], 4)
-        self.assertEqual(row["prefill_num_chunks"], 3)
-
-    def test_get_inference_info_passes_configured_scheduler_to_chunked_prefill(self):
-        optimizer_data = OptimizerData(
-            input_length=10,
-            output_length=3,
-            batch_size=2,
-            max_batched_tokens=4,
-            num_devices=1,
-            serving_cost=0,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-        custom_scheduler = object()
-        self.strategy.scheduler = custom_scheduler
-        metrics = SimpleNamespace(
-            ttft=1.0,
-            tpot=1.0,
-            output_throughput=1.0,
-            memory_left_gb=1.0,
-            prefill_latency=1.0,
-            prefill_last_latency=1.0,
-            prefill_memory_left_gb=1.0,
-            decode_latency=1.0,
-            prefill_breakdowns="",
-            decode_breakdowns="",
-        )
-
-        with patch.object(self.strategy, "_simulate_chunked_prefill", return_value=metrics) as mock_simulate:
-            self.strategy.get_inference_info(optimizer_data)
-
-        self.assertIs(mock_simulate.call_args.args[3], custom_scheduler)
-
-    def test_get_inference_info_acc_search_records_metrics_search_info(self):
-        optimizer_data = OptimizerData(
-            input_length=10,
-            output_length=10,
-            batch_size=2,
-            max_batched_tokens=20,
-            num_devices=1,
-            serving_cost=0,
-            concurrency_search_strategy="linear_exponential",
-        )
-        metrics = SimpleNamespace(
-            ttft=7.0,
-            tpot=3.0,
-            output_throughput=100.0,
-            memory_left_gb=8.0,
-            prefill_latency=1.0,
-            prefill_last_latency=1.0,
-            prefill_memory_left_gb=8.0,
-            decode_latency=1.0,
-            prefill_breakdowns="",
-            decode_breakdowns="",
-        )
-
-        self.strategy.model_runner.total_device_memory_gb = 20.0
-        self.strategy.model_runner.model_weight_size_gb = 5.0
-        self.strategy.model_runner.user_input.reserved_memory_gb = 1.0
-
-        with patch.object(self.strategy, "_get_full_prefill_metrics", return_value=metrics):
-            summary = self.strategy.get_inference_info(optimizer_data)
-
-        search_info = summary.get_search_info()
-        self.assertEqual(search_info["per_request_memory_gb"], 3.0)
-        self.assertEqual(search_info["device_memory_available_gb"], 8.0)
-        self.assertEqual(search_info["ttft"], 7.0)
-        self.assertEqual(search_info["tpot"], 3.0)
-
-    def test_get_inference_info_uses_effective_prefill_memory_for_early_stop(self):
-        optimizer_data = OptimizerData(
-            input_length=32,
-            output_length=256,
-            batch_size=1,
-            max_batched_tokens=8192,
-            num_devices=1,
-            serving_cost=0,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            if not is_decode and batch_size == 256:
-                return (1000.0, -37.15, "wave", None)
-            if not is_decode and batch_size == 1:
-                return (342.0, 12.5, "effective", None)
-            if is_decode and batch_size == 1:
-                return (15.0, 9.0, "decode", None)
-            raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
-
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
-            summary = self.strategy.get_inference_info(optimizer_data)
-
-        self.assertFalse(summary.check_early_stop_flag())
-        result_df = summary.get_summary_df()
-        self.assertIsInstance(result_df, pd.DataFrame)
-        self.assertEqual(result_df.iloc[0]["batch_size"], 1)
-
-    def test_get_inference_info_checks_prefill_wave_memory_when_remainder_exists(self):
-        optimizer_data = OptimizerData(
-            input_length=32,
-            output_length=256,
-            batch_size=9,
-            max_batched_tokens=256,
-            num_devices=1,
-            serving_cost=0,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            if not is_decode and batch_size == 8:
-                return (1000.0, -37.15, "wave", None)
-            if not is_decode and batch_size == 1:
-                return (342.0, 12.5, "remainder", None)
-            if is_decode and batch_size == 9:
-                return (15.0, 9.0, "decode", None)
-            raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
-
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
-            summary = self.strategy.get_inference_info(optimizer_data)
-
-        self.assertTrue(summary.check_early_stop_flag())
-
-    def test_chunked_prefill_decode_can_overlap_before_all_prefill_finishes(self):
-        optimizer_data = OptimizerData(
-            input_length=5,
-            output_length=2,
-            batch_size=2,
-            max_batched_tokens=3,
-            num_devices=1,
-            serving_cost=0,
-            tpot_limits=2.0,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-
-        def fake_record(key, optimizer_data):
-            return ForwardLatencyRecord(1.0, 1.0, "")
-
-        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
-            summary = self.strategy.get_inference_info(optimizer_data)
-
-        row = summary.get_summary_df().iloc[0]
-        self.assertEqual(row["ttft"], 3.5)
-        self.assertEqual(row["tpot"], 2.5)
-        self.assertEqual(row["token/s"], 800.0)
-        self.assertEqual(row["token/s"] / 2, 1000.0 * 2 / (2 * row["tpot"]))
-        self.assertTrue(summary.check_early_stop_flag())
-
-    def test_chunked_single_token_tpot_includes_prefill_and_skips_decode(self):
-        optimizer_data = OptimizerData(
-            input_length=5,
-            output_length=1,
-            batch_size=1,
-            max_batched_tokens=3,
-            tpot_limits=14.0,
-        )
-        decode_calls = []
-
-        def fake_record(key, optimizer_data):
-            if key.is_decode:
-                decode_calls.append(key)
-            return ForwardLatencyRecord(5.0 if key.query_len == 3 else 10.0, 1.0, "")
-
-        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
-            summary = self.strategy.get_inference_info(optimizer_data)
-
-        row = summary.get_summary_df().iloc[0]
-        self.assertEqual(decode_calls, [])
-        self.assertEqual(row["ttft"], 15.0)
-        self.assertEqual(row["tpot"], 15.0)
-        self.assertAlmostEqual(row["token/s"], 1000.0 / 15.0, places=3)
-        self.assertTrue(summary.check_early_stop_flag())
+        strategy = self.make_strategy()
+        with self.assertRaisesRegex(ValueError, "at least one prefill chunk"):
+            simulate([TimelineRequest(0, [])], self.data(), strategy.scheduler, 1, 1, lambda shapes, resident: None)
 
 
 _agg_pp_profile = partial(_pp_profile, include_transfers=False)
@@ -943,6 +518,69 @@ _make_pp_agg_strategy = partial(_make_pp_strategy, AggThroughputOptimizer)
 
 
 class TestAggPipelineParallel(unittest.TestCase):
+    def test_mixed_pp_profile_uses_stagewise_phase_max(self):
+        prefill = _pp_profile((0.010, 0.001, 0.004), comm_times=(0.003, 0.002))
+        decode = _pp_profile((0.002, 0.006, 0.001), comm_times=(0.001, 0.004))
+        mixed = _overlap_pipeline_profiles(prefill, decode)
+        self.assertEqual(
+            [stage.compute_time_s_by_model["analytic"] for stage in mixed.stages],
+            [0.010, 0.006, 0.004],
+        )
+        self.assertEqual([transfer.time_s_by_model["analytic"] for transfer in mixed.transfers], [0.003, 0.004])
+
+    def test_mixed_pp_profile_reserves_both_activations_once(self):
+        prefill = _pp_profile((0.010, 0.001), include_transfers=False)
+        decode = _pp_profile((0.002, 0.006), include_transfers=False)
+        prefill = replace(
+            prefill,
+            stages=tuple(replace(stage, activation_bytes=300, runtime_peak_bytes=2_000) for stage in prefill.stages),
+        )
+        decode = replace(
+            decode,
+            stages=tuple(replace(stage, activation_bytes=400, runtime_peak_bytes=2_500) for stage in decode.stages),
+        )
+        mixed = _overlap_pipeline_profiles(prefill, decode)
+        self.assertTrue(all(stage.activation_bytes == 700 for stage in mixed.stages))
+        self.assertTrue(all(stage.runtime_peak_bytes == 2_800 for stage in mixed.stages))
+        self.assertTrue(all(stage.weight_bytes == 1_000 for stage in mixed.stages))
+
+    def test_variable_length_requests_share_a_pp_mixed_step(self):
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1, microbatch_size=2)
+        strategy.model_runner.user_input.block_size = 128
+        profile = _agg_pp_profile((0.001, 0.001))
+        strategy.model_runner.run_inference.return_value = _AggPPMetrics(profile)
+        data = OptimizerData(
+            length_distribution=LengthDistribution(bins=[LengthBin(1, 2, 1), LengthBin(10, 11, 5)]),
+            output_length=3,
+            batch_size=6,
+            max_batched_tokens=20,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
+            summary = strategy.get_inference_info(data)
+        row = summary.get_summary_df().iloc[0]
+        timeline = strategy._last_aggregation_timeline
+        self.assertFalse(summary.check_early_stop_flag())
+        self.assertTrue(
+            any(
+                any(s.is_decode for s in shapes) and any(not s.is_decode for s in shapes)
+                for shapes, _ in timeline.steps
+            )
+        )
+        self.assertGreater(strategy.model_runner.run_inference.call_count, 0)
+        self.assertTrue(
+            all(
+                len({request.is_decode for request in call.args[0]}) == 1
+                for call in strategy.model_runner.run_inference.call_args_list
+            )
+        )
+        self.assertLess(len(strategy._pp_step_cache), len(timeline.steps))
+        self.assertEqual(row["ttft"], round(timeline.ttft, 3))
+        self.assertEqual(row["tpot"], round((timeline.e2e - timeline.ttft) / 2, 3))
+        self.assertAlmostEqual(row["qps"], 1000 * 6 / timeline.elapsed_ms, places=3)
+        self.assertEqual([r.prompt_length for r in timeline.requests], [1, 10, 10, 10, 10, 10])
+
     def test_scaling_and_overlap_flag_use_shared_matrix(self):
         for name, dp, pp, tp, batch_size, expected_concurrency in _AGG_PP_SCALING_MATRIX:
             with self.subTest(name=name):
@@ -959,7 +597,7 @@ class TestAggPipelineParallel(unittest.TestCase):
                     abs(row["token/s/device"] - row["token/s"] / (dp * pp * tp)),
                     0.001 + 1e-12,
                 )
-                self.assertTrue(summary.get_pp_mixed_pd_overlap_approx())
+                self.assertFalse(summary.get_pp_mixed_pd_overlap_approx())
                 self.assertFalse(summary.check_early_stop_flag())
 
     def test_overlap_flag_survives_run_summary_rebuild(self):
@@ -976,16 +614,11 @@ class TestAggPipelineParallel(unittest.TestCase):
             summary = strategy.run(optimizer_data, batch_range=[1, 2])
 
         self.assertIsNotNone(summary)
-        self.assertTrue(summary.get_pp_mixed_pd_overlap_approx())
+        self.assertFalse(summary.get_pp_mixed_pd_overlap_approx())
 
-    def test_pp_tpot_amortizes_prefill_and_matches_throughput(self):
+    def test_pp_uses_request_completion_timestamps(self):
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
         profile = _agg_pp_profile((2.0, 2.0))
-        _, repeated = _pp_schedule_estimates(
-            makespan_s=0.06,
-            interval_s=0.05,
-            worst_tpot_s=0.08,
-        )
         optimizer_data = OptimizerData(
             input_length=4,
             output_length=4,
@@ -994,67 +627,41 @@ class TestAggPipelineParallel(unittest.TestCase):
             num_mtp_tokens=0,
             mtp_acceptance_rate=[],
         )
-        with (
-            patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)),
-            patch(
-                "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
-                return_value=repeated,
-            ),
-        ):
+        with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
             row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+        timeline = strategy._last_aggregation_timeline
+        self.assertEqual(row["ttft"], 5000.0)  # P microbatches finish at 4s and 6s.
+        self.assertEqual(row["tpot"], round((timeline.e2e - timeline.ttft) / 3, 3))
+        self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / timeline.elapsed_ms, places=3)
 
-        # Prefill ttft comes from the steady wave's request-level mean
-        # (steady completions (0.03, 0.06) - start 0.0 -> 45.0ms), not the
-        # wave-1 makespan (60.0ms). The service TPOT uses the same measured
-        # decode interval as throughput, including TTFT exactly once.
-        expected_e2el = 45.0 + 50.0 * (4 - 1)
-        self.assertEqual(row["ttft"], 45.0)
-        self.assertEqual(row["tpot"], expected_e2el / 4)
-        self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, places=2)
-        self.assertAlmostEqual(row["token/s"] / 4, 1000.0 * 2 / expected_e2el, places=2)
-
-    def test_pp_service_tpot_applies_to_slo_for_pp2_and_pp3(self):
-        from serving_cast.service.optimizer_summary import EARLY_STOP_TPOT_LIMIT
-
-        optimizer_data = OptimizerData(
-            input_length=4,
-            output_length=4,
-            batch_size=2,
-            max_batched_tokens=2048,
-            tpot_limits=85.0,
-            num_mtp_tokens=0,
-            mtp_acceptance_rate=[],
-        )
-        # The old decode-only TPOT is 80 ms and would pass this limit. Including
-        # TTFT makes the service TPOT (225 + 3 * 50) / 4 = 93.75 ms.
-        _, repeated = _pp_schedule_estimates(makespan_s=0.30, interval_s=0.05, worst_tpot_s=0.08)
+    def test_pp_decode_tpot_and_qps_are_independent_slo_metrics(self):
         for pp in (2, 3):
             with self.subTest(pp=pp):
                 strategy = _make_pp_agg_strategy(dp=1, pp=pp, tp=1)
                 profile = _agg_pp_profile((2.0,) * pp)
-                with (
-                    patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)),
-                    patch(
-                        "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
-                        return_value=repeated,
-                    ),
-                ):
-                    summary = strategy.get_inference_info(optimizer_data)
-
-                row = summary.get_summary_df().iloc[0]
-                self.assertGreater(row["tpot"], optimizer_data.tpot_limits)
-                self.assertTrue(summary.check_early_stop_flag())
-                self.assertEqual(summary.get_early_stop_reason(), EARLY_STOP_TPOT_LIMIT)
+                data = OptimizerData(
+                    input_length=4,
+                    output_length=4,
+                    batch_size=2,
+                    max_batched_tokens=2048,
+                    num_mtp_tokens=0,
+                    mtp_acceptance_rate=[],
+                )
+                with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
+                    baseline = strategy.get_inference_info(data)
+                    row = baseline.get_summary_df().iloc[0]
+                    timeline = strategy._last_aggregation_timeline
+                    self.assertAlmostEqual(row["qps"], 1000.0 * 2 / timeline.elapsed_ms, delta=0.001)
+                    self.assertEqual(row["tpot"], round((timeline.e2e - timeline.ttft) / 3, 3))
+                    data.tpot_limits = row["tpot"] - 1
+                    limited = strategy.get_inference_info(data)
+                self.assertTrue(limited.check_early_stop_flag())
+                self.assertEqual(limited.get_early_stop_reason(), EARLY_STOP_TPOT_LIMIT)
 
     def test_pp_decode_applies_mtp_fold(self):
-        """PP>1 service TPOT and throughput use the folded decode interval."""
+        """MTP advances output by the acceptance expectation per physical PP pass."""
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
         profile = _agg_pp_profile((2.0, 2.0))
-        first_wave, repeated = _pp_schedule_estimates(
-            makespan_s=0.06,
-            interval_s=0.05,
-            worst_tpot_s=0.08,
-        )
         optimizer_data = OptimizerData(
             input_length=4,
             output_length=4,
@@ -1065,31 +672,17 @@ class TestAggPipelineParallel(unittest.TestCase):
             acceptance_length=1.5,
             mtp_acceptance_rate=[],
         )
-        with (
-            patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)),
-            patch(
-                "serving_cast.service.base_throughput_optimizer.estimate_forward_pipeline",
-                return_value=first_wave,
-            ),
-            patch(
-                "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
-                return_value=repeated,
-            ),
-        ):
+        with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
             row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
-
-        # fold = clamp(1.5, 0, 2) + 1 = 2.5
-        fold = 2.5
-        expected_interval_ms = 50.0 / fold  # 20.0
-        # Prefill ttft is the steady-wave request-level mean (0.045s), and the
-        # decode interval is folded by (accept+1).
-        expected_e2el = 45.0 + expected_interval_ms * 3  # 105.0
-        self.assertAlmostEqual(row["ttft"], 45.0, places=6)
-        self.assertAlmostEqual(row["tpot"], expected_e2el / 4, places=6)
-        self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, places=2)
+        timeline = strategy._last_aggregation_timeline
+        decode_steps = [shapes for shapes, _ in timeline.steps if all(s.is_decode for s in shapes)]
+        self.assertEqual(len(decode_steps), 4)  # two requests, two full MTP passes each
+        self.assertTrue(all(s.query_len == 3 for shapes in decode_steps for s in shapes))
+        self.assertEqual(row["tpot"], round((timeline.e2e - timeline.ttft) / 3, 3))
+        self.assertAlmostEqual(row["token/s"], 8000 / timeline.elapsed_ms, places=3)
 
     def test_pp_decode_applies_block_fold_dflash_and_dspark(self):
-        """PP>1 service TPOT uses the folded DFlash/DSpark decode interval."""
+        """Draft blocks retain their physical query width and acceptance progress."""
         for method, block_field, acceptance_field in (
             ("dflash", "dflash_block_size", "dflash_acceptance_length"),
             ("dspark", "dspark_block_size", "dspark_acceptance_length"),
@@ -1097,11 +690,6 @@ class TestAggPipelineParallel(unittest.TestCase):
             with self.subTest(method=method):
                 strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
                 profile = _agg_pp_profile((2.0, 2.0))
-                first_wave, repeated = _pp_schedule_estimates(
-                    makespan_s=0.06,
-                    interval_s=0.05,
-                    worst_tpot_s=0.08,
-                )
                 optimizer_data = OptimizerData(
                     input_length=4,
                     output_length=4,
@@ -1115,28 +703,13 @@ class TestAggPipelineParallel(unittest.TestCase):
                 setattr(optimizer_data, block_field, 6)  # n = block - 1 = 5
                 setattr(optimizer_data, acceptance_field, 3.5)
 
-                with (
-                    patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)),
-                    patch(
-                        "serving_cast.service.base_throughput_optimizer.estimate_forward_pipeline",
-                        return_value=first_wave,
-                    ),
-                    patch(
-                        "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
-                        return_value=repeated,
-                    ),
-                ):
+                with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
                     row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
-
-                # fold = clamp(3.5, 0, 5) + 1 = 4.5
-                fold = 4.5
-                expected_interval_ms = 50.0 / fold
-                # Prefill ttft is the steady-wave request-level mean (0.045s).
-                expected_e2el = 45.0 + expected_interval_ms * 3
-                # Summary rows round to 3 decimals.
-                self.assertAlmostEqual(row["ttft"], 45.0, places=6)
-                self.assertAlmostEqual(row["tpot"], expected_e2el / 4, delta=1e-2)
-                self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, delta=1e-1)
+                timeline = strategy._last_aggregation_timeline
+                decode_steps = [shapes for shapes, _ in timeline.steps if all(s.is_decode for s in shapes)]
+                self.assertEqual(len(decode_steps), 2)  # one full pass per request
+                self.assertTrue(all(s.query_len == 6 for shapes in decode_steps for s in shapes))
+                self.assertEqual(row["tpot"], round((timeline.e2e - timeline.ttft) / 3, 3))
 
     def test_single_token_skips_decode_profile_schedule_and_oom(self):
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
@@ -1167,66 +740,75 @@ class TestAggPipelineParallel(unittest.TestCase):
 
         row = summary.get_summary_df().iloc[0]
         self.assertEqual(decode_calls, [])
-        self.assertEqual(row["tpot"], 5000.0)
+        self.assertEqual(row["tpot"], 0.0)
         # Real scheduler on 2 microbatches x 2 stages (2.0s, no transfers):
         # steady wave completions (8.0, 10.0) - start 4.0 -> request-level
         # mean 5.0s (NOT the wave-1 makespan 6.0s).
-        self.assertAlmostEqual(row["token/s"], 1000.0 * 2 / 5000.0, places=3)
+        self.assertAlmostEqual(row["token/s"], 1000.0 * 2 / 6000.0, places=3)
         self.assertFalse(summary.check_early_stop_flag())
         self.assertFalse(summary.get_pp_mixed_pd_overlap_approx())
 
-    def test_mixed_lifecycle_evicts_only_cross_phase_peak(self):
-        from serving_cast.service.optimizer_summary import EARLY_STOP_DECODE_OOM
-        from serving_cast.service.pipeline_schedule import (
-            estimate_pipeline_stage_memory_across_profiles,
-        )
+    def test_resident_pp_kv_uses_stage_local_physical_layout(self):
+        profile = _pp_profile((0.001, 0.001), include_transfers=False)
+        runner = SimpleNamespace(model=object())
+        caches = {
+            "kv_cache_by_layers": {
+                0: torch.zeros(16, dtype=torch.bfloat16),
+                1: torch.zeros(32, dtype=torch.bfloat16),
+            },
+            "indexer_cache_by_layers": {1: torch.zeros(8, dtype=torch.int8)},
+        }
+        with (
+            patch("serving_cast.service.agg_throughput_optimizer.generate_inputs_varlen", return_value=caches),
+            patch("serving_cast.service.agg_throughput_optimizer.kv_cache_excluded_layer_indices", return_value={1}),
+        ):
+            resident = _resident_pp_kv_bytes(runner, (RequestShape(True, 1, 100),), profile, 128)
+        self.assertEqual(resident, (32, 8))
+
+    def test_waiting_pp_requests_reserve_stage_local_pages(self):
+        profile = _pp_profile((0.001, 0.001), include_transfers=False)
+        runner = SimpleNamespace(model=object())
+        shape = RequestShape(True, 1, 8)
+        caches = {
+            "kv_cache_by_layers": {0: torch.zeros(16, dtype=torch.bfloat16), 1: torch.zeros(32, dtype=torch.bfloat16)}
+        }
+        with (
+            patch("serving_cast.service.agg_throughput_optimizer.generate_inputs_varlen", return_value=caches) as gen,
+            patch("serving_cast.service.agg_throughput_optimizer.kv_cache_excluded_layer_indices", return_value=set()),
+        ):
+            reserved = _reserved_pp_kv_bytes(runner, (shape,) * 4, profile, 128)
+        self.assertEqual(reserved, (4 * 32, 4 * 64))
+        gen.assert_called_once()
+
+    def test_pp_communication_buffer_can_exceed_stage_memory(self):
+        from serving_cast.service.optimizer_summary import EARLY_STOP_PREFILL_OOM
 
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
-        strategy.model_runner.total_device_memory_gb = 3500.0 / BYTES_TO_GB
-        prefill_profile = _pp_profile((2.0, 2.0), runtime_peak_bytes=2000, include_transfers=False)
-        decode_profile = _pp_profile(
-            (2.0, 2.0),
-            runtime_peak_bytes=2000,
-            kv_cache_bytes=1000,
-            include_transfers=False,
-        )
-        decode_only = estimate_pipeline_stage_memory_across_profiles(
-            (decode_profile, decode_profile),
-            num_microbatches=2,
-            resident_microbatches=2,
-            device_memory_bytes=3500,
-            reserved_memory_bytes=0,
-        )
-        self.assertFalse(decode_only.exceeds_budget)
-
-        def fake_forward(concurrency, optimizer_data, is_decode, **kwargs):
-            return _AggPPMetrics(decode_profile if is_decode else prefill_profile)
-
-        optimizer_data = OptimizerData(
+        strategy.model_runner.total_device_memory_gb = 3500 / 1024**3
+        profile = _pp_profile((0.001, 0.001), runtime_peak_bytes=2000, payload_bytes=4096)
+        data = OptimizerData(
             input_length=4,
-            output_length=2,
-            batch_size=2,
+            output_length=1,
+            batch_size=1,
             max_batched_tokens=2048,
             num_mtp_tokens=0,
             mtp_acceptance_rate=[],
         )
-        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
-            summary = strategy.get_inference_info(optimizer_data)
+        with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
+            summary = strategy.get_inference_info(data)
 
-        self.assertTrue(summary.check_early_stop_flag())
-        self.assertEqual(summary.get_early_stop_reason(), EARLY_STOP_DECODE_OOM)
+        self.assertEqual(summary.get_early_stop_reason(), EARLY_STOP_PREFILL_OOM)
 
-    def test_prefill_validation_matrix(self):
-        from serving_cast.service.utils import UnsupportedPPConfigurationError
-
+    def test_variable_length_prefill_is_supported_for_pp(self):
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
         profile = _agg_pp_profile((2.0, 2.0))
-        for name, optimizer_data, expected in _pp_prefill_validation_cases(disaggregated=False):
+        strategy.model_runner.run_inference.return_value = _AggPPMetrics(profile)
+        for name, optimizer_data, _ in _pp_prefill_validation_cases(disaggregated=False):
             with self.subTest(name=name):
                 with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
-                    with self.assertRaises(UnsupportedPPConfigurationError) as ctx:
-                        strategy.get_inference_info(optimizer_data)
-                self.assertIn(expected, str(ctx.exception))
+                    summary = strategy.get_inference_info(optimizer_data)
+                self.assertFalse(summary.check_early_stop_flag())
+                self.assertEqual(len(strategy._last_aggregation_timeline.requests), optimizer_data.batch_size)
 
     def test_chunked_prefill_is_supported_for_pp(self):
         """PP>1 + chunked prefill is supported: each chunk is a pipeline microbatch."""
@@ -1244,10 +826,8 @@ class TestAggPipelineParallel(unittest.TestCase):
             summary = strategy.get_inference_info(optimizer_data)
         self.assertFalse(summary.check_early_stop_flag())
 
-    def test_batch_budget_returns_early_stop_not_exception(self):
-        """Batch exceeding token budget returns early-stop, not UnsupportedPPConfigurationError."""
-        from serving_cast.service.optimizer_summary import EARLY_STOP_PREFILL_OOM
-
+    def test_batch_budget_is_applied_per_admitted_microbatch(self):
+        """A finite batch larger than B proceeds as multiple admitted microbatches."""
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
         profile = _agg_pp_profile((2.0, 2.0))
         optimizer_data = OptimizerData(
@@ -1260,8 +840,9 @@ class TestAggPipelineParallel(unittest.TestCase):
         )
         with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
             summary = strategy.get_inference_info(optimizer_data)
-        self.assertTrue(summary.check_early_stop_flag())
-        self.assertEqual(summary.get_early_stop_reason(), EARLY_STOP_PREFILL_OOM)
+        self.assertFalse(summary.check_early_stop_flag())
+        self.assertEqual(len(strategy._last_aggregation_timeline.requests), 4)
+        self.assertGreater(len(strategy._last_aggregation_timeline.steps), 1)
 
 
 if __name__ == "__main__":

@@ -234,6 +234,23 @@ def test_generate_inputs_varlen_mtp_decode_does_not_reuse_padded_prefix_rows():
     assert inputs["sampling_metadata"].selected_token_indices is None
 
 
+def test_generate_inputs_varlen_mtp_mixed_uses_one_prefill_row_and_decode_window():
+    from tensor_cast.layers.sampler import select_lm_head_hidden_states
+
+    inputs = generate_inputs_varlen(
+        _fake_mtp_input_model(),
+        [RequestInfo(5, 5, is_decode=False), RequestInfo(3, 16, is_decode=True)],
+        block_size=128,
+    )
+    metadata = inputs["sampling_metadata"]
+    assert metadata.spec_decode_metadata.verification_lens == (1, 3)
+    assert metadata.spec_decode_metadata.logits_indices.tolist() == [4, 5, 6, 7]
+    hidden = torch.zeros(1, 8, 4, device="meta")
+    assert select_lm_head_hidden_states(hidden, metadata).shape == (4, 4)
+    assert select_lm_head_hidden_states(hidden, metadata, mode="proposal").shape == (2, 4)
+    assert Sampler()(torch.empty(4, 8, device="meta"), metadata).shape == (2, 3)
+
+
 def test_generate_inputs_varlen_mtp_decode_uses_ordinary_selection_for_short_query_window():
     inputs = generate_inputs_varlen(
         _fake_mtp_input_model(),

@@ -27,6 +27,8 @@ class SpecDecodeMetadata:
     logits_indices: torch.Tensor
     num_active_requests: int
     num_speculative_tokens: int
+    # Mixed batches: prefill selects one row; decode selects a verification window.
+    verification_lens: tuple[int, ...] | None = None
 
 
 @dataclasses.dataclass
@@ -89,6 +91,13 @@ def _spec_window_size(spec_metadata: SpecDecodeMetadata) -> int:
 
 
 def _proposal_logits_indices(spec_metadata: SpecDecodeMetadata) -> torch.Tensor:
+    if spec_metadata.verification_lens is not None:
+        ends = []
+        offset = 0
+        for length in spec_metadata.verification_lens:
+            offset += length
+            ends.append(spec_metadata.logits_indices[offset - 1 : offset])
+        return torch.cat(ends)
     # _build_spec_decode_metadata appends each request's target+bonus rows as one
     # logits_indices window. The reshape is over that metadata ordering, not over
     # hidden_states storage layout; row selection uses explicit index_select later.
@@ -99,7 +108,12 @@ def _proposal_logits_indices(spec_metadata: SpecDecodeMetadata) -> torch.Tensor:
 
 def _validate_spec_decode_indices(spec_metadata: SpecDecodeMetadata) -> None:
     spec_window = _spec_window_size(spec_metadata)
-    expected_indices = spec_metadata.num_active_requests * spec_window
+    lengths = spec_metadata.verification_lens
+    if lengths is not None and (
+        len(lengths) != spec_metadata.num_active_requests or any(n not in (1, spec_window) for n in lengths)
+    ):
+        raise ValueError("Mixed verification lengths must contain one row or a full verification window per request")
+    expected_indices = sum(lengths) if lengths is not None else spec_metadata.num_active_requests * spec_window
     actual_indices = spec_metadata.logits_indices.numel()
     if actual_indices != expected_indices:
         raise ValueError(
@@ -133,7 +147,9 @@ def select_lm_head_hidden_states(
 
 
 class Sampler(torch.nn.Module):
-    def forward(self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata, **kwargs) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata, mode: str = "target", **kwargs
+    ) -> torch.Tensor:
         """Return greedy next tokens.
 
         Spec decode models TensorCast dependency/shape flow only: verification rows
@@ -147,6 +163,28 @@ class Sampler(torch.nn.Module):
             num_speculative_tokens = spec_metadata.num_speculative_tokens
             spec_window = _spec_window_size(spec_metadata)
             verification_rows = num_active_requests * spec_window
+            if spec_metadata.verification_lens is not None:
+                lengths = spec_metadata.verification_lens
+                if mode == "proposal":
+                    if logits.size(0) != num_active_requests:
+                        raise ValueError("Mixed proposal logits must contain one row per request")
+                    return torch.argmax(logits, dim=-1, keepdim=True)
+                if mode != "target":
+                    raise ValueError(f"Unsupported sampling mode: {mode}")
+                if logits.size(0) == sum(lengths):
+                    # Compute each real row once, then pad prefill output with its sole
+                    # token to preserve the MTP wrapper's rectangular output contract.
+                    tokens = torch.argmax(logits, dim=-1)
+                    rows = []
+                    offset = 0
+                    for length in lengths:
+                        row = tokens[offset : offset + length]
+                        rows.append(row.expand(spec_window) if length == 1 else row)
+                        offset += length
+                    return torch.stack(rows)
+                if logits.size(0) == num_active_requests:
+                    return torch.argmax(logits, dim=-1, keepdim=True)
+                raise ValueError("Mixed speculative logits do not match verification or proposal rows")
             if logits.size(0) == verification_rows:
                 # Layout: [spec_0 .. spec_{S-1}, bonus] per request (MTP / Dflash verify window).
                 verification_logits = logits.reshape(num_active_requests, spec_window, logits.size(-1))

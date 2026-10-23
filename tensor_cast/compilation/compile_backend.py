@@ -28,7 +28,7 @@ from torch._inductor.fx_passes.post_grad import decompose_auto_functionalized
 
 from .. import config, ops  # noqa: F401
 from . import patterns
-from .constant_folding import fold_meta_constants
+from .constant_folding import fold_meta_constants, replace_node_with_constant
 from .freezing_passes import patterns as freezing_patterns
 from .freezing_passes.dispatch_ffn_combine_pass import DispatchFFNCombinePass
 from .freezing_passes.grouped_matmul_swiglu_pass import GroupedMatmulSwigluPass
@@ -90,48 +90,15 @@ class CompilerBackend:
 
             return wrapper
 
-        def graph_rewrite_before_freezing(fx_graph, inputs):
-            logger.debug("Graph before compiling:")
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(fx_graph.print_readable(print_output=False))
-            # AOT Autograd may place symbolic shape expressions after the
-            # view/reshape nodes that consume them. Normalize once before any
-            # pass starts rewriting the graph.
-            stable_topo_sort(fx_graph)
-            fx_graph.graph.lint()
-            self.apply_peep_hole_pass(fx_graph, inputs)
-            self.apply_redundant_node_elimination_pass(fx_graph, inputs)
-            self.apply_quantization_passes(fx_graph, inputs)
-            self.apply_pattern_match_passes(fx_graph, inputs)
-            self.apply_sequence_parallel_pass(fx_graph, inputs)
-            return fx_graph
-
-        def graph_rewrite_after_freezing(fx_graph, inputs):
-            self.apply_merge_linear_pass(fx_graph, inputs)
-            fold_meta_constants(fx_graph)
-            self.apply_redundant_node_elimination_pass(fx_graph, inputs)
-            # make sure we add freezing passes after constant folding
-            self.apply_freezing_passes(fx_graph, inputs)
-            # Run multistream scheduling on the pure-functional graph before
-            # decompose_auto_functionalized introduces mutation-style forms.
-            # MultiStreamSchedulePass internally invokes DCE, which assumes
-            # pure-functional graph semantics.
-            self.apply_multistream_pass(fx_graph, inputs)
-            self.apply_decompose_auto_functionalized_pass(fx_graph)
-            logger.debug("Graph after compiling:")
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(fx_graph.print_readable(print_output=False))
-            return fx_graph
-
         def compile_inner(fx_graph, inputs):
             # we split the rewrite into two phases: before and after freezing
             # since freezing would do CSE which might break some assumptions in
             # the rewrite rules.
-            graph_rewrite_before_freezing(fx_graph, inputs)
+            self.rewrite_before_freezing(fx_graph, inputs)
             if config.compilation.enable_freezing:
-                return freezing_compile(graph_rewrite_after_freezing, fx_graph, inputs)
+                return freezing_compile(self.rewrite_after_freezing, fx_graph, inputs)
             else:
-                return graph_rewrite_after_freezing(fx_graph, inputs)
+                return self.rewrite_after_freezing(fx_graph, inputs)
 
         # Use the default decomposition table to decompose operators.
         decompositions = select_decomp_table()
@@ -140,6 +107,57 @@ class CompilerBackend:
             fw_compiler=compile_inner,
             decompositions=decompositions,
         )(gm, example_inputs)
+
+    def rewrite_before_freezing(self, fx_graph, inputs):
+        logger.debug("Graph before compiling:")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(fx_graph.print_readable(print_output=False))
+        # AOT may put symbolic expressions after their consumers.
+        stable_topo_sort(fx_graph)
+        fx_graph.graph.lint()
+        self.apply_peep_hole_pass(fx_graph, inputs)
+        self.apply_redundant_node_elimination_pass(fx_graph, inputs)
+        self.apply_quantization_passes(fx_graph, inputs)
+        self.apply_pattern_match_passes(fx_graph, inputs)
+        self.apply_sequence_parallel_pass(fx_graph, inputs)
+        return fx_graph
+
+    def rewrite_after_freezing(self, fx_graph, inputs):
+        self.apply_merge_linear_pass(fx_graph, inputs)
+        fold_meta_constants(fx_graph)
+        self.apply_redundant_node_elimination_pass(fx_graph, inputs)
+        self.apply_freezing_passes(fx_graph, inputs)
+        # Schedule the functional graph before lowering mutation wrappers.
+        self.apply_multistream_pass(fx_graph, inputs)
+        self.apply_decompose_auto_functionalized_pass(fx_graph)
+        logger.debug("Graph after compiling:")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(fx_graph.print_readable(print_output=False))
+        return fx_graph
+
+    def compile_static_meta(self, gm, example_inputs, num_frozen_inputs):
+        """Lower an exact, functionalized meta graph with the normal fusion passes.
+
+        Its leading inputs are the inference model's immutable parameters and
+        buffers. Request tensors remain inputs, including mutable KV caches.
+        The caller captures a fresh graph for every uncached workload, so there
+        is no executable-graph cache whose validity needs Dynamo guards.
+        """
+        StaticBooleanIndexPass()(gm)
+        self.rewrite_before_freezing(gm, example_inputs)
+        placeholders = list(gm.graph.find_nodes(op="placeholder"))
+        for node, value in zip(placeholders[:num_frozen_inputs], example_inputs):
+            replace_node_with_constant(gm, node, value)
+        gm.recompile()
+        inputs = example_inputs[num_frozen_inputs:]
+        frozen, indices = freeze(gm, gm, inputs)
+        if indices != list(range(len(inputs))):
+            raise RuntimeError("Static meta capture unexpectedly froze request inputs")
+        result = self.rewrite_after_freezing(frozen, inputs)
+        # make_fx gives us an eager GraphModule. Unlike AOT's lazy module, its
+        # code must be regenerated after the final functionalization rewrite.
+        result.recompile()
+        return result
 
     def apply_redundant_node_elimination_pass(self, gm: fx.GraphModule, inputs):
         GraphTransformObserver = functools.partial(

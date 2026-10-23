@@ -33,7 +33,7 @@ from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
 from tensor_cast.transformers.model import TransformerModel
-from tests.helpers.model_assets import vendored_preprocessor_config_path
+from tests.helpers.model_assets import vendored_model_config_path, vendored_preprocessor_config_path
 from tests.helpers.model_cache import _BUILT_MODEL_CACHE, get_built_model, get_hf_config
 from tests.helpers.op_registry import build_op_registry
 
@@ -117,7 +117,7 @@ def layer_builder(cfg_registry, op_registry) -> Callable[[str], TransformerModel
 
 @pytest.fixture(scope="module")
 def qwen3_32b_lmhead_attention_transformer() -> TransformerModel:
-    hf_config = get_session_hf_config("Qwen/Qwen3-32B")
+    hf_config = get_session_hf_config(vendored_model_config_path("Qwen/Qwen3-32B"))
     model_config = ModelConfig(
         ParallelConfig(),
         QuantConfig(),
