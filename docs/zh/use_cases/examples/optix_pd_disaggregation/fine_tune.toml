@@ -1,5 +1,5 @@
 # DSv4 + vLLM + AISBench：通过 Proxy 压测完整 PD 服务
-# 配套指南：../../optix_pd_disaggregation_quickstart.md
+# 配套指南：../../../quick_start/optix_pso_pd_disaggregation.md
 optimizer_strategy = "pso"
 output = "./result/pd_dsv4_fine_tune"
 skip_pso = true

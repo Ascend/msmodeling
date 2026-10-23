@@ -1,6 +1,6 @@
-# OptiX PD 分离寻优：vLLM + AISBench 操作指南
+# OptiX PSO PD 分离寻优：vLLM + AISBench 操作指南
 
-本文以 **DeepSeek-V4-Flash + vLLM + AISBench** 为例，介绍 PD 分离参数搜索、实例配比和完整服务压测。可以直接复制[搜索配置](examples/optix_pd_disaggregation/search.toml)和[完整服务压测配置](examples/optix_pd_disaggregation/fine_tune.toml)，按下面步骤修改。
+本文以 **DeepSeek-V4-Flash + vLLM + AISBench** 为例，介绍 PD 分离参数搜索、实例配比和完整服务压测。可以直接复制[搜索配置](../use_cases/examples/optix_pd_disaggregation/search.toml)和[完整服务压测配置](../use_cases/examples/optix_pd_disaggregation/fine_tune.toml)，按下面步骤修改。
 
 操作顺序：**分别搜索 P（处理输入）和 D（生成后续 token）的参数 → 按结果部署 PD 服务与 Proxy → 通过 Proxy 压测完整服务**。已有可用 PD 服务、只需调整压测负载时，直接从[第 5 步](#第-5-步通过-proxy-压测完整-pd-服务)开始。
 
@@ -284,7 +284,7 @@ uv run msmodeling optix --mode standard -e vllm -b ais_bench -c ./pd_fine_tune.t
 | `throughput(requests/s)` | 在成功率与时延都达标的实测行中，选择吞吐较高的行 |
 | `CONCURRENCY`、`NUM_PROMPTS` | 记录这行对应的并发与请求数 |
 
-若并发降到 20 仍不达标，当前范围内还没有找到合适负载。可另行扩大并发范围或配置有限请求率，具体方法见[PD 分离寻优详细说明](optix_pd_disaggregation.md)。
+若并发降到 20 仍不达标，当前范围内还没有找到合适负载。可另行扩大并发范围或配置有限请求率，具体方法见[PD 分离寻优详细说明](../use_cases/optix_pso_pd_disaggregation.md)。
 
 ## 常见问题
 

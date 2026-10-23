@@ -1,5 +1,5 @@
 # DSv4 + vLLM + AISBench：PD 分离搜索模板
-# 配套指南：../../optix_pd_disaggregation_quickstart.md
+# 配套指南：../../../quick_start/optix_pso_pd_disaggregation.md
 n_particles = 10
 iters = 4
 optimizer_strategy = "pso"
