@@ -24,6 +24,9 @@ Benchmarks torch.distributed communication ops for HCCL profiling:
 CSV output format:
     message_bytes,num_devices,dtype,topology_tier,Duration(us),bandwidth_gbps
 
+For reduce_scatter, message_bytes is one rank's output shard size; the input
+tensor has num_devices times as many bytes. Consumers must preserve this unit.
+
 topology_tier semantics (mirrors CommAnalyticModel._get_topology_idx_for_group):
     Determined by the outermost grid dimension where ranks in the group differ.
     For ATLAS_800_A3 with grid shape [48, 8, 2] (48 pods x 8 nodes x 2 dies):

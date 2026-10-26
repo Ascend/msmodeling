@@ -96,7 +96,7 @@ def analytic_predict_us(
     message_bytes semantics vary per op to match benchmark CSV conventions:
       - all_reduce: total tensor size (formula uses 2*(n-1)*m/n)
       - all_gather: per-rank chunk size (formula uses (n-1)*m)
-      - reduce_scatter: total tensor size (formula uses (n-1)*m/n)
+      - reduce_scatter: per-rank output chunk size (formula uses (n-1)*m)
     Both sides (CSV measured values and analytic predictions) use the same
     convention per op, so the ratio comparison remains valid.
     """
@@ -119,18 +119,14 @@ def analytic_predict_us(
         time_tree = 2 * math.log2(n) * lat + 2 * m / bw
         return min(time_ring, time_tree) * 1e6
 
-    elif op_type == "all_gather":
+    elif op_type in ("all_gather", "reduce_scatter"):
+        # M is the per-rank input chunk for all_gather and the per-rank output
+        # chunk for reduce_scatter. The latter has a full input size of N*M,
+        # so both operations transfer (N-1)*M bytes and share these formulas.
         # Ring:      (N-1)*lat + (N-1)*M / bw
         # Recursive: log2(N)*lat + (N-1)*M / bw
         time_ring = (n - 1) * lat + (n - 1) * m / bw
         time_rec  = math.log2(n) * lat + (n - 1) * m / bw
-        return min(time_ring, time_rec) * 1e6
-
-    elif op_type == "reduce_scatter":
-        # Ring:      (N-1)*lat + (N-1)*M/N / bw
-        # Recursive: log2(N)*lat + (N-1)*M/N / bw
-        time_ring = (n - 1) * lat + (n - 1) * m / n / bw
-        time_rec  = math.log2(n) * lat + (n - 1) * m / n / bw
         return min(time_ring, time_rec) * 1e6
 
     elif op_type == "all_to_all":

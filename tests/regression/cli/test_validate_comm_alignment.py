@@ -93,8 +93,9 @@ class TestAnalyticPredictUs:
         topo = self._topo(tier)
         bw = topo.bandwidth_bytes_ps * topo.comm_efficiency
         lat = topo.latency_s
-        time_ring = ((n - 1) * lat + (n - 1) * m / n / bw) * 1e6
-        time_rec = (math.log2(n) * lat + (n - 1) * m / n / bw) * 1e6
+        # The CSV stores one output shard; the full input contains n shards.
+        time_ring = ((n - 1) * lat + (n - 1) * m / bw) * 1e6
+        time_rec = (math.log2(n) * lat + (n - 1) * m / bw) * 1e6
         assert abs(result - min(time_ring, time_rec)) < 0.01
 
     def test_all_to_all_formula(self):
@@ -126,6 +127,74 @@ class TestAnalyticPredictUs:
 # ---------------------------------------------------------------------------
 # AlignmentRow tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("num_devices", [2, 8, 16])
+@pytest.mark.parametrize("message_bytes", [1024, 1048576])
+@pytest.mark.parametrize("topology_tier", [0, 1, 2])
+def test_reduce_scatter_csv_matches_producer_input(num_devices, message_bytes, topology_tier, tmp_path):
+    """Validate the producer's output-shard bytes against the full-input model."""
+    import torch
+
+    from tensor_cast.device import DeviceProfile
+    from tensor_cast.performance_model.comm_analytic import CommAnalyticModel
+    from tools.perf_data_collection.comm_bench.generate_comm_microbench import _append_csv, _build_run_op
+
+    group = list(range(num_devices))
+    run_op = _build_run_op("reduce_scatter", message_bytes, "torch.bfloat16", "cpu", None, group)
+    captured = dict(zip(run_op.__code__.co_freevars, (cell.cell_contents for cell in run_op.__closure__)))
+    input_tensor = captured["input_tensor"]
+    output_tensor = captured["output_tensor"]
+    assert input_tensor.numel() * input_tensor.element_size() == num_devices * message_bytes
+    assert output_tensor.numel() * output_tensor.element_size() == message_bytes
+    assert input_tensor.dtype == torch.bfloat16
+
+    model = CommAnalyticModel(DeviceProfile.all_device_profiles["ATLAS_800_A3_752T_128G_DIE"])
+    # The validator supports each topology tier independently. Build the same
+    # transport reference from the producer's actual input size, without running
+    # distributed communication or claiming a hardware measurement.
+    topo = _A3_TOPOLOGIES[topology_tier]
+    input_bytes = input_tensor.numel() * input_tensor.element_size()
+    transfer_time = (num_devices - 1) * input_bytes / num_devices / (topo.bandwidth_bytes_ps * topo.comm_efficiency)
+    reference_us = min(num_devices - 1, math.log2(num_devices)) * topo.latency_s * 1e6 + transfer_time * 1e6
+    model_result = model.reduce_scatter(input_tensor, 0, group)
+    model_prediction = analytic_predict_us(
+        "reduce_scatter", message_bytes, num_devices, model_result.statistics["topology_tier"]
+    )
+    assert model_prediction == pytest.approx(model_result.execution_time_s * 1e6)
+    assert analytic_predict_us("reduce_scatter", message_bytes, num_devices, topology_tier) == pytest.approx(
+        reference_us
+    )
+
+    csv_path = tmp_path / "hcom_reduceScatter_.csv"
+    _append_csv(
+        str(csv_path),
+        {
+            "message_bytes": message_bytes,
+            "num_devices": num_devices,
+            "dtype": "DT_BF16",
+            "topology_tier": topology_tier,
+            "Duration(us)": reference_us,
+            "bandwidth_gbps": 0,
+        },
+    )
+    report = validate_csv(csv_path, "reduce_scatter", 2.0)
+    assert report.pass_count == 1
+    assert report.rows[0].ratio == pytest.approx(1.0)
+
+
+def test_reduce_scatter_generator_units_pass_official_cli(tmp_path):
+    """The reported 1MiB/output-shard case must pass without multiplying its CSV field."""
+    _write_comm_csv(
+        tmp_path / "hcom_reduceScatter_.csv",
+        [{"message_bytes": 1048576, "num_devices": 8, "dtype": "DT_BF16", "topology_tier": 1, "Duration(us)": 57.0}],
+    )
+    result = run_module_main(
+        "tools.perf_data_collection.comm_bench.validate_comm_alignment",
+        ["--csv-dir", str(tmp_path), "--verbose"],
+    )
+    assert result.returncode == 0
+    assert "PASS=1" in result.stdout
 
 
 class TestAlignmentRow:
