@@ -101,7 +101,8 @@ def parse_profiling_by_type(trace_csv: str) -> dict[str, dict[str, Any]]:
     """Parse a forward-pass trace CSV with hcom deduplication.
 
     Accepts a CSV file path directly (pre-extracted forward pass trace
-    from docs/perf_database/forward_pass_traces/).
+    from docs/perf_database/forward_pass_traces/). UTF-8 files with or without
+    a byte-order mark are accepted.
 
     Dedup strategy: group hcom_* kernels by (int(start_time), Type) and
     take max(duration) per group (parallel HCCL + AICPU streams).
@@ -112,7 +113,7 @@ def parse_profiling_by_type(trace_csv: str) -> dict[str, dict[str, Any]]:
     )
     hcom_groups: dict[tuple[int, str], float] = {}
 
-    with open(trace_csv) as f:
+    with open(trace_csv, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             kt = row.get("Type", "").strip()
             if not kt:

@@ -3,6 +3,10 @@
 Single-forward-pass kernel traces extracted from Ascend Profiler `kernel_details.csv`.
 Used as ground truth for M6 computation and TC-NPU alignment analysis.
 
+The operator comparison tool (`tools.perf_data_analysis.generate_op_comparison`)
+accepts trace CSVs encoded as UTF-8 with or without a byte-order mark (BOM).
+The encoding does not change per-operator durations or invocation counts.
+
 ## Committed Files
 
 | File | Model | Scenario | Tokens | Source Profiling |

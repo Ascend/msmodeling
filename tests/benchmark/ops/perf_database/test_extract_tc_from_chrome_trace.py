@@ -23,6 +23,8 @@
 """
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -302,6 +304,27 @@ class TestMalformedSubKernelDurations:
 
 
 class TestParseProfilingByType:
+    @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+    @pytest.mark.parametrize("type_first", [True, False])
+    def test_csv_encoding_preserves_counts_and_hcom_dedup(self, tmp_path, encoding, type_first):
+        from generate_op_comparison import parse_profiling_by_type
+
+        rows = [
+            ("MatMulV2", "20", "1000"),
+            ("hcom_allReduce_", "10", "2000.1"),
+            ("hcom_allReduce_", "30", "2000.9"),
+            ("allgatherAicpuKernel", "100", "3000"),
+        ]
+        header = "Type,Duration(us),Start Time(us)" if type_first else "Duration(us),Type,Start Time(us)"
+        lines = [",".join(row if type_first else (row[1], row[0], row[2])) for row in rows]
+        csv_path = tmp_path / "prof.csv"
+        csv_path.write_text("\n".join([header, *lines]) + "\n", encoding=encoding)
+
+        assert parse_profiling_by_type(str(csv_path)) == {
+            "MatMulV2": {"total_us": 20.0, "count": 1},
+            "hcom_allReduce_": {"total_us": 30.0, "count": 1},
+        }
+
     def test_basic_counting(self, tmp_path):
         csv_path = tmp_path / "prof.csv"
         csv_path.write_text(
@@ -404,6 +427,40 @@ class TestExtractTcEdgeCases:
 
 
 class TestBuildComparison:
+    @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+    def test_cli_csv_encoding_preserves_profiling_data(self, tmp_path, encoding):
+        results = tmp_path / "results"
+        results.mkdir()
+        (results / "qwen3_prefill_m6.json").write_text('{"n_forward_passes":1}', encoding="utf-8")
+        (results / "qwen3_pf_trace.json").write_text(
+            json.dumps({"traceEvents": [_x_event("aten.mm", 20, kernel_type="MatMulV2", pid=0)]}),
+            encoding="utf-8",
+        )
+        traces = tmp_path / "traces"
+        traces.mkdir()
+        (traces / "qwen3-32b_pf_4112tok.csv").write_text(
+            "Type,Duration(us),Start Time(us)\nMatMulV2,20,1000\n", encoding=encoding
+        )
+        script = Path(__file__).resolve().parents[4] / "tools/perf_data_analysis/generate_op_comparison.py"
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        proc = subprocess.run(
+            [sys.executable, str(script), "--trace-dir", "traces", "--data-dir", "database", "--output", "out.json"],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        rows = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))["Qwen3 PF"]
+        assert len(rows) == 1
+        assert rows[0]["prof_per_fwd_us"] == 20.0
+        assert rows[0]["prof_count"] == 1
+        assert rows[0]["tc_total_us"] == 20.0
+        assert rows[0]["error_pct"] == 0.0
+
     def test_basic(self, tmp_path):
         from generate_op_comparison import build_comparison
 
