@@ -110,7 +110,8 @@ _NON_EXPERT_LINEAR_PATTERNS = (
 # Broad patterns cover every linear (including routed experts). ``default_dit``
 # is the DiT fallback (see replace_with_quant_modules default_config_name).
 _BROAD_LINEAR_PATTERNS = ("layers.*", "*.layers.*", "default_dit")
-_LMHEAD_PATTERNS = ("lm_head", "*.lm_head")
+_LMHEAD_MODULE_NAME = "lm_head"
+_LMHEAD_PATTERNS = (_LMHEAD_MODULE_NAME, f"*.{_LMHEAD_MODULE_NAME}")
 
 
 def _filter_action_kwargs(action: QuantizeLinearAction, kwargs: dict) -> dict:
@@ -151,6 +152,10 @@ def create_quant_config(
         broad_kwargs = _filter_action_kwargs(quantize_linear_action, kwargs)
         _set_linear_patterns(quant_config, _BROAD_LINEAR_PATTERNS, quantize_linear_action, **broad_kwargs)
         if quantize_lmhead:
+            # The explicit option must override QuantConfig's default LM Head exclusion.
+            quant_config.modules_to_not_convert = [
+                name for name in quant_config.modules_to_not_convert if name != _LMHEAD_MODULE_NAME
+            ]
             _set_linear_patterns(quant_config, _LMHEAD_PATTERNS, quantize_linear_action, **broad_kwargs)
 
     if quantize_attention_action != QuantizeAttentionAction.DISABLED:

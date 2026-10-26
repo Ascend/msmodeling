@@ -21,7 +21,9 @@ This reference summarizes high-value parameters for `python -m cli.inference.tex
 - `--compilation-config`: enables specific compilation features dynamically. Options: `enable_multistream`, `enable_sequence_parallel`, `enable_matmul_allreduce`, `enable_dispatch_ffn_combine`. Multiple values can be passed, e.g. `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`. When omitted, all compilation features remain disabled.
 - `--quantize-linear-action`: default is `W8A8_DYNAMIC`.
 - `--quantize-attention-action`: default is `DISABLED`.
-- `--quantize-lmhead`: off by default because LM head quantization can affect accuracy.
+- `--quantize-lmhead`: off by default because LM head quantization can affect accuracy. Takes effect only when
+  `--quantize-linear-action` is not `DISABLED`; uses the same action and removes the default LM head exclusion,
+  while preserving other model exclusions.
 - `--mxfp4-group-size`: default is `32`; relevant when linear quantization is `MXFP4`.
 
 ## Parallelism

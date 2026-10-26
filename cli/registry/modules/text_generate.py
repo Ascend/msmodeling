@@ -122,7 +122,11 @@ QUANTIZE_LMHEAD = Param(
     default=False,
     cli_action="store_true",
     group="Quantization Options",
-    cli_help="Quantize the LM Head. Off by default because it usually hurts accuracy. [default: off]",
+    cli_help=(
+        "Quantize the LM Head using --quantize-linear-action when it is not DISABLED. "
+        "Removes the default LM Head exclusion; other model exclusions are preserved. "
+        "Off by default because it can affect accuracy. [default: off]"
+    ),
 )
 
 # Debug Options (5 params)
