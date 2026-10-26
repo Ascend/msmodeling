@@ -197,9 +197,9 @@ Top 4 PD Aggregated Configurations:
 在仓库根目录启动 Web UI：
 
 ```bash
-python -m web_ui.web_ui_start --port 2345
+python web_ui/main.py
 ```
 
-浏览器访问 `http://127.0.0.1:2345`，即可通过页面配置模型、芯片、并行、量化和 workload 参数，并查看仿真曲线、明细表格与导出结果。
+浏览器访问 `http://127.0.0.1:5173`，即可通过页面配置模型、芯片、并行、量化和 workload 参数，并查看仿真曲线、明细表格与导出结果。
 
 更多页面说明、参数配置与结果解读，请参见《[Web UI 使用指南](../user_guide/msmodeling_web_ui_user_guide.md)》。

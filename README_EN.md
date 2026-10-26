@@ -209,12 +209,5 @@ Everyone is welcome to contribute to the community. If you have any questions or
 
 ## 🙏 Acknowledgments
 
-This tool is jointly contributed by the following companies, in no particular order:
-
-🔹 **Huawei Technologies Co., Ltd.**
-
-🔹 **Ant Group**
-
-🔹 **China Academy of Information and Communications Technology**
-
-Thank you to all community contributors for every PR. Contributions are welcome.
+This tool is jointly contributed by Huawei Technologies Co., Ltd. and developers.<br>
+Thanks for every PR from the community, and contributions are welcome.

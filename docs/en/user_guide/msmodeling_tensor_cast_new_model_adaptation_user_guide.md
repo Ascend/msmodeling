@@ -376,7 +376,7 @@ python -m cli.inference.model_adapter verify --help
 If runtime behavior changed, run relevant TensorCast tests:
 
 ```bash
-pytest tests/test_tensor_cast/test_runtime.py tests/test_tensor_cast/test_text_generate.py
+pytest tests/regression/tensor_cast/test_runtime.py tests/regression/tensor_cast/test_text_generate.py
 ```
 
 If the adaptation touches a specific model family, run the closest model or benchmark smoke path available in the repository.

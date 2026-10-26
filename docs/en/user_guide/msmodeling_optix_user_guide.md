@@ -1,8 +1,8 @@
 # Measured Serving Optimization User Guide
 
-## 1 Introduction
+## 1. Introduction
 
-**Measured serving optimization** (msmodeling optix) is a feature for measured optimization of serving parameters. It provides two optimization modes: automatic optimization based on the Particle Swarm Optimization (PSO) algorithm and closed-loop tuning based on an AI agent. It supports automatic search on real serving frameworks to obtain the best throughput parameter combination that meets latency requirements such as TTFT/TPOT. For the differences between the two modes, see [Optimization Modes: PSO and Agent](#6-optimization-modes-pso-and-agent).
+**Measured serving optimization** (msModeling OptiX) is a feature for measured optimization of serving parameters. It provides two optimization modes: automatic optimization based on the Particle Swarm Optimization (PSO) algorithm and closed-loop tuning based on an AI agent. It supports automatic search on real serving frameworks to obtain the best throughput parameter combination that meets latency requirements such as TTFT/TPOT. For the differences between the two modes, see [Optimization Modes: PSO and Agent](#6-optimization-modes-pso-and-agent).
 
 The tool mainly consists of two core functional modules:
 
@@ -11,18 +11,18 @@ The tool mainly consists of two core functional modules:
 
 The tool has been validated on DeepSeek V3.1, GLM5, and Qwen3.5-27b. In principle, it does not limit the range of supported models.
 
-## 2 Intended Audience and Reading Path
+## 2. Intended Audience and Reading Path
 
 This document is intended for performance engineers and deployment engineers who need to automatically optimize vLLM and MindIE serving deployment parameters. You are advised to read it in the following order:
 
-1. [Environment Preparation and Installation](#4-environment-preparation-and-installation) — Install msmodeling in a uv virtual environment and confirm that vLLM/MindIE is deployed on the system.
+1. [Environment Preparation and Installation](#4-environment-preparation-and-installation) — Install msModeling in a uv virtual environment and confirm that vLLM/MindIE is deployed on the system.
 2. [Quick Start](#5-quick-start) — Complete a default optimization run.
 3. [Optimization Modes: PSO and Agent](#6-optimization-modes-pso-and-agent) — Learn about the differences between the two optimization modes and the basis for choosing between them.
 4. [Configuration File Description](#7-configuration-file-description) and [Command Parameters](#8-command-parameters) — Learn about all parameters and configuration items.
 5. [Output File Description](#9-output-file-description) — Filter the optimal parameters according to service SLOs.
 6. [Appendix](#10-appendix) — O&M and troubleshooting. Consult the ternary derived type usage as needed.
 
-## 3 Plugin Support
+## 3. Plugin Support
 
 Measured serving optimization supports user-defined search parameter configuration and benchmark tools. You only need to adapt the plugin mode and register the corresponding plugin. Built-in plugins are released with the `optix` package and can be selected directly through `-e`/`-b`. You can also integrate custom plugins through the plugin mode.
 
@@ -40,19 +40,19 @@ Measured serving optimization supports user-defined search parameter configurati
 | Plugin Name | Type | Provider | Plugin Description | Plugin Directory |
 | --- | --- | --- | --- | --- |
 | custom_vllm | Serving framework (`-e`) | contrib example | Starts local and remote vLLM containers through Docker + SSH to demonstrate custom serving framework integration. | contrib/optix/vllm_msserviceprofiler/ |
-| multihost_infer | Serving framework (`-e`) | Slim & agile commando steam | vLLM multi-node hybrid deployment plugin based on the multi-node Data Parallel (DP) plus headless solution. The master node provides APIs externally, and worker nodes only act as worker nodes. | contrib/optix/multihost_infer/ |
-| vllm_pd | Serving framework (`-e`) | Slim & agile commando steam | vLLM Prefill-Decode (PD) disaggregated deployment cluster plugin. It manages multi-node start and stop and health checks remotely through SSH. | contrib/optix/vllm_pd_simulator/ |
-| evalscopeperf | Benchmark tool (`-b`) | Slim & agile commando steam | Wraps the `evalscope perf` command as a benchmark tool to demonstrate custom benchmark tool integration. | contrib/optix/evalscopeplugin/ |
+| multihost_infer | Serving framework (`-e`) | Slim & agile commando team | vLLM multi-node hybrid deployment plugin based on the multi-node Data Parallelism (DP) plus headless solution. The master node provides APIs externally, and worker nodes only act as worker nodes. | contrib/optix/multihost_infer/ |
+| vllm_pd | Serving framework (`-e`) | Slim & agile commando team | vLLM Prefill-Decode (PD) disaggregated deployment cluster plugin. It manages multi-node start and stop and health checks remotely through SSH. | contrib/optix/vllm_pd_simulator/ |
+| evalscopeperf | Benchmark tool (`-b`) | Slim & agile commando team | Wraps the `evalscope perf` command as a benchmark tool to demonstrate custom benchmark tool integration. | contrib/optix/evalscopeplugin/ |
 
 > Plugins are registered through Python entry points. For details about custom plugin development and usage, see [Procedure for Developing the Custom Plugin](msmodeling_optix_plugin_user_guide.md).
 
-## 4 Environment Preparation and Installation
+## 4. Environment Preparation and Installation
 
 ### Environment Isolation Principles
 
-Confirm that vLLM/MindIE is deployed on the system. For example, install the measured serving optimization optix tool in a vLLM serving container. You are advised to install it in a virtual environment. Run `uv sync` in the repository root directory to automatically create `.venv` and complete the installation.
+Confirm that vLLM/MindIE is deployed on the system. For example, install the measured serving optimization OptiX tool in a vLLM serving container. You are advised to install it in a virtual environment. Run `uv sync` in the repository root directory to automatically create `.venv` and complete the installation.
 
-Installing msmodeling also installs packages such as `torch` and `transformers`. If you install msModeling in the system Python, it may conflict with the existing `torch` and `transformers` versions on the system, which causes the following problems:
+Installing msModeling also installs packages such as `torch` and `transformers`. If you install msModeling in the system Python, it may conflict with the existing `torch` and `transformers` versions on the system, which causes the following problems:
 
 - vLLM or MindIE fails to start, or inference errors occur.
 - The versions do not match those verified on the Ascend inference stack.
@@ -66,7 +66,7 @@ uv sync
 ```
 
 > [!WARNING]
-> Do not run `pip install vllm`, `mindie_llm`, or other deployment packages in the msmodeling virtual environment, and do not install msmodeling in a system Python without a venv. If you have questions, see [Recommended Practice: Environment and Deployment Stack for Serving Optimization Through Real-World Testing](../install_guide/msmodeling_optix_env_and_deployment_stack.md)
+> Do not run `pip install vllm`, `mindie_llm`, or other deployment packages in the msModeling virtual environment, and do not install msModeling in a system Python without a venv. If you have questions, see [Recommended Practice: Environment and Deployment Stack for Serving Optimization Through Real-World Testing](../install_guide/msmodeling_optix_env_and_deployment_stack.md)
 
 ### Verifying the Installation
 
@@ -82,7 +82,7 @@ If the `msmodeling optix` help information is printed normally, the tool is inst
 uv pip uninstall msmodeling
 ```
 
-## 5 Quick Start
+## 5. Quick Start
 
 1. **Modify the configuration file**: Complete [Environment Preparation and Installation](#4-environment-preparation-and-installation), and modify the configuration file `config.toml` according to your actual situation, including the optimization parameters, benchmark tool parameters, and serving parameters. For details, see [Configuration File Description](#7-configuration-file-description).
 
@@ -96,7 +96,7 @@ uv pip uninstall msmodeling
 
 3. **View the results**: The optimization time depends on the model size, the data set size, and the number of optimization runs. When the optimization ends, a `data_storage_*.csv` file is generated and saved in the **`result/store` subdirectory in the current working directory** (you can change it with `[data_storage].store_dir`). For details, see [Output File Description](#9-output-file-description).
 
-## 6 Optimization Modes: PSO and Agent
+## 6. Optimization Modes: PSO and Agent
 
 Measured serving optimization provides two optimization modes. Select a mode through the top-level `optimizer_strategy` field in the configuration file. The default is `pso`:
 
@@ -134,7 +134,7 @@ You are advised to use agent mode through the **`optix-assistant` optimization s
 2. Enter agent mode through the `optix-assistant` skill, and select the fully automatic or interactive execution method as prompted.
 3. After the configuration preflight is complete, the agent generates candidates round by round, runs real-world tests, and summarizes the results. After convergence, it exports the optimal configuration and the final report.
 
-## 7 Configuration File Description
+## 7. Configuration File Description
 
 The optimization configuration file is located at `./msmodeling/optix/config.toml` by default. The file is organized by TOML sections, and each section corresponds to a feature:
 
@@ -393,8 +393,8 @@ dtype_param = "max_batch_size"
 | Binary derived | share | `target.min + target.max - target.value` (complementary) | Dependent field name (string) |
 | Binary derived | factories | `product ÷ target` | `{"target_name": "field name", "product": value, "dtype": "int"}` |
 | Binary derived | times | `product × target` | `{"target_name": "field name", "product": value, "dtype": "int"}` |
-| **Ternary derived** | **ternary_factories** | **`product ÷ (field_a × field_b)`** | **`{"target_names": ["A", "B"], "product": value, "dtype": "int"}`** |
-| **Ternary derived** | **ternary_times** | **`product × field_a × field_b`** | **`{"target_names": ["A", "B"], "product": value, "dtype": "int"}`** |
+| Ternary derived | ternary_factories | `product ÷ (field_a × field_b)` | `{"target_names": ["A", "B"], "product": value, "dtype": "int"}` |
+| Ternary derived | ternary_times | `product × field_a × field_b` | `{"target_names": ["A", "B"], "product": value, "dtype": "int"}` |
 
 > [!NOTE]
 > The values of derived type fields (`factories`/`times`/`ternary_factories`/`ternary_times`) are derived automatically from the dependency relationship and **do not participate in the particle swarm search**. You must set both `min` and `max` to 0. If the value of any dependent field is 0 (in the division case) or `None`/`NaN` (in the multiplication case), the derivation is skipped for the current round, the field keeps its original value, and a warning log is output.
@@ -406,11 +406,11 @@ dtype_param = "max_batch_size"
 
 ### Deployment Environment
 
-When measured serving optimization starts vLLM, MindIE, or a benchmark tool, optix first removes variables related to the msmodeling virtual environment, and then locates the deployment root directory according to the following configuration. The `bin/` directory should contain `vllm`, `ais_bench`, and so on. The deployment environment configuration is located in `[deploy]` in `config.toml`:
+When measured serving optimization starts vLLM, MindIE, or a benchmark tool, OptiX first removes variables related to the msModeling virtual environment, and then locates the deployment root directory according to the following configuration. The `bin/` directory should contain `vllm`, `ais_bench`, and so on. The deployment environment configuration is located in `[deploy]` in `config.toml`:
 
 | Parameter | Required | Description |
 | --- | --- | --- |
-| path_prefix | Optional | Deployment root directory, used to override the default system PATH. If it is not set, the tool directly uses the system PATH after stripping the msmodeling venv, which has the same effect as `OPTIX_DEPLOY_PATH`. |
+| path_prefix | Optional | Deployment root directory, used to override the default system PATH. If it is not set, the tool directly uses the system PATH after stripping the msModeling venv, which has the same effect as `OPTIX_DEPLOY_PATH`. |
 
 ```toml
 # Enable this only when the system PATH cannot find vllm, ais_bench, and so on
@@ -513,7 +513,7 @@ io_error = []
 
 </details>
 
-## 8 Command Parameters
+## 8. Command Parameters
 
 ### Command Format
 
@@ -523,7 +523,7 @@ msmodeling optix [options]
 
 ### Precautions
 
-- Before you start optimization, confirm that `vllm` or `mindie` and `ais_bench` or `vllm_benchmark` can run properly in the system deployment environment and are not deployed in the msmodeling virtual environment.
+- Before you start optimization, confirm that `vllm` or `mindie` and `ais_bench` or `vllm_benchmark` can run properly in the system deployment environment and are not deployed in the msModeling virtual environment.
 - The model path, port, data set path, and service startup parameters in the configuration file, such as `config.toml`, must be consistent with the actual deployment environment. For details, see [Configuration File Description](#7-configuration-file-description).
 - Measured serving optimization repeatedly starts the serving framework and runs benchmarks, which usually takes a long time (4 to 10h). You are advised to run it in an exclusive or resource-stable environment.
 - When environment isolation is abnormal, the log prefix `[optix/env]` provides the reason and repair suggestions. For details, see [Environment Variables and Troubleshooting](#environment-variables-and-troubleshooting).
@@ -589,7 +589,7 @@ OptiX supports searching serving parameters for vLLM Prefill-Decode (PD) disaggr
 
 For detailed configuration, procedure, ratio interpretation, and result description, see [Use Case: OptiX Two-Step PD Disaggregation Optimization](../use_cases/optix_pd_disaggregation.md). For other PD disaggregation or PD hybrid deployment optimization, you can use the existing plugins listed in [Plugin Support](#3-plugin-support).
 
-## 9 Output File Description
+## 9. Output File Description
 
 Each row in the output CSV corresponds to one group of parameters. The first column `case_id` identifies the Case, and the following five columns are performance metrics. You can filter the performance rows that meet your requirements as needed, and change the vLLM/MindIE parameters and the vllm_benchmark/AISBench parameters to the data in the CSV.
 
@@ -621,7 +621,7 @@ Other result columns not listed in the preceding table include internal sampling
 
 When `action = "report"`, a `metrics_samples_*.csv` file is also generated. You can associate the sampling trace with the main results in `data_storage_*.csv` through `case_id`. Actual early exit results do not participate in the selection of the optimal candidate, the reference, or refinement.
 
-## 10 Appendix
+## 10. Appendix
 
 ### Environment Variables and Troubleshooting
 
@@ -632,7 +632,7 @@ When `action = "report"`, a `metrics_samples_*.csv` file is also generated. You 
 | OPTIX_DEPLOY_PATH | Optional. Deployment environment root directory. Its `bin/` should contain `vllm`, `ais_bench`, and so on. Its priority is higher than `[deploy] path_prefix` in `config.toml`. If it is not set, the system PATH is used. |
 | MIES_INSTALL_PATH | MindIE installation root directory. It is retained in child processes and does not need to be changed for isolation. |
 
-Priority from high to low: `OPTIX_DEPLOY_PATH`, `[deploy] path_prefix` in `config.toml`, and the system PATH after only stripping the msmodeling venv.
+Priority from high to low: `OPTIX_DEPLOY_PATH`, `[deploy] path_prefix` in `config.toml`, and the system PATH after only stripping the msModeling venv.
 
 **Daily Startup**
 
@@ -655,9 +655,9 @@ msmodeling optix -e vllm -b ais_bench
 
 | Log | Meaning | Handling |
 | --- | --- | --- |
-| `No virtual environment detected` | msmodeling was not installed with a venv | Run `uv sync` in the repository root directory (this automatically creates `.venv`). Do not install it in the system Python. Otherwise, `torch` and `transformers` overwrite the deployment stack. |
+| `No virtual environment detected` | msModeling was not installed with a venv | Run `uv sync` in the repository root directory (this automatically creates `.venv`). Do not install it in the system Python. Otherwise, `torch` and `transformers` overwrite the deployment stack. |
 | `Deployment command not found: vllm` or `mindieservice_daemon` | The command is not in the system PATH after the venv is stripped | First confirm that vLLM or MindIE is installed on the system. If necessary, set `OPTIX_DEPLOY_PATH` or `[deploy] path_prefix`. |
-| `Command vllm resolves to the msmodeling virtual environment` | vllm was mistakenly installed in the msmodeling venv | Run `pip uninstall vllm` in that venv and use the vLLM installed on the system instead. |
+| `Command vllm resolves to the msmodeling virtual environment` | vllm was mistakenly installed in the msModeling venv | Run `pip uninstall vllm` in that venv and use the vLLM installed on the system instead. |
 | `Deployment command vllm → ...` and the path is on the system side | Normal | No change is required. |
 
 ### Log Levels and Log Viewing

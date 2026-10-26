@@ -118,7 +118,7 @@ After generation, open the trace file with `chrome://tracing` or MindStudio Insi
 
 ### 2.3 Run Throughput Optimizer
 
-The ServingCast throughput optimizer searches for the best parallel strategy and batch configuration under SLO constraints such as TTFT and TPOT. It helps estimate the maximum serving throughput of a target model on target hardware.
+The throughput optimizer searches for the best parallel strategy and batch configuration under SLO constraints such as TTFT and TPOT. It helps estimate the maximum serving throughput of a target model on target hardware.
 
 > [!NOTE]
 > PD (Prefill-Decode) colocated means Prefill and Decode run in the same instance. It is suitable for quickly evaluating overall service throughput. To evaluate Prefill and Decode separately, see the [Throughput Optimizer Guide](../user_guide/msmodeling_throughput_optimizer_user_guide.md).
@@ -197,9 +197,9 @@ If you prefer a visual workflow, you can use Web UI after completing the CLI ste
 Start Web UI from the repository root:
 
 ```bash
-python -m web_ui.web_ui_start --port 2345
+python web_ui/main.py
 ```
 
-Open `http://127.0.0.1:2345` in your browser to configure model, chip, parallelism, quantization, and workload parameters on the page, and view simulation charts, detail tables, and exported results.
+Open `http://127.0.0.1:5173` in your browser to configure model, chip, parallelism, quantization, and workload parameters on the page, and view simulation charts, detail tables, and exported results.
 
 For page layout, parameter configuration, and result interpretation, see the [Web UI User Guide](../user_guide/msmodeling_web_ui_user_guide.md).

@@ -376,7 +376,7 @@ python -m cli.inference.model_adapter verify --help
 如果运行时行为发生变化，运行相关 TensorCast 测试：
 
 ```bash
-pytest tests/test_tensor_cast/test_runtime.py tests/test_tensor_cast/test_text_generate.py
+pytest tests/regression/tensor_cast/test_runtime.py tests/regression/tensor_cast/test_text_generate.py
 ```
 
 如果适配涉及特定模型家族，请运行仓库中最接近的模型或 benchmark smoke 路径。
