@@ -239,22 +239,16 @@ def _attention(
 
     ulysses_size = sp_group.world_size
 
-    # all-to-all: (b, s, h, w) -> (b, s * p, h, w / p)
+    # all-to-all: (b, s, h, w) -> (b, s * p, h / p, w)
     # In cross attention, query shape is not equal to key, value shape
     batch_size, seq_per_rank, num_heads, head_dim = query.shape
     batch_size_kv, seq_per_rank_kv, num_heads_kv, head_dim_kv = key.shape
-    input_tensor_q = torch.ones(
-        (batch_size, seq_per_rank, num_heads // ulysses_size, head_dim),
-        dtype=query.dtype,
-        device=query.device,
-    )
-    input_tensor_kv = torch.ones(
-        (batch_size_kv, seq_per_rank_kv, num_heads_kv // ulysses_size, head_dim_kv),
-        dtype=query.dtype,
-        device=query.device,
-    )
-    input_split_sizes = [1 for _ in range(ulysses_size - 1)]
-    output_split_sizes = [1 for _ in range(ulysses_size - 1)]
+    # Views pack one head shard per destination, including self, without modeling
+    # synthetic initialization. AllToAll excludes the local shard from traffic.
+    input_tensor_q = query.unflatten(2, (ulysses_size, num_heads // ulysses_size)).movedim(2, 0)
+    input_tensor_kv = key.unflatten(2, (ulysses_size, num_heads_kv // ulysses_size)).movedim(2, 0)
+    input_split_sizes = [1 for _ in range(ulysses_size)]
+    output_split_sizes = [1 for _ in range(ulysses_size)]
 
     _ = sp_group.all_to_all(
         input_tensor_q,
