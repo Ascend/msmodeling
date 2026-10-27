@@ -32,7 +32,7 @@ PD aggregation computes the following metrics from a finite-batch timeline. Let 
 | QPS | `1000 × C / M` | req/s |
 | Output throughput | `1000 × C × O / M = QPS × O` | token/s |
 
-`--ttft-limit` and `--tpot-limit` check TTFT and TPOT separately. TPOT measures the average generation interval after the first token and excludes TTFT. QPS and output throughput use the full batch drain time; they cannot generally be derived from `TTFT + TPOT × O`. PP=1, PP>1, chunked prefill, and variable-length inputs use these definitions, while their scheduling timelines determine `first_i`, `finish_i`, and `M`. Decode TPOT in PD disaggregation is a separate phase metric and does not use this request-level aggregation timeline.
+`--ttft-limit` and `--tpot-limit` check TTFT and TPOT separately. TPOT measures the average generation interval after the first token and excludes TTFT. QPS and output throughput use the full batch drain time; they cannot generally be derived from `TTFT + TPOT × O`. PP=1, PP>1, chunked prefill, and variable-length inputs use these definitions, while their scheduling timelines determine `first_i`, `finish_i`, and `M`. Decode TPOT in PD disaggregation is a separate phase metric and does not use this request-level aggregation timeline. In PD-disaggregated PP=1 prefill rows, `ttft` is the request-weighted drain average: the whole candidate batch arrives together and is drained wave by wave, so requests completed by later waves queue behind earlier ones and TTFT grows with concurrency — `--ttft-limit` prunes the concurrency search on this value.
 
 #### Example
 

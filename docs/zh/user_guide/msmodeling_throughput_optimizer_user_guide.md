@@ -341,7 +341,7 @@ Top 4 Aggregation Configurations:
 - `TP` / `DP`：推荐的并行策略。
 - `concurrency`：当前候选配置支持的并发请求数。
 - `batch size`：满足 SLO 约束下的批大小。
-- `TTFT` / `TPOT`：首 token 时间与每输出 token 时间。
+- `TTFT` / `TPOT`：首 token 时间与每输出 token 时间。PD 分离 Prefill 行的 `TTFT` 为**请求加权排空平均**（整个候选批次同时到达、按 wave 依次排空时各请求完成时间的加权平均），随并发增长——并发越大排队越久，`--ttft-limit` 据此剪枝并发搜索。
 - `Throughput (token/s)`：系统级输出 token 吞吐，数值越大表示吞吐越高。
 
 成功标准：

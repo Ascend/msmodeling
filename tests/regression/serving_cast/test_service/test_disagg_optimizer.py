@@ -24,7 +24,10 @@ from serving_cast.service.disagg_throughput_optimizer import (
     _profiling_result_kind,
     DisaggThroughputOptimizer,
 )
-from serving_cast.service.optimizer_summary import OptimizerSummary
+from serving_cast.service.optimizer_summary import (
+    EARLY_STOP_TTFT_LIMIT,
+    OptimizerSummary,
+)
 from serving_cast.service.utils import (
     BYTES_TO_GB,
     LengthBin,
@@ -351,16 +354,14 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["profiling_result"], "hybrid")
         self.assertEqual(row["profiling_misses"], "outside_axis_boundary x3")
 
-    def test_chunked_prefill_ttft_anchors_on_first_cohort_not_drain(self):
-        """Multi-wave chunked prefill reports the no-queue first-cohort chain as TTFT.
+    def test_chunked_prefill_ttft_reports_request_weighted_drain_average(self):
+        """Multi-wave chunked prefill reports the request-weighted drain average as TTFT.
 
-        Production engines inject requests continuously (closed loop / rate-limited
-        arrival), so a request does not queue behind the drain of the whole candidate
-        batch — the O(concurrency) drain average over-states TTFT against production.
-        Mirrors the PP>1 wave-1 anchor in _evaluate_pp_wave: TTFT = serving_cost +
-        sum of each chunk's first-wave latency, while the phase makespan keeps every
-        wave (TTFT no-queue anchor and throughput saturated anchor intentionally
-        model different physics).
+        The whole candidate batch is modeled as arriving together, so requests
+        completed by later waves queue behind earlier ones: each final-chunk
+        wave's requests observe the cumulative latency of this and all
+        preceding waves (serving_cost included). TTFT therefore grows with
+        concurrency, which is what --ttft-limit prunes on (issue #561).
         """
         optimizer_data = OptimizerData(
             ttft_limits=100000,
@@ -390,9 +391,10 @@ class TestDisaggStrategy(unittest.TestCase):
         row = result.get_summary_df().iloc[0]
         # dp=4, concurrency=12, chunks (4,4) (4,8) (2,10): chunks 0-1 have
         # wave_size=4 -> three 4-request waves each; the final chunk (query 2)
-        # has wave_size=8 -> waves of 8+4. First-cohort chain = serving(2) +
-        # 5 + 5 + 3; the drain average would read (8*35 + 4*38) / 12 = 36.0.
-        self.assertEqual(row["ttft"], 15.0)
+        # has wave_size=8 -> waves of 8+4. The 8 requests of the first final
+        # chunk wave complete at serving(2)+5+5+5+5+5+5+3=35ms, the remaining 4
+        # at 38ms: TTFT = (8*35 + 4*38) / 12 = 36.0.
+        self.assertEqual(row["ttft"], 36.0)
         self.assertEqual(row["prefill_phase_makespan_ms"], 38.0)
         self.assertAlmostEqual(row["token/s"], 12 * 10 / 0.038, places=3)
         self.assertEqual(row["prefill_num_chunks"], 3)
@@ -402,6 +404,83 @@ class TestDisaggStrategy(unittest.TestCase):
             captured_calls,
             [(4, 4, 4), (4, 4, 8), (8, 2, 10), (4, 2, 10)],
         )
+
+    def test_ttft_limit_early_stop_fires_on_queued_drain_average(self):
+        """--ttft-limit prunes on the queued TTFT, which grows with concurrency.
+
+        Issue #561: a TTFT that stays flat in concurrency can never bound the
+        concurrency search — the exponential search then burns every doubling
+        iteration and the reported concurrency reaches millions. The early stop
+        must therefore evaluate the request-weighted drain average (36.0 here),
+        not any per-wave first-cohort value (15.0 here).
+        """
+        optimizer_data = OptimizerData(
+            # 15.0 (first-cohort chain) < 20 < 36.0 (drain average): only the
+            # queued view exceeds the limit.
+            ttft_limits=20,
+            tpot_limits=None,
+            batch_size=3,
+            input_length=10,
+            output_length=16,
+            max_batched_tokens=4,
+            serving_cost=2,
+        )
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            class DummyMetrics:
+                # Same latency profile as the drain-average test: 5ms for
+                # query 4, 3ms for query 2.
+                execution_time_s = {"analytic": 0.001 + 0.001 * (query_len or 0)}
+                device_memory_available_gb = 1.0
+                breakdowns = {}
+
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        self.assertTrue(result.check_early_stop_flag())
+        self.assertEqual(result.get_early_stop_reason(), EARLY_STOP_TTFT_LIMIT)
+        self.assertEqual(result.get_summary_df().iloc[0]["ttft"], 36.0)
+
+    def test_ttft_limit_bounds_concurrency_search(self):
+        """The exponential concurrency search terminates inside the TTFT SLO.
+
+        Issue #561: with a TTFT flat in concurrency the early stop never fires,
+        the exponential search burns every doubling iteration and the reported
+        concurrency reaches millions. With the request-weighted drain average
+        the search stops at the largest batch whose queued TTFT fits the limit.
+        """
+        optimizer_data = OptimizerData(
+            # ttft(batch) grows ~linearly: b1=15, b2=25, b3=36 -> limit 30
+            # admits batch<=2 (concurrency 8) and rejects batch>=3.
+            ttft_limits=30,
+            tpot_limits=None,
+            batch_size=1,
+            input_length=10,
+            output_length=16,
+            max_batched_tokens=4,
+            serving_cost=2,
+        )
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            class DummyMetrics:
+                execution_time_s = {"analytic": 0.001 + 0.001 * (query_len or 0)}
+                device_memory_available_gb = 1.0
+                breakdowns = {}
+
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.run(optimizer_data, [])
+
+        self.assertIsNotNone(result)
+        summary_df = result.get_summary_df()
+        self.assertFalse(summary_df.empty)
+        # Without the drain-average TTFT the search would collect every batch up
+        # to DEFAULT_MAX_BATCH_SIZE doublings (concurrency 2048 at batch 512).
+        self.assertLessEqual(int(summary_df["concurrency"].max()), 8)
+        self.assertTrue((summary_df["ttft"] <= 30).all())
 
     def test_chunked_prefill_passes_prefill_phase_to_every_forward(self):
         optimizer_data = OptimizerData(

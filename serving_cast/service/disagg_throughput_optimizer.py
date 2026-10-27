@@ -170,10 +170,6 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         output_length = optimizer_data.output_length
         prefill_ttft_sum_ms = None
         prefill_ttft_request_count = 0
-        # No-queue first-cohort TTFT anchor (PP=1 chunked-prefill wave path only;
-        # the variable-length path keeps the request-weighted drain average).
-        # None until the wave loop resolves every chunk's first wave.
-        ttft_anchor_ms = None
         single_prefill_fits_budget = (
             not decode_flag
             and not variable_input_mode
@@ -290,11 +286,10 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             # compared with engines that do cross-query chunk packing.
             # serving_cost is treated as one fixed phase overhead, while breakdowns are averaged
             # across all modeled waves to include every chunk shape. latency_ms is the phase
-            # makespan; TTFT is the no-queue first-cohort anchor (see the wave loop below).
+            # makespan; TTFT is the request-weighted drain average (see the wave loop below).
             for chunk in chunk_plan:
                 wave_size = max(global_batched_token_limit // chunk.query_len, 1)
                 remaining = concurrency
-                is_first_wave = True
                 while remaining > 0:
                     wave_concurrency = min(wave_size, remaining)
                     wave_key = self._make_forward_shape_key(
@@ -309,10 +304,9 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                         (
                             wave_key,
                             wave_concurrency,
-                            is_first_wave,
+                            chunk.is_last_chunk,
                         )
                     )
-                    is_first_wave = False
                     remaining -= wave_concurrency
 
             latency_table = ForwardLatencyTable(
@@ -321,16 +315,13 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             )
             latency_table.prefetch(wave_keys)
 
-            # TTFT anchor — no-queue first cohort, mirroring the PP>1 request-level
-            # definition in _evaluate_pp_wave: production engines inject requests
-            # continuously (closed loop / rate-limited arrival), so a request does
-            # not queue behind the drain of the whole candidate batch. Its TTFT is
-            # serving_cost plus the chain of its chunks' first-wave latencies. The
-            # drain makespan stays in latency_ms / prefill_phase_makespan_ms for
-            # throughput and PD-ratio planning: TTFT (no-queue anchor) and
-            # throughput (saturated anchor) intentionally model different physics.
-            ttft_anchor_ms = optimizer_data.serving_cost
-            for key, wave_concurrency, is_first_wave in wave_specs:
+            # TTFT: request-weighted drain average. The whole candidate batch is
+            # modeled as arriving together, so requests completed by later waves
+            # queue behind earlier ones and observe the cumulative latency of
+            # this and all preceding waves (issue #561: TTFT must grow with
+            # concurrency so --ttft-limit can bound the concurrency search).
+            prefill_ttft_sum_ms = 0.0
+            for key, wave_concurrency, chunk_is_last in wave_specs:
                 record = latency_table.get(key)
                 latency_ms += record.latency_ms
                 _accumulate_values(profiling_source_times_s, record.profiling_source_times_s)
@@ -341,12 +332,16 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 )
                 memory_info = select_tightest_memory_info((memory_info, record.memory_info))
                 if record.memory_left_gb < 0:
-                    # OOM/partial replay has no complete no-queue chain; the
-                    # reporting cascade falls back to the phase makespan.
-                    ttft_anchor_ms = None
+                    # OOM/partial replay leaves an incomplete request-level TTFT
+                    # average; the reporting cascade falls back to the phase
+                    # makespan and the memory-based early stop takes precedence.
                     break
-                if is_first_wave:
-                    ttft_anchor_ms += record.latency_ms
+                if chunk_is_last:
+                    # Chunks and waves execute sequentially, so requests completed
+                    # by this wave observe the cumulative latency of this and all
+                    # preceding chunks and waves (serving_cost included).
+                    prefill_ttft_sum_ms += wave_concurrency * latency_ms
+                    prefill_ttft_request_count += wave_concurrency
                 # Preserve the historical per-wave weighting: each wave contributes one normalized
                 # breakdown distribution, even when multiple waves reuse the same latency table record.
                 for breakdown_name, breakdown in record.raw_breakdowns.items():
@@ -390,10 +385,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 if variable_input_mode
                 else concurrency
             )
-            if ttft_anchor_ms is not None:
-                # PP=1 chunked-prefill wave path: no-queue first-cohort anchor.
-                ttft = ttft_anchor_ms
-            elif prefill_ttft_sum_ms is not None and prefill_ttft_request_count == expected_request_count:
+            if prefill_ttft_sum_ms is not None and prefill_ttft_request_count == expected_request_count:
                 ttft = prefill_ttft_sum_ms / expected_request_count
             else:
                 # OOM/partial replay has no complete request-level TTFT estimate. Keep the
