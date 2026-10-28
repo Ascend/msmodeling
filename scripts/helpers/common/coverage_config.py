@@ -59,9 +59,11 @@ def product_roots(repo_root: Path | None = None) -> tuple[str, ...]:
 
 
 def pytest_xdist_args(*, collected_count: int | None = None) -> list[str]:
-    """pytest-xdist parallelism; safe with pytest-cov when ``[tool.coverage.run] parallel`` is set.
+    """pytest-xdist parallelism; currently used only by tests.
 
-    When *collected_count* is omitted, worker count defaults to ``os.cpu_count()`` (legacy callers).
+    Production sync and CI commands go through ``pytest_runner.build_pytest_cmd`` /
+    ``xdist_worker_args``. When *collected_count* is omitted, worker count defaults
+    to ``os.cpu_count()``.
     """
     if collected_count is None:
         collected_count = os.cpu_count() or 1

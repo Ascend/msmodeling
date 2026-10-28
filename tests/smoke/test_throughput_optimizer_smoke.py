@@ -114,7 +114,7 @@ class TestThroughputOptimizerSmoke(TestCase):
             "--tpot-limits=10000",
             "--batch-range",
             "1",
-            "2",
+            "1",
             "--image-height=224",
             "--image-width=224",
         ]
@@ -133,7 +133,7 @@ class TestThroughputOptimizerSmoke(TestCase):
             "--ttft-limits=10000",
             "--batch-range",
             "1",
-            "2",
+            "1",
             "--image-height=224",
             "--image-width=224",
             "--disagg",

@@ -28,6 +28,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "contrib/optix/multihost_infer"
+_PLUGIN_PACKAGE = "multihost_inference_optimization"
+
+
+def _drop_plugin_modules() -> None:
+    for name in list(sys.modules):
+        if name == _PLUGIN_PACKAGE or name.startswith(f"{_PLUGIN_PACKAGE}."):
+            del sys.modules[name]
 
 
 def test_real_fabric_skips_invalid_controller_ssh_config(tmp_path, monkeypatch):
@@ -56,6 +63,7 @@ def _load_modules():
     fabric.Connection = MagicMock()
     loguru = ModuleType("loguru")
     loguru.logger = MagicMock()
+    _drop_plugin_modules()
     with (
         patch.dict(sys.modules, {"fabric": fabric, "loguru": loguru}),
         patch.object(sys, "path", [str(PLUGIN_ROOT), *sys.path]),
@@ -63,6 +71,22 @@ def _load_modules():
         config = importlib.import_module("multihost_inference_optimization.cluster_config")
         ssh = importlib.import_module("multihost_inference_optimization.ssh_remote_tools")
     return config, ssh
+
+
+def test_load_modules_rebinds_fabric_config_after_stale_plugin_import(monkeypatch):
+    monkeypatch.syspath_prepend(str(PLUGIN_ROOT))
+    fabric = ModuleType("fabric")
+    fabric.Config = object
+    fabric.Connection = object
+    loguru = ModuleType("loguru")
+    loguru.logger = MagicMock()
+    monkeypatch.setitem(sys.modules, "fabric", fabric)
+    monkeypatch.setitem(sys.modules, "loguru", loguru)
+    stale = importlib.import_module("multihost_inference_optimization.ssh_remote_tools")
+    assert stale.FabricConfig is object
+    _config, ssh = _load_modules()
+    ssh.SshRemote("worker").conn
+    assert ssh.FabricConfig is not object
 
 
 class TestMultihostSsh(unittest.TestCase):

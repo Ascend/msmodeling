@@ -131,8 +131,11 @@ MSMODELING_WHEEL_OUTPUT_DIR=/tmp/wheels bash scripts/build.sh
 ## test_map sync (`run_test_map_sync.sh`)
 
 - **Read/write** `MSMODELING_TEST_MAP_PATH`.
+- `--once` reads `built_from_commit` and the target HEAD before `uv sync`. A match exits without installing dependencies. `--watch`, an unreadable map, or a moved HEAD still installs dependencies and runs `sync.py`.
 - Missing file, bad JSON, missing `built_from_commit`, broken ancestry → **full rebuild** (self-heal).
-- Else incremental merge: git-touched product/test paths from `built_from_commit` to target HEAD.
+- Else incremental merge: run changed test files plus old-map watchers of changed product sources, then merge only git-touched product/test paths.
+- Collection/config changes and still-existing product sources without an old-map watcher fall back to a full rebuild; map-irrelevant changes only advance `built_from_commit`.
+- Pytest collection is reused by execution and coverage conversion; sync does not run a second full `--collect-only`.
 - Pid-scoped temp branch `msmodeling-sync/<pid>`; restored & deleted on exit, SIGINT/SIGTERM, `--watch`, and `atexit`.
 - **OBS upload/download external**: sync writes local file only. CI wrapper upload after success; compile jobs download before `run_ci_gate.sh`. Freshness via `built_from_commit`.
 

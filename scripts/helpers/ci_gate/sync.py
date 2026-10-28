@@ -46,17 +46,22 @@ from scripts.helpers.ci_gate.diff import (
     resolve_target_head,
 )
 from scripts.helpers.ci_gate.gate_policy import load_gate_policy
+from scripts.helpers.ci_gate.test_map_query import (
+    classify_touched_paths,
+    has_unmapped_existing_source,
+    select_resync_targets,
+)
 from scripts.helpers.common._logging import log_env_audit, setup_logger
 from scripts.helpers.common.build_test_map import (
     TestMap,
-    collect_allowed_node_ids,
     collect_test_map,
+    normalize_test_node_id,
     prune_missing_source_keys,
     write_test_map,
 )
-from scripts.helpers.common.coverage_config import cov_pytest_args, pytest_xdist_args
+from scripts.helpers.common.coverage_config import cov_pytest_args
+from scripts.helpers.common.pytest_runner import build_pytest_cmd, collect_test_node_ids
 from scripts.helpers.common.test_map_config import (
-    TEST_MAP_COLLECTION_MARKER,
     TEST_MAP_EXECUTION_MARKER,
     resolve_test_map_path,
 )
@@ -121,26 +126,34 @@ def apply_incremental_test_map_update(
     return prune_missing_source_keys(merged)
 
 
-def build_test_map_pytest_cmd(python_exe: str) -> list[str]:
-    return [
+_FULL_TEST_TARGETS: Final = ("tests/smoke/", "tests/regression/")
+
+
+def build_test_map_pytest_cmd(
+    python_exe: str,
+    targets: tuple[str, ...] = _FULL_TEST_TARGETS,
+    *,
+    collected_count: int | None = None,
+) -> list[str]:
+    if collected_count is None:
+        collected_count = len(targets)
+    return build_pytest_cmd(
         python_exe,
-        "-m",
-        "pytest",
-        "tests/smoke/",
-        "tests/regression/",
-        "-m",
-        TEST_MAP_EXECUTION_MARKER,
-        *pytest_xdist_args(),
-        *cov_pytest_args(cov_context=True),
-        "-q",
-        "--no-header",
-        "--tb=short",
-        "--disable-warnings",
-    ]
+        targets,
+        marker=TEST_MAP_EXECUTION_MARKER,
+        collected_count=collected_count,
+        extra_args=(*cov_pytest_args(cov_context=True), "-q", "--no-header"),
+    )
 
 
-def run_test_map_pytest(repo_root: Path, python_exe: str) -> int:
-    cmd = build_test_map_pytest_cmd(python_exe)
+def run_test_map_pytest(
+    repo_root: Path,
+    python_exe: str,
+    targets: tuple[str, ...] = _FULL_TEST_TARGETS,
+    *,
+    collected_count: int | None = None,
+) -> int:
+    cmd = build_test_map_pytest_cmd(python_exe, targets, collected_count=collected_count)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo_root)
     logging.getLogger(__name__).info("Running pytest: %s", shlex.join(cmd))
@@ -165,21 +178,69 @@ def _try_load_existing_map(cfg: Config) -> tuple[TestMap | None, str | None]:
         return None, None
 
 
-def _collect_fresh_map() -> TestMap:
+def _clear_coverage_artifacts(repo_root: Path) -> None:
+    for path in (repo_root / ".coverage", *sorted(repo_root.glob(".coverage.*"))):
+        if path.is_file():
+            path.unlink()
+
+
+def _normalized_node_ids(node_ids: tuple[str, ...]) -> frozenset[str]:
+    return frozenset(filter(None, (normalize_test_node_id(node_id) for node_id in node_ids)))
+
+
+def _collect_execution_node_ids(targets: tuple[str, ...]) -> tuple[str, ...]:
+    """Collect execution ids, expanding normalized map keys to parametrized ids."""
+    file_targets = tuple(target for target in targets if "::" not in target)
+    node_targets = tuple(target for target in targets if "::" in target)
+    wanted = {normalize_test_node_id(target) for target in node_targets}
+    parent_files = tuple(
+        dict.fromkeys(
+            target.split("::", 1)[0] for target in node_targets if (REPO_ROOT / target.split("::", 1)[0]).is_file()
+        )
+    )
+    collected: list[str] = []
+    if file_targets:
+        collected.extend(collect_test_node_ids(file_targets, marker=TEST_MAP_EXECUTION_MARKER))
+    if parent_files:
+        collected.extend(
+            node_id
+            for node_id in collect_test_node_ids(parent_files, marker=TEST_MAP_EXECUTION_MARKER)
+            if normalize_test_node_id(node_id) in wanted
+        )
+    return tuple(dict.fromkeys(collected))
+
+
+def _collect_fresh_map(allowed_node_ids: frozenset[str]) -> TestMap:
     gate_policy = load_gate_policy(REPO_ROOT)
-    allowed_node_ids = collect_allowed_node_ids(TEST_MAP_COLLECTION_MARKER)
     return collect_test_map(
-        marker_expr=TEST_MAP_COLLECTION_MARKER,
+        marker_expr=TEST_MAP_EXECUTION_MARKER,
         roots=gate_policy.roots,
         allowed_node_ids=allowed_node_ids,
     )
 
 
-def _run_pytest_and_collect_fresh_map(repo_root: Path, python_exe: str) -> TestMap | None:
-    pytest_exit = run_test_map_pytest(repo_root, python_exe)
+def _run_pytest_and_collect_fresh_map(
+    repo_root: Path,
+    python_exe: str,
+    targets: tuple[str, ...] = _FULL_TEST_TARGETS,
+) -> TestMap | None:
+    collected_node_ids = _collect_execution_node_ids(targets)
+    if not collected_node_ids:
+        if targets == _FULL_TEST_TARGETS:
+            logging.getLogger(__name__).error("test_map collection produced no node ids for the full suite")
+            return None
+        return {}
+    _clear_coverage_artifacts(repo_root)
+    run_targets = targets if targets == _FULL_TEST_TARGETS else collected_node_ids
+    pytest_exit = run_test_map_pytest(
+        repo_root,
+        python_exe,
+        run_targets,
+        collected_count=len(collected_node_ids),
+    )
     if pytest_exit != 0:
         return None
-    return _collect_fresh_map()
+    return _collect_fresh_map(_normalized_node_ids(collected_node_ids))
 
 
 def _full_rebuild_test_map(
@@ -253,8 +314,30 @@ def sync_test_map_once(
         len(touched_paths),
     )
 
+    fallback_reason: str | None = None
+    fresh_map: TestMap | None = None
     with ephemeral_target_checkout(REPO_ROOT, target_branch):
-        fresh_map = _run_pytest_and_collect_fresh_map(REPO_ROOT, sys.executable)
+        gate_policy = load_gate_policy(REPO_ROOT)
+        touched = classify_touched_paths(touched_paths, gate_policy)
+        if touched.configs:
+            fallback_reason = f"test collection/configuration changed: {', '.join(sorted(touched.configs)[:3])}"
+        elif has_unmapped_existing_source(existing_map, touched, repo_root=REPO_ROOT):
+            fallback_reason = "a changed source has no watcher in the existing test_map"
+        elif not touched.tests and not touched.sources:
+            write_test_map(map_path, existing_map, built_from_commit=target_head)
+            logger.info("No map-relevant paths changed; advanced built_from_commit without pytest")
+            return 0
+        else:
+            targets = select_resync_targets(existing_map, touched, repo_root=REPO_ROOT)
+            fresh_map = _run_pytest_and_collect_fresh_map(REPO_ROOT, sys.executable, targets)
+    if fallback_reason is not None:
+        return _full_rebuild_test_map(
+            cfg,
+            target_branch=target_branch,
+            target_head=target_head,
+            logger=logger,
+            reason=fallback_reason,
+        )
     if fresh_map is None:
         logger.error("test_map sync aborted: pytest failed")
         return 1

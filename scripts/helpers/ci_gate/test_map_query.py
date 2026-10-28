@@ -19,12 +19,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from scripts.helpers.ci_gate.models import CiGatePolicy
+
+from scripts.helpers.ci_gate.gate_policy import is_config_path, is_source_path, is_test_path
+
 TestMap = dict[str, dict[str, list[str]]]
+
+
+@dataclass(frozen=True, slots=True)
+class TouchedPaths:
+    """Map-relevant paths changed between two authoritative map commits."""
+
+    tests: frozenset[str]
+    sources: frozenset[str]
+    configs: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +67,45 @@ def build_test_map_index(test_map: TestMap) -> TestMapIndex:
     return TestMapIndex(
         _source_watchers={path: frozenset(nodes) for path, nodes in by_source.items()},
         _symbol_watchers={key: frozenset(nodes) for key, nodes in by_symbol.items()},
+    )
+
+
+def classify_touched_paths(paths: Iterable[str], policy: CiGatePolicy) -> TouchedPaths:
+    """Classify changed paths using the same policy as the PR CI gate."""
+    touched = frozenset(paths)
+    return TouchedPaths(
+        tests=frozenset(path for path in touched if is_test_path(path, policy)),
+        sources=frozenset(path for path in touched if is_source_path(path, policy)),
+        configs=frozenset(path for path in touched if is_config_path(path, policy)),
+    )
+
+
+def select_resync_targets(
+    test_map: TestMap,
+    touched: TouchedPaths,
+    *,
+    repo_root: Path,
+) -> tuple[str, ...]:
+    """Return existing changed test files and nodes watching changed sources."""
+    index = build_test_map_index(test_map)
+    targets = {path for path in touched.tests if (repo_root / path).is_file()}
+    for source_file in touched.sources:
+        if (repo_root / source_file).is_file():
+            targets.update(index.source_watchers(source_file))
+    return tuple(sorted(targets))
+
+
+def has_unmapped_existing_source(
+    test_map: TestMap,
+    touched: TouchedPaths,
+    *,
+    repo_root: Path,
+) -> bool:
+    """Return whether a changed, still-existing source has no old-map watcher."""
+    index = build_test_map_index(test_map)
+    return any(
+        (repo_root / source_file).is_file() and not index.source_watchers(source_file)
+        for source_file in touched.sources
     )
 
 

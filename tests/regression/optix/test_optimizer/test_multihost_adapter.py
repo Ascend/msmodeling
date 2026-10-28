@@ -32,6 +32,11 @@ from optix.config.config import OptimizerConfigField
 from optix.optimizer.multihost_adapter import run_multihost_trial
 
 PLUGIN_DIR = Path(__file__).resolve().parents[4] / "contrib/optix/multihost_infer"
+_PLUGIN_PACKAGE = "multihost_inference_optimization"
+
+
+def _plugin_module_names() -> list[str]:
+    return [name for name in sys.modules if name == _PLUGIN_PACKAGE or name.startswith(f"{_PLUGIN_PACKAGE}.")]
 
 
 def field(name, value, position="run"):
@@ -109,12 +114,28 @@ def _load_plugin(monkeypatch, filename):
     fabric.Connection = object
     fabric.Config = object
     monkeypatch.setitem(sys.modules, "fabric", fabric)
+    # simulator.py imports vllm_worker_manager → ssh_remote_tools, which binds
+    # FabricConfig at import time. Drop those package entries after loading so
+    # later tests do not reuse Config=object from this stub.
+    snapshot = {name: sys.modules[name] for name in _plugin_module_names()}
     spec = importlib.util.spec_from_file_location(
         "adapter_" + filename[:-3], PLUGIN_DIR / "multihost_inference_optimization" / filename
     )
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        for name in _plugin_module_names():
+            sys.modules.pop(name, None)
+        sys.modules.update(snapshot)
     return module
+
+
+def test_load_plugin_does_not_cache_stub_ssh_tools(monkeypatch):
+    before = {name: sys.modules[name] for name in _plugin_module_names()}
+    _load_plugin(monkeypatch, "simulator.py")
+    assert {name: sys.modules.get(name) for name in before} == before
+    assert [name for name in _plugin_module_names() if name not in before] == []
 
 
 def test_candidates_reach_original_plugin_node_scripts(tmp_path, monkeypatch):

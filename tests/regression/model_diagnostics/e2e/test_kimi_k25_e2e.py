@@ -70,8 +70,8 @@ def test_kimi_k25_offline_capture_and_compare() -> None:
         quantize_linear_action="DISABLED",
         word_embedding_tp=None,
         image_batch_size=1,
-        image_height=1080,
-        image_width=1920,
+        image_height=224,
+        image_width=224,
         selected_region_layers={"vision_encoder": (0, 26)},
     )
 

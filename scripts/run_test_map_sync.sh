@@ -35,6 +35,7 @@
 #
 # OBS upload/download remains external; this script only updates the local file.
 # Sync self-heals: missing/invalid map or broken ancestry → full rebuild.
+# --once skips dependency install when built_from_commit is already target HEAD.
 # Uses ephemeral branch msmodeling-sync/<pid>; cleaned up on exit.
 set -euo pipefail
 
@@ -48,6 +49,106 @@ export MSMODELING_OFFLINE="${MSMODELING_OFFLINE:-0}"
 export MSMODELING_TEST_BASE_BRANCH="${MSMODELING_TEST_BASE_BRANCH:-master}"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+_trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+_read_built_from_commit() {
+  local py
+  if command -v python3 >/dev/null 2>&1; then
+    py=python3
+  elif command -v python >/dev/null 2>&1; then
+    py=python
+  else
+    return 1
+  fi
+  "$py" -c '
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+commit = payload.get("built_from_commit")
+if not isinstance(commit, str) or not commit.strip():
+    raise SystemExit(1)
+print(commit.strip())
+' "$MSMODELING_TEST_MAP_PATH"
+}
+
+# Return 0 only for --once when the local map commit is already the target tip.
+# Any miss falls through to dependency install and sync.py. --watch always falls through.
+_test_map_already_current() {
+  local once=0 watch=0 target="" built="" repo_root="" remote="" branch="" remote_ref="" head=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --once) once=1 ;;
+      --watch) watch=1 ;;
+      --target-branch)
+        shift
+        [[ $# -gt 0 ]] || return 1
+        target="$1"
+        ;;
+      --target-branch=*)
+        target="${1#--target-branch=}"
+        ;;
+      --interval)
+        shift
+        [[ $# -gt 0 ]] || return 1
+        ;;
+      --interval=*) ;;
+    esac
+    shift
+  done
+  [[ "$once" -eq 1 && "$watch" -eq 0 ]] || return 1
+
+  if [[ -z "$target" ]]; then
+    target="$(_trim "${MSMODELING_TEST_MAP_TARGET_BRANCH:-}")"
+  fi
+  if [[ -z "$target" ]]; then
+    target="$(_trim "${MSMODELING_TEST_BASE_BRANCH:-master}")"
+  fi
+  [[ -n "$target" ]] || return 1
+
+  if ! built="$(_read_built_from_commit)"; then
+    return 1
+  fi
+  repo_root=$(readlink -f "${SCRIPT_DIR}/..") || return 1
+
+  if [[ "$target" == */* ]]; then
+    remote="${target%%/*}"
+    branch="${target#*/}"
+    remote_ref="$target"
+  else
+    remote="origin"
+    branch="$target"
+    remote_ref="${remote}/${branch}"
+  fi
+  [[ -n "$remote" && -n "$branch" ]] || return 1
+
+  if ! git -C "$repo_root" fetch --depth=50 "$remote" "$branch" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! head=$(git -C "$repo_root" rev-parse "${remote_ref}^{commit}" 2>/dev/null); then
+    return 1
+  fi
+  [[ "$built" == "$head" ]] || return 1
+  echo "test_map is up to date with target HEAD (${head:0:12}); skipping dependency install"
+}
+
+if _test_map_already_current "$@"; then
+  exit 0
+fi
+
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 

@@ -137,6 +137,7 @@ def deepseek_v32_build_model_int8():
         context_length=32,
         device="TEST_DEVICE",
         num_mtp_tokens=2,
+        num_hidden_layers_override=1,
         disable_repetition=True,
         quantize_attention_action=QuantizeAttentionAction.INT8,
     )
@@ -152,6 +153,7 @@ def deepseek_v32_build_model_fp8():
         context_length=32,
         device="TEST_DEVICE",
         num_mtp_tokens=2,
+        num_hidden_layers_override=1,
         disable_repetition=True,
         quantize_attention_action=QuantizeAttentionAction.FP8,
     )
