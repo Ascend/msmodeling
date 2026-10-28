@@ -60,7 +60,7 @@ If the commands do not print help information, check that the virtual environmen
 TensorCast performs performance modeling for PyTorch programs. It does not execute the model on a real accelerator. Instead, it intercepts the computation graph and estimates operator latency, memory usage, and overall inference performance based on the target device profile.
 
 > [!NOTE]
-> TensorCast prints operator-level performance summaries, total execution time, TPS/Device, and memory usage by default. If `--chrome-trace` is specified, it can also generate a Chrome Trace file for timeline analysis.
+> TensorCast prints operator-level performance summaries, total execution time, TPS/Device, and memory usage by default. If `--chrome-trace-file` is specified, it can also generate a Chrome Trace file for timeline analysis.
 
 #### 2.2.1 Run LLM Text-Generation Simulation
 
@@ -104,21 +104,21 @@ Success criteria:
 
 #### 2.2.3 Generate Chrome Trace (Optional)
 
-To inspect a more fine-grained timeline, add `--chrome-trace`:
+To inspect a more fine-grained timeline, add `--chrome-trace-file`:
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-32B \
     --num-queries 2 \
     --query-length 3500 \
     --device TEST_DEVICE \
-    --chrome-trace ./tensorcast_trace.json
+    --chrome-trace-file ./tensorcast_trace.json
 ```
 
 After generation, open the trace file with `chrome://tracing` or MindStudio Insight.
 
 ### 2.3 Run Throughput Optimizer
 
-The ServingCast throughput optimizer searches for the best parallel strategy and batch configuration under SLO constraints such as TTFT and TPOT. It helps estimate the maximum serving throughput of a target model on target hardware.
+The throughput optimizer searches for the best parallel strategy and batch configuration under SLO constraints such as TTFT and TPOT. It helps estimate the maximum serving throughput of a target model on target hardware.
 
 > [!NOTE]
 > PD (Prefill-Decode) colocated means Prefill and Decode run in the same instance. It is suitable for quickly evaluating overall service throughput. To evaluate Prefill and Decode separately, see the [Throughput Optimizer Guide](../user_guide/msmodeling_throughput_optimizer_user_guide.md).
@@ -135,7 +135,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --output-length 1500 \
     --quantize-linear-action W8A8_DYNAMIC \
     --quantize-attention-action DISABLED \
-    --tpot-limits 50
+    --tpot-limit 50
 ```
 
 #### 2.3.2 Check Optimization Results
@@ -197,9 +197,9 @@ If you prefer a visual workflow, you can use Web UI after completing the CLI ste
 Start Web UI from the repository root:
 
 ```bash
-python -m web_ui.web_ui_start --port 2345
+python web_ui/main.py
 ```
 
-Open `http://127.0.0.1:2345` in your browser to configure model, chip, parallelism, quantization, and workload parameters on the page, and view simulation charts, detail tables, and exported results.
+Open `http://127.0.0.1:5173` in your browser to configure model, chip, parallelism, quantization, and workload parameters on the page, and view simulation charts, detail tables, and exported results.
 
 For page layout, parameter configuration, and result interpretation, see the [Web UI User Guide](../user_guide/msmodeling_web_ui_user_guide.md).

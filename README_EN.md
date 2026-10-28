@@ -3,12 +3,12 @@
 <div align="center">
 <p><b><span style="font-size:24px;">Ascend AI Model Performance Modeling and Simulation Tool</span></b></p>
 
- [![Quick Start](https://badgen.net/badge/快速入门/QuickStart/blue)](./docs/en/quick_start/tensorcast_throughput_optimizer_quick_start.md)
- [![AI Q&A (DeepWiki)](https://badgen.net/badge/AI问答/DeepWiki/blue)](https://deepwiki.com/Ascend/msmodeling)
- [![AI Q&A (ZRead)](https://badgen.net/badge/AI问答/ZRead/blue)](https://zread.ai/mindstudio-docs/master)
- [![Precise Search](https://badgen.net/badge/精确搜索/ReadTheDocs/blue)](https://mindstudio-docs-master.readthedocs.io)
- [![Ascend Community](https://badgen.net/badge/昇腾社区/Community/blue)](https://www.hiascend.com/cn/developer/software/mindstudio)
- [![Report an Issue](https://badgen.net/badge/报告问题/Issues/blue)](https://gitcode.com/Ascend/msmodeling/issues)
+ [![Quick Start](https://badgen.net/badge/Quick%20Start/QuickStart/blue)](./docs/en/quick_start/tensorcast_throughput_optimizer_quick_start.md)
+ [![AI Q&A (DeepWiki)](https://badgen.net/badge/AI%20Q%26A/DeepWiki/blue)](https://deepwiki.com/Ascend/msmodeling)
+ [![AI Q&A (ZRead)](https://badgen.net/badge/AI%20Q%26A/ZRead/blue)](https://zread.ai/mindstudio-docs/master)
+ [![Precise Search](https://badgen.net/badge/Exact%20Search/ReadTheDocs/blue)](https://mindstudio-docs-master.readthedocs.io)
+ [![Ascend Community](https://badgen.net/badge/Ascend%20Community/Community/blue)](https://www.hiascend.com/eng/developer/software/mindstudio)
+ [![Report an Issue](https://badgen.net/badge/Report%20Issues/Issues/blue)](https://gitcode.com/Ascend/msmodeling/issues)
 
 </div>
 
@@ -18,7 +18,7 @@ English | [简体中文](./README.md)
 
 <span style="font-size:14px;">
 
-We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, GLM, and MiniMax. Click a series name to expand and view the newly added support entries.
+We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, GLM, and MiniMax. Click a series name to expand and view the newly added support entries.<br>
 
 <details>
 <summary><b>DeepSeek Series</b></summary>
@@ -26,7 +26,7 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 🔹 **[Oct 20, 2026]**: msModeling adds support for the **DeepSeek-V4.1-Flash** model with text and image inputs.<br>
 🔹 **[Jun 4, 2026]**: msModeling adds support for the **DeepSeek-V4** model.<br>
 🔹 **[Apr 20, 2026]**: msModeling adds support for the **DeepSeek V3.2** model.<br>
-🔹 **[Sep 6, 2025]**: msModeling adds support for the **DeepSeek V3** model.
+🔹 **[Sep 6, 2025]**: msModeling adds support for the **DeepSeek V3** model.<br>
 
 </details>
 
@@ -36,21 +36,21 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 🔹 **[Aug 27, 2026]**: msModeling adds support for the **Kimi-K3** model.<br>
 🔹 **[Jun 11, 2026]**: msModeling adds support for the **Kimi-K2.6** model.<br>
 🔹 **[May 27, 2026]**: msModeling adds support for the **Kimi-K2.5** model.<br>
-🔹 **[Sep 6, 2025]**: msModeling adds support for the **Kimi-K2** model.
+🔹 **[Sep 6, 2025]**: msModeling adds support for the **Kimi-K2** model.<br>
 
 </details>
 
 <details>
 <summary><b>Qwen Series</b></summary>
 
-🔹 **[Aug 27, 2026]**: msModeling adds support for the **Qwen3.8 model family**.<br>
+🔹 **[Aug 27, 2026]**: msModeling adds support for the **Qwen3.8 series** models.<br>
 🔹 **[Jul 14, 2026]**: msModeling adds image-input support for **Qwen3.6**.<br>
-🔹 **[Jul 14, 2026]**: msModeling adds text-input support for **Qwen3.6 Dense / MoE**.<br>
+🔹 **[Jul 14, 2026]**: msModeling adds text-input support for **Qwen3.6 Dense/MoE**.<br>
 🔹 **[Apr 20, 2026]**: msModeling adds image-input support for **Qwen3.5**.<br>
-🔹 **[Mar 31, 2026]**: msModeling adds text-input support for **Qwen3.5 Dense / MoE**.<br>
+🔹 **[Mar 31, 2026]**: msModeling adds text-input support for **Qwen3.5 Dense/MoE**.<br>
 🔹 **[Dec 25, 2025]**: msModeling adds support for the **Qwen3 MoE** model.<br>
 🔹 **[Sep 18, 2025]**: msModeling adds support for the **Qwen3-Next** model.<br>
-🔹 **[Aug 18, 2025]**: msModeling adds support for the **Qwen3 Dense** model.
+🔹 **[Aug 18, 2025]**: msModeling adds support for the **Qwen3 Dense** model.<br>
 
 </details>
 
@@ -61,17 +61,16 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 🔹 **[Jul 7, 2026]**: msModeling adds support for the **GLM5.2** model.<br>
 🔹 **[Jun 4, 2026]**: msModeling adds support for the **GLM5.1** model.<br>
 🔹 **[Apr 30, 2026]**: msModeling adds support for the **GLM5** model.<br>
-🔹 **[Mar 31, 2026]**: msModeling adds support for the **GLM-4 MoE** model.
+🔹 **[Mar 31, 2026]**: msModeling adds support for the **GLM-4 MoE** model.<br>
 
 </details>
 
 <details>
 <summary><b>MiniMax Series</b></summary>
-
 🔹 **[Jul 31, 2026]**: msModeling adds support for the **MiniMax M3** model.<br>
 🔹 **[Jun 25, 2026]**: msModeling adds support for the **MiniMax M2.7** model.<br>
 🔹 **[May 29, 2026]**: msModeling adds support for the **MiniMax M2.5** model.<br>
-🔹 **[Dec 18, 2025]**: msModeling adds support for the **MiniMax M2** model.
+🔹 **[Dec 18, 2025]**: msModeling adds support for the **MiniMax M2** model.<br>
 
 </details>
 
@@ -85,15 +84,15 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>Recent Feature Updates</b></summary>
 
-🔹 **[Sep 15, 2026]**: Adds a calibrated analytical performance model that corrects Roofline latency estimates with a calibration profile.<br>
-🔹 **[Sep 14, 2026]**: Pipeline Parallel (PP) can be searched jointly with MTP, DFlash, and DSpark speculative decoding.<br>
-🔹 **[Sep 8, 2026]**: OptiX adds an AI-agent-based closed-loop optimization mode.<br>
-🔹 **[Sep 2, 2026]**: Serving throughput optimization adds Pipeline Parallel (PP) search and explicit layer partitioning.<br>
-🔹 **[Aug 27, 2026]**: Profiling data tooling adds query-driven shape-grid generation and independent MicroBench replay.<br>
-🔹 **[Aug 26, 2026]**: Adds built-in device profiles for the Atlas A5 series.<br>
-🔹 **[Aug 21, 2026]**: Model and serving simulation add DFlash and DSpark speculative decoding.<br>
-🔹 **[Aug 4, 2026]**: Adds Theory↔Runtime model diagnostics for structural and operator-call reconciliation.<br>
-🔹 **[Aug 3, 2026]**: Adds Decode Context Parallel (DCP) simulation and search.
+🔹 **[Sep 15, 2026]**: Adds a calibrated analytical performance model that uses calibrated profiles to correct the Roofline latency estimates.<br>
+🔹 **[Sep 14, 2026]**: Adds support for joint search of pipeline parallelism (PP) with MTP, DFlash, and DSpark speculative decoding.<br>
+🔹 **[Sep 8, 2026]**: Adds an AI agent closed-loop optimization mode to OptiX.<br>
+🔹 **[Sep 2, 2026]**: Adds pipeline parallelism (PP) search and explicit layer partitioning to serving throughput optimization.<br>
+🔹 **[Aug 27, 2026]**: Adds query-driven shape grid generation and standalone MicroBench replay to the Profiling data tool.<br>
+🔹 **[Aug 26, 2026]**: Adds support for Atlas A5 series device profiles.<br>
+🔹 **[Aug 21, 2026]**: Adds support for DFlash and DSpark speculative decoding to model and serving simulation.<br>
+🔹 **[Aug 4, 2026]**: Adds a Theory↔Runtime model diagnostic tool for structure and operator call reconciliation.<br>
+🔹 **[Aug 3, 2026]**: Adds simulation and search for decode context parallelism (DCP).<br>
 
 </details>
 
@@ -101,21 +100,21 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 
 <span style="font-size:14px; display:block; margin-top:24px;">
 
-Click a module name to expand the list of **supported features**.
+Click a module name to expand the list of **supported features**.<br>
 
 <details>
 <summary><b>Model Inference Performance Simulation</b></summary>
 
-🔹 Multi-hardware simulation for Ascend devices, including Atlas 800 A2/A3 and the Atlas 350/850/850E/950 (A5) series, with support for custom device profiles<br>
+🔹 Multi-hardware simulation for Ascend devices, including Atlas 800 A2/A3 and Atlas 350/850/850E/950 (A5), with support for custom device profiles<br>
 🔹 Separate simulation of the LLM prefill and decode stages<br>
 🔹 Prefix Cache simulation<br>
 🔹 MTP, DFlash, and DSpark speculative decoding simulation<br>
 🔹 Compilation and graph optimization, and multi-stream compute-communication overlap<br>
 🔹 Quantization simulation, including `W8A8`, `W4A8`, `FP8`, and `MXFP4`<br>
-🔹 Parallelism and MoE extensions, including TP, DP, EP, PP, DCP, and fine-grained parallelism such as Embedding TP and Vision TP<br>
+🔹 Parallelism and MoE extensions, including TP, DP, EP, PP, and DCP, as well as fine-grained parallelism such as Embedding TP and Vision TP<br>
 🔹 Switching among the Roofline, calibrated analytical, and Profiling performance models<br>
 🔹 Chrome Trace and debugging<br>
-🔹 DiT simulation for video generation, including Ulysses, CFG, and DiT Cache
+🔹 DiT simulation for video generation, including Ulysses, CFG, and DiT Cache<br>
 
 </details>
 
@@ -125,12 +124,12 @@ Click a module name to expand the list of **supported features**.
 🔹 Throughput optimization for LLM and VLM workloads under constraints such as TTFT, TPOT, and serving cost<br>
 🔹 PD modes, including colocation, disaggregation, and ratio-based deployment<br>
 🔹 Parallel strategy search, including TP, EP, MOE-DP, PP, and DCP<br>
-🔹 MTP, DFlash, and DSpark speculative-decoding configuration search, including joint search with PP<br>
+🔹 MTP, DFlash, and DSpark speculative decoding configuration search, with support for joint search with PP<br>
 🔹 Chunked prefill simulation<br>
 🔹 Prefix Cache simulation<br>
 🔹 Variable-length workload simulation<br>
 🔹 Multi-stream compute-communication overlap<br>
-🔹 Cross-hardware comparison
+🔹 Cross-hardware comparison<br>
 
 </details>
 
@@ -140,16 +139,16 @@ Click a module name to expand the list of **supported features**.
 🔹 LLM and VL forward-pass simulation, and video generation simulation<br>
 🔹 Throughput optimization experiments, including PD colocation, disaggregation, and ratio-based deployment<br>
 🔹 Command preview and task caching<br>
-🔹 Result display and export, including charts, tables, device memory and operator details, and Excel files
+🔹 Result display and export, including charts, tables, device memory and operator details, and Excel files<br>
 
 </details>
 
 <details>
 <summary><b>Serving Optimization Based on Real-World Measurements</b></summary>
 
-🔹 Serving framework optimization based on real-world measurements using PSO and Early Rejection, plus AI-agent-based closed-loop optimization<br>
+🔹 Serving framework optimization based on real-world measurements using particle swarm optimization (PSO) and Early Rejection, as well as AI agent closed-loop optimization<br>
 🔹 Multi-engine support, including vLLM and MindIE, as well as evaluation strategies<br>
-🔹 Custom optimization configurations and checkpoint-based resumption
+🔹 Custom optimization configurations and checkpoint-based resumption<br>
 
 </details>
 
@@ -167,7 +166,7 @@ msModeling provides modules for model inference performance simulation, serving 
 |---------|--------|
 | [**Model Inference Performance Simulation**](./docs/en/user_guide/msmodeling_tensor_cast_user_guide.md) | The model simulation module intercepts PyTorch computation graphs, simulates inference using specified device profiles, and outputs operator-level performance breakdowns, memory usage, operator shapes, and Chrome Trace. |
 | [**Serving Performance Simulation**](./docs/en/user_guide/msmodeling_throughput_optimizer_user_guide.md) | The throughput optimization simulation module automatically searches for the optimal parallelism strategy and batch configuration under SLO constraints. It supports PD colocation, PD disaggregation, and PD ratio-based deployment. |
-| [**Serving Optimization Based on Real-World Measurements**](./docs/en/user_guide/optix_user_guide.md) | Serving optimization based on real-world measurements uses the PSO algorithm to automatically search for optimal deployment parameters that satisfy latency constraints on real serving frameworks such as vLLM and MindIE. |
+| [**Serving Optimization Based on Real-World Measurements**](./docs/en/user_guide/msmodeling_optix_user_guide.md) | Serving optimization based on real-world measurements uses the PSO algorithm to automatically search for optimal deployment parameters that satisfy latency constraints on real serving frameworks such as vLLM and MindIE. msModeling and OptiX must be installed in a uv virtual environment. vLLM, MindIE, and benchmark tools use the system deployment environment by default. |
 
 ## 🚀 Quick Start
 
@@ -198,7 +197,25 @@ To improve documentation search efficiency, we provide multiple efficient search
 
 ## 🛠️ Contribution Guide
 
-Contributions to the project are welcome. For detailed contribution procedures, coding standards, commit conventions, testing requirements, and more, see [CONTRIBUTING.md](CONTRIBUTING.md). If you have questions, open an [issue](https://gitcode.com/Ascend/msmodeling/issues).
+Contributions to the project are welcome. For detailed contribution procedures, coding standards, commit conventions, testing requirements, and more, see the [msModeling Contribution Guide](CONTRIBUTING.md). If you have questions, open an [issue](https://gitcode.com/Ascend/msmodeling/issues).
+
+### Dev Container Development Environment
+
+The repository provides a VS Code Dev Container based on Python 3.11. For the startup method, automatic initialization content, and the unified build and UT entry point, see the [Dev Container Guide](.devcontainer/README.md).
+
+### AI Native Development
+
+This repository supports AI-assisted issue drafting and review, end-to-end delivery from issue to PR/CI, multi-role and inline PR review, and
+closed-loop handling of openLiBing CI failures. The unified entry point for AI is [AGENTS.md](AGENTS.md). For workflow descriptions and business examples, see
+the [AI Native Development Guide](docs/ai-native/README.md).
+
+- Use the `gitcode` CLI for all GitCode remote operations.
+- By default, confirm each stage. You can also explicitly authorize automatic progress within a limited scope.
+- Record key decisions and verification evidence in issue/PR comments.
+- You can pause, modify the plan, take over, or resume at any time.
+- AI does not automatically approve, merge, force push, or bypass gates.
+
+Example: `Implement Issue 123. First provide the requirement analysis and solution, have me confirm each key stage, and leave an audit record in the issue/PR.`
 
 ## ⚖️ Related Information
 
@@ -219,16 +236,5 @@ Everyone is welcome to contribute to the community. If you have any questions or
 
 ## 🙏 Acknowledgments
 
-This tool is jointly contributed by the following companies and departments, in no particular order:
-
-🔹 **Huawei**<br>
-&emsp;&emsp;Ascend Computing Products Department<br>
-&emsp;&emsp;Zhanlu and AI Workload<br>
-&emsp;&emsp;2012 Network Technology Laboratory and 2012 Markov Laboratory<br>
-&emsp;&emsp;Xiaoqiaoling Strike Team and OTT Systems Department
-
-🔹 **Ant Group**
-
-🔹 **China Academy of Information and Communications Technology**
-
-Thank you to all community contributors for every PR. Contributions are welcome.
+This tool is jointly contributed by Huawei Technologies Co., Ltd. and developers.<br>
+Thanks for every PR from the community, and contributions are welcome.

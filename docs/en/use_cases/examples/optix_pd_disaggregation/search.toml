@@ -1,0 +1,146 @@
+# DSv4 + vLLM + AISBench: PD disaggregation search template
+# Companion guide: ../../../quick_start/optix_pso_pd_disaggregation.md
+n_particles = 10
+iters = 4
+optimizer_strategy = "pso"
+output = "./result/pd_dsv4"
+skip_pso = false
+manage_simulator_lifecycle = true
+use_request_rate_calibration = false
+
+# Plugin initialization configuration; the actual P/D benchmark configurations are written separately in the stages below.
+[ais_bench.command]
+models = "optix_dsv4_prefill"
+mode = "perf"
+
+# Service information required for plugin initialization; the actual P/D startup configurations are written separately in the stages below.
+[vllm.command]
+host = "127.0.0.1"
+port = "8900"
+model = "/dl/weight/DeepSeek-V4-Flash-w8a8-mtp"
+served_model_name = "dsv4"
+
+[pd_disagg]
+total_devices = 24 # 24 is for ratio demonstration only; change it according to the final deployment resources
+prefill_devices_per_instance = 8
+decode_devices_per_instance = 8
+top_k = 0 # No candidate fine-tuning; the best result is still validated and the instance ratio is calculated
+use_full_device = true
+
+# Prefill: prefix caching disabled, benchmark with 1 output token, focus on TTFT.
+[pd_disagg.prefill]
+benchmark_policy = "ais_bench"
+ttft_slo = 3
+ttft_penalty = 1
+tpot_penalty = 0
+benchmark_run_count = 1
+
+[[pd_disagg.prefill.target_field]]
+name = "MAX_NUM_BATCHED_TOKENS"
+config_position = "run"
+min = 8192
+max = 65536
+dtype = "int"
+value = 8192
+
+[[pd_disagg.prefill.target_field]]
+name = "MAX_NUM_SEQS"
+config_position = "run"
+dtype = "enum"
+value = 32
+dtype_param = [24, 32]
+
+[[pd_disagg.prefill.target_field]]
+name = "CONCURRENCY"
+config_position = "env"
+min = 20
+max = 32
+dtype = "enum"
+dtype_param = [20, 24, 28, 32]
+value = 24
+
+[[pd_disagg.prefill.target_field]]
+name = "NUM_PROMPTS"
+config_position = "env"
+dtype = "times"
+dtype_param = {target_name = "CONCURRENCY", product = 4, dtype = "int"}
+value = 96
+
+[[pd_disagg.prefill.target_field]]
+name = "REQUESTRATE"
+config_position = "env"
+min = 0
+max = 0
+dtype = "float"
+value = 0
+
+[pd_disagg.prefill.simulator_command_overrides]
+host = "127.0.0.1"
+port = "8900"
+model = "/dl/weight/DeepSeek-V4-Flash-w8a8-mtp"
+served_model_name = "dsv4"
+others = "--data-parallel-size 1 --tensor-parallel-size 8 --quantization ascend --seed 1024 --enable-expert-parallel --max-model-len 196608 --async-scheduling --trust-remote-code --no-enable-prefix-caching --speculative-config '{\"num_speculative_tokens\":3,\"method\":\"mtp\",\"enforce_eager\":true}' --gpu-memory-utilization 0.9 --compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}' --block-size 128 --additional-config '{\"ascend_compilation_config\":{\"enable_npugraph_ex\":true, \"enable_static_kernel\":false},\"enable_dsa_cp\":true,\"multistream_overlap_shared_expert\":true}'"
+
+[pd_disagg.prefill.benchmark_command_overrides]
+models = "optix_dsv4_prefill"
+mode = "perf"
+others = "--datasets gsm8k_gen_0_shot_cot_str_perf --num-prompts $NUM_PROMPTS"
+
+# Decode: prefix caching enabled, benchmark two consecutive rounds, focus on TPOT.
+[pd_disagg.decode]
+benchmark_policy = "ais_bench"
+benchmark_run_count = 2
+tpot_slo = 0.05
+ttft_penalty = 0
+tpot_penalty = 1
+
+[[pd_disagg.decode.target_field]]
+name = "MAX_NUM_BATCHED_TOKENS"
+config_position = "run"
+dtype = "enum"
+dtype_param = [4096, 8192]
+value = 8192
+
+[[pd_disagg.decode.target_field]]
+name = "MAX_NUM_SEQS"
+config_position = "run"
+min = 32
+max = 512
+dtype = "int"
+value = 64
+
+[[pd_disagg.decode.target_field]]
+name = "CONCURRENCY"
+config_position = "env"
+min = 20
+max = 32
+dtype = "enum"
+dtype_param = [20, 24, 28, 32]
+value = 24
+
+[[pd_disagg.decode.target_field]]
+name = "NUM_PROMPTS"
+config_position = "env"
+dtype = "times"
+dtype_param = {target_name = "CONCURRENCY", product = 4, dtype = "int"}
+value = 96
+
+[[pd_disagg.decode.target_field]]
+name = "REQUESTRATE"
+config_position = "env"
+min = 0
+max = 0
+dtype = "float"
+value = 0
+
+[pd_disagg.decode.simulator_command_overrides]
+host = "127.0.0.1"
+port = "8900"
+model = "/dl/weight/DeepSeek-V4-Flash-w8a8-mtp"
+served_model_name = "dsv4"
+others = "--data-parallel-size 1 --tensor-parallel-size 8 --quantization ascend --seed 1024 --enable-expert-parallel --max-model-len 196608 --async-scheduling --trust-remote-code --enable-prefix-caching --speculative-config '{\"num_speculative_tokens\":3,\"method\":\"mtp\",\"enforce_eager\":true}' --gpu-memory-utilization 0.9 --compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}' --block-size 128 --additional-config '{\"ascend_compilation_config\":{\"enable_npugraph_ex\":true, \"enable_static_kernel\":false},\"enable_dsa_cp\":true,\"multistream_overlap_shared_expert\":true}'"
+
+[pd_disagg.decode.benchmark_command_overrides]
+models = "optix_dsv4_decode"
+mode = "perf"
+others = "--datasets gsm8k_gen_0_shot_cot_str_perf --num-prompts $NUM_PROMPTS --summarizer stable_stage"

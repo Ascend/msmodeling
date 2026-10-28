@@ -398,8 +398,8 @@ dtype_param = "max_batch_size"
 | 二元派生 | `share` | `target.min + target.max - target.value`（互补） | 依赖字段名（字符串） |
 | 二元派生 | `factories` | `product ÷ target` | `{"target_name": "字段名", "product": 值, "dtype": "int"}` |
 | 二元派生 | `times` | `product × target` | `{"target_name": "字段名", "product": 值, "dtype": "int"}` |
-| **三元派生** | **`ternary_factories`** | **`product ÷ (field_a × field_b)`** | **`{"target_names": ["A", "B"], "product": 值, "dtype": "int"}`** |
-| **三元派生** | **`ternary_times`** | **`product × field_a × field_b`** | **`{"target_names": ["A", "B"], "product": 值, "dtype": "int"}`** |
+| 三元派生 | `ternary_factories` | `product ÷ (field_a × field_b)` | `{"target_names": ["A", "B"], "product": 值, "dtype": "int"}` |
+| 三元派生 | `ternary_times` | `product × field_a × field_b` | `{"target_names": ["A", "B"], "product": 值, "dtype": "int"}` |
 
 > [!NOTE]
 > 派生类型字段（`factories` / `times` / `ternary_factories` / `ternary_times`）的值由依赖关系自动推导，**不参与粒子群搜索**，需将 `min` 和 `max` 均设为 `0`。若任一依赖字段值为 `0`（除法场景）或 `None`/`NaN`（乘法场景），本轮推导跳过，字段保持原值并输出警告日志。

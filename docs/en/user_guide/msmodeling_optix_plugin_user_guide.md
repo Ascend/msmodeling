@@ -26,11 +26,11 @@ The process of developing a custom plugin is as follows:
 
 | Step | Objective | Key Operation |
 | --- | --- | --- |
-| 1 | Create the plugin project | Create an independent Python project and prepare `pyproject.toml`. |
-| 2 | Implement extension classes | Inherit from `Settings`, `SimulatorInterface`, or `BenchmarkInterface` as needed. |
-| 3 | Register the extension | Implement `register()` in the plugin package and call the OptiX registration function. |
-| 4 | Declare the entry point | Add `[project.entry-points.'optix.plugins']` to `pyproject.toml`. |
-| 5 | Install and verify | Run `pip install -e .` and confirm that the extension is loaded by running `msmodeling optix -h`. |
+| 1 | Create the plugin project. | Create an independent Python project and prepare `pyproject.toml`. |
+| 2 | Implement extension classes. | Inherit from `Settings`, `SimulatorInterface`, or `BenchmarkInterface` as needed. |
+| 3 | Register the extension. | Implement `register()` in the plugin package and call the OptiX registration function. |
+| 4 | Declare the entry point. | Add `[project.entry-points.'optix.plugins']` to `pyproject.toml`. |
+| 5 | Install and verify. | Run `pip install -e .` and confirm that the extension is loaded by running `msmodeling optix -h`. |
 
 ## Procedure for Developing the Custom Plugin
 
@@ -100,6 +100,8 @@ The process of developing a custom plugin is as follows:
     register_simulator("vllm_infer", VllmSimulator)
     ```
 
+    If the plugin depends on an executable in `PATH`, such as `vllm`, declare `required_executable = "vllm"` on the implementation class. The framework automatically validates it before constructing the plugin for `-e`. You do not need to write `shutil.which` in the plugin. Engines that use a fixed installation path, such as MindIE, can omit this attribute.
+
 ### Customizing a Performance Benchmark Tool
 
 1. Inherit from `optix.optimizer.benchmark.BenchmarkInterface` and implement the `data_field` property and `get_performance_index` methods.
@@ -144,6 +146,8 @@ Example:
     register_benchmarks("vllm_infer_benchmark", VllmBenchMark)
     ```
 
+    If the benchmark tool depends on a CLI in `PATH`, declare `required_executable = "your_tool"` on the implementation class. The framework automatically validates it before constructing the plugin for `-b`.
+
 3. Set the plugin entry point.
 
     Add your custom registration function to the entry point group 'optix.plugins'.
@@ -179,14 +183,13 @@ Example:
 
     ```text
     options:
-    -h, --help show this help message and exit
-    -lb, --load_breakpoint
-    Continue from where the last optimization was aborted.
-    --backup Whether to back up data.
-    -e {vllm, vllm_infer}, --engine {vllm, vllm_infer}
-    Specifies the engine to be used.
-    -b {vllm_benchmark, vllm_infer_benchmark}, --benchmark {vllm_benchmark, vllm_infer_benchmark}
-    Specified benchmark to be used.
+    -h, --help            show this help message and exit
+    --load-breakpoint     Continue from where the last optimization was aborted.
+    --backup              Back up optimizer data.
+    -e {vllm,vllm_infer}, --engine {vllm,vllm_infer}
+                          Engine used for model evaluation.
+    -b {vllm_benchmark,vllm_infer_benchmark,ais_bench}, --benchmark-policy {vllm_benchmark,vllm_infer_benchmark,ais_bench}
+                          Benchmark used for custom performance indicators.
     ```
 
     Run optimization using the specified plugin module:
@@ -194,3 +197,19 @@ Example:
     ```bash
     msmodeling optix -e vllm_infer -b vllm_infer_benchmark
     ```
+
+## P/D Service Parameter Search Plugin Extension Point
+
+The built-in `--mode pd_disagg` still uses the existing `register_simulator()` and `register_benchmarks()` registration entry points. A P/D phase plugin can optionally implement the following:
+
+```python
+def configure_pd_phase(self, *, phase_name, phase_config):
+    """Refresh the command or traffic semantics based on the prefill/decode phase."""
+```
+
+A Prefill benchmark plugin must set the output length to 1 token in the Prefill phase so that the request ends after the first token, minimizing the effect of the Decode
+process on the measurement. The parameter name is determined by the specific benchmark. For example, pass the equivalent `output_len=1` through its own command configuration. Both P/D phase plugins must return the request throughput as a positive `throughput` value in req/s. The core orchestrator uses this value directly as the QPS of each phase and does not fall back to formulas based on TTFT, TPOT, or the concurrency level.
+
+`pd_disagg` calls this extension point only to search for Prefill and Decode service parameters and recommend a ratio. After you start the complete PD service, use the regular
+`standard` mode to set `skip_pso=true` and `manage_simulator_lifecycle=false` to adjust the benchmark-side concurrency and request rate.
+This step does not call the PD simulator plugin. The TTFT/TPOT values output by the plugin must be in seconds, and throughput must be in req/s.

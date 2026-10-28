@@ -21,7 +21,7 @@ The ServingCast simulation is based on YAML configuration. It simulates end-to-e
 
 ## 2 Environment Requirements
 
-Before running a ServingCast simulation, complete the environment setup (Python 3.10+ recommended). For details, see [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md).
+Before running a ServingCast simulation, complete the environment setup (Python 3.10+ recommended). For details, see the [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md).
 
 ## 3 Input Configuration
 
@@ -32,16 +32,16 @@ The service simulation relies on two YAML configuration files:
 | instance_config_path  | Describes one or more instance groups, for example, role, number of instances, and TP/DP modes. |
 | common_config_path    | Describes global configuration, for example, model architecture, request workload, serving limits, and simulation parameters. |
 
-### 3.1 MTP support contract
+### 3.1 MTP Support Contract
 
-Set `model_config.num_mtp_tokens` to the number of speculative tokens. `model_config.mtp_acceptance_rate` defaults to `[0.9, 0.6, 0.4, 0.2]`, so `num_mtp_tokens <= 4` needs no override; provide at least that many finite values in `[0, 1]` when using more speculative tokens or custom rates. Decode queries use a full `num_mtp_tokens + 1` token window, while request sequence length and KV growth retain accepted tokens only.
+`model_config.num_mtp_tokens` indicates the number of speculative tokens. `model_config.mtp_acceptance_rate` defaults to [0.9, 0.6, 0.4, 0.2]. Therefore, you do not need to override the default value when `num_mtp_tokens <= 4`. When you use more speculative tokens or a custom acceptance rate, provide at least the same number of finite values in the range [0, 1]. The decode query window is fixed at `num_mtp_tokens + 1`. The request sequence length and the KV increment retain only the accepted tokens.
 
-| Mode | MTP support |
+| Mode | MTP Support |
 | --- | --- |
-| Aggregated and P/D-disaggregated serving | Supported |
-| Interpolation | Not supported; set `model_config.enable_interpolate: false` |
-| Multi-process prediction | Not supported; set `model_config.enable_multi_process: false` |
-| Mixed Prefill/Decode scheduler batch | Modeled as serial homogeneous Prefill-only and Decode-only calls; not a real mixed-batch latency model |
+| PD aggregation and PD disaggregation serving | Supported |
+| interpolation | Not supported yet. Set `model_config.enable_interpolate: false`. |
+| multi-process prediction | Not supported yet. Set `model_config.enable_multi_process: false`. |
+| Mixed Prefill/Decode in the same step | Serially split into homogeneous Prefill-only and Decode-only invocations. This does not represent real mixed-batch latency. |
 
 ## 4 Running Simulation
 
@@ -55,7 +55,7 @@ Run a service inference simulation driven by YAML configuration files.
 required arguments:
   --instance_config_path INSTANCE_CONFIG_PATH [INSTANCE_CONFIG_PATH ...]
                         Path to a YAML file that declares one or more instance groups.
-                        Each group defines a homogeneous pool of nodes (role, count, TP/DP modes)
+                        Each group defines a homogeneous pool of nodes (role, count, TP/DP parallelism)
                         and can be mixed-and-matched in a single benchmark run.
   --common_config_path COMMON_CONFIG_PATH
                         Path to a YAML file with global settings: model architecture,
@@ -85,6 +85,16 @@ Example:
 python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml
 ```
 
+- PD disaggregation usage
+
+`serving_cast/example/pd_disaggregation/` provides a complete example of split prefill and decode deployment (instance topology, resource configuration, request workload, KV transfer parameters, and result interpretation). You can run it with a single command:
+
+```bash
+bash serving_cast/example/pd_disaggregation/run_pd_disaggregation.sh
+```
+
+For the meaning of the fields, how to adjust the P:D ratio, and common failure causes, see [PD Disaggregation Simulation Example](../../../serving_cast/example/pd_disaggregation/README.md).
+
 ### 4.1 Result
 
 After the simulation finishes, the console prints a performance summary similar to the following:
@@ -111,10 +121,10 @@ output_token_throughput(tok/s) 285.598
 Metric descriptions:
 
 - `E2E_TIME`: end-to-end latency per request (issue → last token)
-- `CLIENT_TTFT`: request departure to first token
-- `SERVER_TTFT`: server admission to first token
-- `ADMISSION_WAIT`: request departure to server admission; `CLIENT_TTFT = SERVER_TTFT + ADMISSION_WAIT`
-- `TPOT`: canonical request-level time per output token after the first token; one-output-token requests report zero
+- `CLIENT_TTFT`: from the time the request leaves the client to the first token
+- `SERVER_TTFT`: from the time the server admits the request to the first token
+- `ADMISSION_WAIT`: from the time the request leaves the client to the time the server admits it. `CLIENT_TTFT = SERVER_TTFT + ADMISSION_WAIT`.
+- `TPOT`: standard per-output-token time at the request level after the first token. It is zero when there is only one output token.
 - `OUTPUT_TOKEN_THROUGHPUT`: per-request output-token rate
 - `request_throughput`: system-wide request rate
 - `input_token_throughput`/`output_token_throughput`: aggregate token throughput

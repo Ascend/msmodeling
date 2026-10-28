@@ -29,7 +29,7 @@
 python -m venv .venv
 .venv\Scripts\activate
 # 2. 安装 msmodeling（以下为示例链接）
-pip install https://gitcode.com/Ascend/msmodeling/releases/download/tag_MindStudio_26.1.0.B100_002/msmodeling-26.1.0-py3-none-any.whl
+pip install https://gitcode.com/Ascend/msmodeling/releases/download/tag_MindStudio_26.2.0.B110_001/msmodeling-26.2.0-py3-none-any.whl
 ```
 
 ### 2.2 离线安装
@@ -49,7 +49,7 @@ pip install https://gitcode.com/Ascend/msmodeling/releases/download/tag_MindStud
 python -m venv .venv
 .venv\Scripts\activate
 # 2. 安装 msmodeling（以下为示例文件名）
-pip install msmodeling-26.1.0-py3-none-any.whl
+pip install msmodeling-26.2.0-py3-none-any.whl
 ```
 
 ### 2.3 源码安装
@@ -133,7 +133,7 @@ msmodeling --help
 1. 下载脚本。
 
    ```bash
-   curl -O https://inst.obs.cn-north-4.myhuaweicloud.com/26.1.0/ms_install.py
+   curl -O https://inst.obs.cn-north-4.myhuaweicloud.com/26.2.0/ms_install.py
    ```
 
    > [!NOTE]
@@ -189,7 +189,7 @@ pip show msmodeling
     ```bash
     cd msmodeling
     git fetch
-    git checkout 26.1.0
+    git checkout 26.2.0
     git pull
     ```
 
@@ -206,7 +206,7 @@ pip show msmodeling
     pip install --upgrade -e .
     ```
 
-升级版本时需要关注版本配套关系，请参见《[版本说明](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.1.0/release_notes.md)》。
+升级版本时需要关注版本配套关系，请参见《[版本说明](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.2.0/release_notes.md)》。
 
 ## 6. 附录
 
