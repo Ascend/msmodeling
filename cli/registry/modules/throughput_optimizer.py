@@ -314,7 +314,10 @@ TARGET_QPS = Param(
     data_type="number",
     default=None,
     min=0,
-    exclusive_min=True,
+    # Numeric threshold: 0 means "strictly positive". Passing True here compares
+    # against 1.0 and rejects every target at or below 1 req/s, which
+    # low-throughput decode instances legitimately need.
+    exclusive_min=0,
     group="Service Options",
     cli_metavar="<FLOAT>",
     cli_help=(

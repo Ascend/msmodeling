@@ -795,6 +795,21 @@ class TestCapacityPlanningArgSemantics(TestCase):
         args = self._parse_args(["--target-qps=1000", "--num-devices=1"])
         self.assertEqual(args.num_devices, 1)
 
+    def test_target_qps_rejects_non_positive_values(self):
+        for value in ("0", "-1"):
+            with self.assertRaises(SystemExit):
+                self._parse_args([f"--target-qps={value}"])
+
+    def test_target_qps_accepts_positive_values_at_or_below_one(self):
+        """Regression: exclusive_min=True turned the bound into "> 1.0".
+
+        Low-throughput decode instances legitimately need targets below one
+        request per second (the E2E harness reconstructs 0.014 req/s), so the
+        parameter must accept any positive value.
+        """
+        for value in ("0.014", "0.5", "1", "1.0"):
+            self.assertAlmostEqual(self._parse_args([f"--target-qps={value}"]).target_qps, float(value))
+
     def test_num_devices_default_is_unchanged_without_target_qps(self):
         args = self._parse_args([])
         self.assertEqual(args.num_devices, 1)
@@ -872,6 +887,38 @@ class TestCapacityPlanningModeSelection(TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(config.mode, "aggregation")
         self.assertIsNone(config.num_devices)
+
+
+class TestCapacityPlanningAutoModeCli(TestCase):
+    """Auto mode must survive the device-count gate it cannot satisfy itself.
+
+    ``--target-qps`` without ``--num-devices`` clears the device count, so
+    ``main()`` previously compared the comm grid against ``None`` and crashed
+    before ``CapacityPlanner`` could derive the budgets.
+    """
+
+    def test_main_reaches_capacity_planning_without_num_devices(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "Qwen/Qwen3-32B",
+            "--device=TEST_DEVICE",
+            "--input-length=1024",
+            "--output-length=512",
+            "--ttft-limit=500",
+            "--target-qps=1",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(throughput_optimizer_module, "print_logo"),
+            patch.object(throughput_optimizer_module, "configure_std_logging"),
+            patch.object(throughput_optimizer_module, "run_capacity_planning", return_value=0) as mock_capacity,
+        ):
+            self.assertEqual(throughput_optimizer_module.main(), 0)
+
+        mock_capacity.assert_called_once()
+        self.assertIsNone(mock_capacity.call_args.args[0].num_devices)
 
 
 @pytest.mark.nightly

@@ -98,7 +98,12 @@ def check_device_targets(args: argparse.Namespace, logger: logging.Logger) -> li
 
     for name in targets:
         grid_n = profiles[name].comm_grid.grid.nelement()
-        if grid_n < args.num_devices:
+        # Capacity planning with --target-qps clears num_devices when it was not
+        # passed explicitly, because the device count is then an output of the
+        # search. CapacityPlanner validates every budget it derives against this
+        # same comm_grid bound, so comparing None here would crash before that
+        # validation can run.
+        if args.num_devices is not None and grid_n < args.num_devices:
             logger.error(
                 "Device profile %r cannot model num_devices=%s (communication grid size is %s).",
                 name,

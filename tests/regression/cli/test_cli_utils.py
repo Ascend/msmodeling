@@ -217,6 +217,19 @@ def test_check_device_targets_rejects_undersized_comm_grid(device_profiles: dict
     assert check_device_targets(args, logging.getLogger("cli.utils.test")) is None
 
 
+def test_check_device_targets_allows_capacity_planning_auto_mode(
+    device_profiles: dict[str, _DummyProfile],
+) -> None:
+    """--target-qps clears num_devices; CapacityPlanner validates each budget.
+
+    Comparing the comm grid against a derived ``None`` crashed before the
+    planner could run, so auto mode was unusable.
+    """
+    args = argparse.Namespace(device=["TEST_DEVICE"], num_devices=None)
+
+    assert check_device_targets(args, logging.getLogger("cli.utils.test")) == ["TEST_DEVICE"]
+
+
 def test_require_model_id_positional_only_error_does_not_mention_option(capsys: pytest.CaptureFixture[str]) -> None:
     parser = argparse.ArgumentParser(prog="text-generate")
     parser.add_argument("model_id", nargs="?")
