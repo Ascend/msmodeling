@@ -19,9 +19,10 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+import itertools
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import torch
@@ -348,6 +349,26 @@ def build_pipeline_plan(
             raise ValueError(
                 f"pp_layer_partition sum ({partition_sum}) must equal num_hidden_layers ({num_hidden_layers}) "
                 f"for pp_size ({pp_size})."
+            )
+    indexer_types = getattr(text_config, "indexer_types", None)
+    if (
+        getattr(text_config, "model_type", None) == "glm_moe_dsa"
+        and isinstance(indexer_types, list)
+        and "shared" in indexer_types
+    ):
+        if len(indexer_types) < num_hidden_layers:
+            raise ValueError(
+                f"GLM5 indexer_types has {len(indexer_types)} entries, "
+                f"but num_hidden_layers is {num_hidden_layers}; cannot validate PP layer boundaries."
+            )
+        boundaries = tuple(itertools.accumulate(stage_layer_counts))[:-1]
+        invalid = [boundary for boundary in boundaries if indexer_types[boundary] == "shared"]
+        if invalid:
+            valid = [idx for idx in range(1, num_hidden_layers) if indexer_types[idx] == "full"]
+            raise ValueError(
+                f"PP layer boundary {invalid} starts a shared indexer layer. "
+                "Set --pp-layer-partitions so each cumulative stage boundary starts a full indexer layer; "
+                f"valid boundary indices are {valid}. Current partition: {list(stage_layer_counts)}."
             )
     layer_start = 0
     stages = []

@@ -1146,6 +1146,32 @@ class TestDeepseekV4KvCacheHelpers:
 
         assert set(info["indexer_cache_by_layers"]) == {0, 4}
 
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_glm5_pipeline_global_config_extends_indexers_for_mtp(self, _mock_attn_quant):
+        model = MagicMock()
+        model.num_hidden_layers = 7
+        target_indexers = ["full", "shared", "shared", "shared"]
+        model.model_config = SimpleNamespace(
+            mla_config=SimpleNamespace(mla_cls=Glm5SparseAttention),
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(model_type="glm_moe_dsa", indexer_types=target_indexers),
+            mtp_config=SimpleNamespace(num_mtp_layers=3),
+            has_draft_spec=lambda: False,
+        )
+        model._inner = None
+        model.text_config = None
+        model.unwrap.return_value = SimpleNamespace(
+            layers=[
+                SimpleNamespace(self_attn=MagicMock(use_indexer=True, _index_head_dim=128, indexer=None))
+                for _ in range(7)
+            ]
+        )
+
+        info = get_sparse_attention_indexer_cache_info(model, num_blocks=4, block_size=16)
+
+        assert set(info["indexer_cache_by_layers"]) == {0, 4, 5, 6}
+        assert target_indexers == ["full", "shared", "shared", "shared"]
+
 
 class TestDsparkKvCacheHelpers:
     def test_non_dspark_cache_keeps_original_block_count(self):

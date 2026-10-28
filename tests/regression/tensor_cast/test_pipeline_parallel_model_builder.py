@@ -562,6 +562,29 @@ def test_build_pipeline_plan_accepts_explicit_layer_partition():
     assert plan.stages[2].layer_types == tuple(f"layer_{idx}" for idx in range(40, 60))
 
 
+def test_build_pipeline_plan_explains_glm5_shared_indexer_boundary():
+    model_config = _make_model_config(num_layers=78, pp_size=4, world_size=8)
+    model_config.hf_config.model_type = "glm_moe_dsa"
+    model_config.hf_config.indexer_types = ["full", "full", "full"] + [
+        "full" if (idx - 2) % 4 == 0 else "shared" for idx in range(3, 78)
+    ]
+
+    with pytest.raises(ValueError, match=r"PP layer boundary .*--pp-layer-partitions.*valid boundary indices"):
+        build_pipeline_plan(model_config, pp_size=4, layer_partition=(20, 20, 19, 19))
+
+    plan = build_pipeline_plan(model_config, pp_size=4, layer_partition=(22, 20, 20, 16))
+    assert [stage.layer_start for stage in plan.stages] == [0, 22, 42, 62]
+
+
+def test_build_pipeline_plan_rejects_short_glm5_indexer_types_before_boundary_lookup():
+    model_config = _make_model_config(num_layers=78, pp_size=4, world_size=8)
+    model_config.hf_config.model_type = "glm_moe_dsa"
+    model_config.hf_config.indexer_types = ["full", *["shared"] * 74]
+
+    with pytest.raises(ValueError, match="indexer_types has 75 entries, but num_hidden_layers is 78"):
+        build_pipeline_plan(model_config, pp_size=4, layer_partition=(20, 20, 36, 2))
+
+
 @pytest.mark.parametrize(
     ("layer_partition", "match"),
     [

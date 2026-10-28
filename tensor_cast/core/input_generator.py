@@ -32,7 +32,12 @@ import torch
 
 from ..layers.attention import AttentionMetadataTensorCast
 from ..layers.deepseek_v41 import DeepseekV41SharedAttentionState, EngramHashState, resolve_csa2_layer_role
-from ..layers.glm5 import get_glm5_indexer_types, glm5_uses_indexshare, resolve_glm5_indexer_source_layer
+from ..layers.glm5 import (
+    extend_glm5_indexer_types_for_mtp,
+    get_glm5_indexer_types,
+    glm5_uses_indexshare,
+    resolve_glm5_indexer_source_layer,
+)
 from ..layers.sampler import SamplingMetadata, SpecDecodeMetadata
 from ..model_config import config_has_draft_spec
 from ..performance_model import bytes_of_tensor
@@ -672,7 +677,22 @@ def _get_glm5_indexshare_indexer_types(model) -> list[str] | None:
     glm5_config = _get_glm5_indexshare_config(model)
     if glm5_config is None or not glm5_uses_indexshare(glm5_config):
         return None
-    return get_glm5_indexer_types(glm5_config)
+    indexer_types = get_glm5_indexer_types(glm5_config)
+    mtp_config = getattr(getattr(model, "model_config", None), "mtp_config", None)
+    mtp_layers = int(getattr(mtp_config, "num_mtp_layers", 0) or 0)
+    # PipelineModel exposes the global target config (without the last stage's
+    # MtpWrapper metadata), while num_hidden_layers includes its MTP tail.
+    if mtp_layers and len(indexer_types) + mtp_layers == model.num_hidden_layers:
+        indexer_types = list(indexer_types)
+        extend_glm5_indexer_types_for_mtp(indexer_types, mtp_layers)
+    elif mtp_layers:
+        logger.debug(
+            "GLM5 indexer_types MTP extension skipped: len=%d, mtp_layers=%d, num_hidden_layers=%d",
+            len(indexer_types),
+            mtp_layers,
+            model.num_hidden_layers,
+        )
+    return indexer_types
 
 
 def _glm5_indexshare_layer_owns_indexer_cache(indexer_types: list[str] | None, layer_idx: int) -> bool:
