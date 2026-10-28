@@ -89,7 +89,9 @@ def check_declarative(
         if field.choices is not None:
             allowed = [getattr(c, "value", c) for c in field.choices]
             # For array types (e.g. string[]), validate each element
-            if field.data_type.endswith("[]"):
+            # Also check cli_action="append" which makes scalar types into lists
+            is_array = field.data_type.endswith("[]") or getattr(field, "cli_action", None) == "append"
+            if is_array:
                 if isinstance(val, list):
                     for item in val:
                         if item not in allowed:
@@ -104,7 +106,8 @@ def check_declarative(
                     return f"Field '{field.name}' must be one of [{allowed_str}{suffix}], got {val!r}"
 
         # String constraints
-        if field.data_type == "string":
+        # Skip for cli_action="append" fields (they are lists, not strings)
+        if field.data_type == "string" and getattr(field, "cli_action", None) != "append":
             if not isinstance(val, str):
                 return f"Field '{field.name}' must be a string, got {type(val).__name__}"
 

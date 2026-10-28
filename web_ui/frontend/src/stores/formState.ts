@@ -137,18 +137,14 @@ export const useFormStateStore = defineStore('formState', () => {
   }
 
   // Get current form values. Statically hidden fields (schema `hidden: true`
-  // from backend ui_props) are excluded so the submitted payload matches what
-  // the baseline form sent — the backend applies Param defaults for them.
-  // Conditionally-disabled fields (conditions.enabled evaluates to false) are
-  // also excluded to prevent invalid CLI commands (e.g., dspark params with dflash).
+  // from backend ui_props) are INCLUDED — hidden only means "no visible
+  // control"; the value (schema default or a programmatic override, e.g.
+  // model-features) must still reach the backend. Conditionally-disabled
+  // fields (conditions.enabled evaluates to false) are excluded to prevent
+  // invalid CLI commands (e.g., dspark params with dflash).
   function getFormValues(): FormModel {
-    const hidden = new Set(
-      (schema.value?.fields ?? []).filter((f: any) => f.hidden).map((f: any) => f.id),
-    )
     const out: FormModel = {}
     for (const [k, v] of Object.entries(form.value)) {
-      if (hidden.has(k)) continue
-
       // Check if field is disabled by conditions
       const field = (schema.value?.fields ?? []).find((f: any) => f.id === k)
       if (field?.conditions?.enabled) {

@@ -29,22 +29,47 @@ import { useOptionSources } from '@/composables/useOptionSources'
 import { useFormValidation } from '@/composables/useFormValidation'
 import { useLocale } from '@/composables/useLocale'
 import { useFormConfigs } from '@/composables/useConfig'
+import { useModelFeatures } from '@/composables/useModelFeatures'
 import type { Option } from '@/composables/useOptionSources'
 import SchemaFormItem from './SchemaFormItem.vue'
 import { trackEvent } from '@/services/telemetrySink'
+import {
+  expandBenchmarkConventionFields,
+  collapseToBenchmarkConventionFields,
+  expandQuantizePresetToFields,
+} from '@/utils/benchmark'
 
 interface Props {
   moduleId: string
   loading?: boolean
+  skipResetOnSchemaChange?: boolean
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  skipResetOnSchemaChange: false,
+})
 const emit = defineEmits<{
   submit: [data: { moduleId: string; params: Record<string, any>; formSchemaVersion: string; explicitlyTouched: string[] }]
 }>()
 
 const { t } = useLocale()
 const formState = useFormStateStore()
+
+// Helper function to get default value for a data type
+function getDefaultValueForType(dataType: string): any {
+  switch (dataType) {
+    case 'boolean':
+      return false
+    case 'integer':
+    case 'number':
+      return 0
+    case 'string[]':
+    case 'integer[]':
+      return []
+    default:
+      return ''
+  }
+}
 
 // Dev-only test hook: expose the (singleton) form store so Playwright e2e can
 // set field values directly by id. Element Plus el-form-item does NOT render a
@@ -53,7 +78,7 @@ const formState = useFormStateStore()
 if (import.meta.env?.DEV) {
   ;(window as any).__formState = formState
 }
-const { getForm, loadFormSchema, isLoading: isSchemaLoading, getLoadError } = useFormConfigs()
+const { loadFormSchema, isLoading: isSchemaLoading, getLoadError } = useFormConfigs()
 const { revalidateDependents, validateForm, validateFormInvariants } =
   useFormValidation(computed(() => formState.schema), computed(() => formState.form), computed(() => formState.fieldStates))
 
@@ -84,6 +109,23 @@ const optionSourcesRegistry = computed(() => {
 const { fetchSourceOptions, isLoading: isOptionLoading, getSourceError } = useOptionSources(
   optionSourcesRegistry.value
 )
+
+// Initialize model features composable (for benchmark mode auto-fill)
+const { applyModelOverrides: rawApplyModelOverrides, getModelQuantizeConfig, getCurrentQuantizePreset, getCurrentQuantizeOverrides } = useModelFeatures()
+
+// Flag to suppress quantize-preset watcher during model override application.
+// When the model API sets both quantize-preset and underlying fields, we don't
+// want the watcher to overwrite the model's mixed-quantization settings.
+let isApplyingModelOverrides = false
+
+async function applyModelOverridesWrapped(modelId: string) {
+  isApplyingModelOverrides = true
+  try {
+    await rawApplyModelOverrides(modelId)
+  } finally {
+    isApplyingModelOverrides = false
+  }
+}
 
 // Fetch dynamic options on mount
 async function fetchDynamicOptions() {
@@ -159,11 +201,13 @@ async function retryOptions(fieldId: string) {
   const sourceName = field.optionSource.name
   // Clear prior error + cache so we actually re-fetch
   delete optionsErrors.value[fieldId]
-  optionsMap.value = { ...optionsMap.value, [fieldId]: undefined }
+  delete optionsMap.value[fieldId]
   try {
     loadingOptions.value = new Set(loadingOptions.value).add(fieldId)
     const options = await fetchSourceOptions(sourceName, optionSourcesRegistry.value)
-    optionsMap.value = { ...optionsMap.value, [fieldId]: options }
+    if (options) {
+      optionsMap.value[fieldId] = options
+    }
   } catch {
     optionsErrors.value[fieldId] = getSourceError(sourceName) || 'Failed to load options'
   } finally {
@@ -178,6 +222,109 @@ onMounted(async () => {
     formState.initForm(schema)
     await fetchDynamicOptions()
   }
+})
+
+// Watch for moduleId changes (e.g., switching between full/benchmark mode)
+watch(
+  () => props.moduleId,
+  async (newModuleId, oldModuleId) => {
+    if (newModuleId === oldModuleId) return
+
+    const schema = await loadFormSchema(newModuleId)
+    if (schema) {
+      if (props.skipResetOnSchemaChange) {
+        // Migrate form data: preserve shared fields, clean up mode-specific fields
+        const oldFieldIds = new Set(formState.schema?.fields?.map((f: any) => f.id) || [])
+        const oldModuleId = formState.schema?.moduleId
+
+        // Transform form data when switching between modes
+        let currentFormData = { ...formState.form }
+        if (oldModuleId === 'throughput_optimizer_benchmark' && newModuleId === 'throughput_optimizer') {
+          // Benchmark → Full: expand convention fields. Pass the (old, benchmark)
+          // schema defaults so deliberately-set values (e.g., model-feature
+          // mixed quantization) survive the preset expansion.
+          currentFormData = expandBenchmarkConventionFields(
+            currentFormData,
+            getSchemaFieldDefaults(),
+            getCurrentQuantizeOverrides(),
+            getCurrentQuantizePreset(),
+          )
+        } else if (oldModuleId === 'throughput_optimizer' && newModuleId === 'throughput_optimizer_benchmark') {
+          // Full → Benchmark: collapse expanded fields to convention fields
+          currentFormData = collapseToBenchmarkConventionFields(
+            currentFormData,
+            getCurrentQuantizeOverrides(),
+            getCurrentQuantizePreset(),
+          )
+        }
+
+        // Build new form data: keep shared fields, add defaults for new fields
+        const migratedForm: Record<string, any> = {}
+        const migratedFieldStates: Record<string, any> = {}
+
+        for (const field of schema.fields) {
+          const fieldId = field.id
+          if (currentFormData[fieldId] !== undefined) {
+            // Field exists in transformed form data: preserve value
+            migratedForm[fieldId] = currentFormData[fieldId]
+            migratedFieldStates[fieldId] = formState.fieldStates[fieldId] || {
+              touched: false,
+              dirty: false,
+            }
+          } else if (oldFieldIds.has(fieldId)) {
+            // Field existed in old schema but not in transformed data: preserve old value
+            migratedForm[fieldId] = formState.form[fieldId]
+            migratedFieldStates[fieldId] = formState.fieldStates[fieldId] || {
+              touched: false,
+              dirty: false,
+            }
+          } else {
+            // Field is new in this schema: initialize with default
+            const defaultValue = field.default !== undefined ? field.default : getDefaultValueForType(field.dataType)
+            migratedForm[fieldId] = defaultValue
+            migratedFieldStates[fieldId] = {
+              touched: false,
+              dirty: false,
+            }
+          }
+        }
+
+        // Update store with migrated data
+        formState.schema = schema
+        formState.form = migratedForm
+        formState.fieldStates = migratedFieldStates
+
+        // Re-validate with new schema
+        await validateForm()
+      } else {
+        // Default behavior: reset form with new schema
+        formState.initForm(schema)
+      }
+      await fetchDynamicOptions()
+    }
+  }
+)
+
+// Expose method to get active schema fields (for param filtering in parent)
+function getActiveSchemaFields(): string[] {
+  return formState.schema?.fields?.map((f: any) => f.id) || []
+}
+
+// Field-id → schema-default map. Convention-field expansion uses this to tell
+// "value still at default" (preset may override) from "value deliberately set"
+// (e.g., model-feature overrides — mixed quantization — must survive expansion).
+function getSchemaFieldDefaults(): Record<string, any> {
+  const defaults: Record<string, any> = {}
+  for (const f of formState.schema?.fields ?? []) {
+    defaults[f.id] = f.default
+  }
+  return defaults
+}
+
+defineExpose({
+  getActiveSchemaFields,
+  getSchemaFieldDefaults,
+  submit: handleSubmit,
 })
 
 // Watch for field changes and re-validate dependents.
@@ -315,6 +462,64 @@ watch(
   { immediate: true },
 )
 
+// Clear SLO field values when pd-mode disables them.
+// The conditions system only controls enabled/disabled state, not the value —
+// without this, a user sees a stale value in a disabled input.
+watch(
+  () => formState.form['pd-mode'],
+  (pdMode) => {
+    if (pdMode === 'pure_decode') {
+      // No prefill phase → ttft-limit is disabled, clear its value
+      if (formState.form['ttft-limit'] !== undefined && formState.form['ttft-limit'] !== null) {
+        formState.setFieldValue('ttft-limit', null)
+      }
+    } else if (pdMode === 'pure_prefill') {
+      // No decode phase → tpot-limit is disabled, clear its value
+      if (formState.form['tpot-limit'] !== undefined && formState.form['tpot-limit'] !== null) {
+        formState.setFieldValue('tpot-limit', null)
+      }
+    }
+  },
+)
+
+// Apply model-specific overrides when model-id changes (benchmark mode).
+// Fetches /api/model-features/{model_id} and fills in compilation-config,
+// quantization fields, etc. Only applies to fields not manually touched.
+watch(
+  () => formState.form['model-id'],
+  (modelId) => {
+    if (modelId && typeof modelId === 'string') {
+      applyModelOverridesWrapped(modelId)
+    }
+  },
+)
+
+// Sync quantize-preset to underlying fields when user changes the dropdown.
+// This ensures the user's explicit preset selection takes effect, overriding
+// any model-feature fills. Suppressed during applyModelOverrides to preserve
+// the model's mixed-quantization settings (e.g., W4A8C8 with non-expert=W8A8).
+// If user selects the same preset as the model's, restore model's special values.
+watch(
+  () => formState.form['quantize-preset'],
+  (preset) => {
+    if (isApplyingModelOverrides) return
+    if (preset && typeof preset === 'string') {
+      // Check if the selected preset matches the model's preset
+      const modelConfig = getModelQuantizeConfig(preset)
+      if (modelConfig) {
+        // User selected the model's preset — restore model's special values
+        // (e.g., W4A8C8 with non-expert=W8A8 for DeepSeek-V4-Flash)
+        formState.setFieldValue('quantize-linear-action', [modelConfig.linear])
+        formState.setFieldValue('quantize-attention-action', [modelConfig.attention])
+        formState.setFieldValue('quantize-non-expert-linear-action', modelConfig.nonExpert)
+      } else {
+        // Different preset — expand with override-aware presets
+        expandQuantizePresetToFields(preset, formState, getCurrentQuantizeOverrides(), getCurrentQuantizePreset())
+      }
+    }
+  },
+)
+
 function toggleGroup(key: string) {
   collapsed.value = { ...collapsed.value, [key]: !collapsed.value[key] }
   trackEvent(props.moduleId, `group:${key}`, 'toggle')
@@ -336,9 +541,6 @@ function isWideField(_field: Record<string, any>): boolean {
 // Provide schema and options for child components
 provide('schema', computed(() => formState.schema))
 provide('optionsMap', optionsMap)
-
-// Expose submit so parent pages can trigger it without DOM hacks
-defineExpose({ submit: handleSubmit })
 </script>
 
 <template>

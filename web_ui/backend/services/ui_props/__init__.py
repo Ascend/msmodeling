@@ -292,6 +292,7 @@ MODEL_ID_OPTIONS: list[dict] = [
     _v("deepseek-ai/DeepSeek-V3"),
     _v("deepseek-ai/DeepSeek-V3.2"),
     _v("deepseek-ai/DeepSeek-V4-Flash"),
+    _v("deepseek-ai/DeepSeek-V4.1-Flash"),
     _v("deepseek-ai/DeepSeek-V4-Pro"),
     # --- Kimi (Moonshot) ---
     _v("moonshotai/Kimi-K2.5"),
@@ -349,6 +350,7 @@ MODEL_ID_OPTIONS: list[dict] = [
     _v("zai-org/glm-4v-9b"),
     _v("zai-org/GLM-4.5V"),
     _v("zai-org/GLM-4.6V"),
+    _v("zai-org/GLM-5.3-Flash"),
     # --- InternVL2 ---
     _v("OpenGVLab/InternVL2-1B"),
     _v("OpenGVLab/InternVL2-2B"),

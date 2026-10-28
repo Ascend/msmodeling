@@ -29,6 +29,7 @@ export const endpoints = {
   devices: '/api/options/devices',
   modules: '/api/modules',
   formSchema: (moduleId: string) => `/api/modules/${moduleId}/form-schema`,
+  modelFeatures: (modelId: string) => `/api/model-features/${encodeURIComponent(modelId)}`,
   jobs: '/api/jobs',
   job: (jobId: string) => `/api/jobs/${jobId}`,
   jobLog: (jobId: string) => `/api/jobs/${jobId}/log`,
@@ -60,6 +61,11 @@ export const api = {
       params: version ? { version } : {},
     })
     return res.data
+  },
+  /** Fetch model-specific overrides for benchmark form. */
+  async getModelFeatures(modelId: string) {
+    const res = await apiClient.get(endpoints.modelFeatures(modelId))
+    return res.data as { overrides: Record<string, any> }
   },
   /** Get options from a named dynamic source (e.g., devices). */
   async getOptions(endpoint: string) {

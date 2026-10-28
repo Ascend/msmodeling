@@ -52,6 +52,7 @@ from api.errors import register_error_handlers
 from api.routers import modules_router, options_router
 from api.routers import jobs_router
 from api.routers import cases_router
+from api.routers import model_features
 from plugins import load_plugins, PluginManager
 
 logger = logging.getLogger("msmodeling.web")
@@ -165,6 +166,7 @@ def create_app() -> FastAPI:
     app.include_router(options_router)
     app.include_router(jobs_router)
     app.include_router(cases_router)
+    app.include_router(model_features.router)
     register_error_handlers(app)
 
     @app.middleware("http")

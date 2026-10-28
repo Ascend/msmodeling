@@ -163,7 +163,7 @@ export function useJobRunner(moduleId: string) {
     void poll()
   }
 
-  async function submit(params: Record<string, any>, version: string, explicitlyTouched?: string[]) {
+  async function submit(params: Record<string, any>, version: string, explicitlyTouched?: string[], moduleIdOverride?: string) {
     submitting.value = true
     // Bump generation: any in-flight poll/result-fetch from a previous submit
     // that returns AFTER this point will see myRun !== runId and bail out, so
@@ -185,7 +185,8 @@ export function useJobRunner(moduleId: string) {
     schemaVersion.value = version
 
     try {
-      const res = await submitJob(moduleId, version, params, explicitlyTouched)
+      const effectiveModuleId = moduleIdOverride || moduleId
+      const res = await submitJob(effectiveModuleId, version, params, explicitlyTouched)
       if (!mounted || myRun !== runId) return
       jobId.value = res.job_id
       status.value = (res.status as RunStatus) || 'pending'

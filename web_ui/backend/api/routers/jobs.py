@@ -69,7 +69,7 @@ def _expand_job_cases_strict(module_id: str, params: dict[str, Any]) -> list[dic
         from runners.video_generate import _VIDEO_MULTI_FIELDS
 
         return expand_cases(params, _VIDEO_MULTI_FIELDS)
-    if module_id == "throughput_optimizer":
+    if module_id in ("throughput_optimizer", "throughput_optimizer_benchmark"):
         from runners._multicase import expand_cases
         from runners.throughput_optimizer import _THROUGHPUT_MULTI_FIELDS
 
@@ -152,9 +152,15 @@ def _to_status_response(job, **overrides):
 class JobSubmitRequest(BaseModel):
     """Request schema for POST /api/jobs."""
 
-    module_id: str = Field(..., description="Module identifier (text_generate, video_generate, throughput_optimizer)")
+    module_id: str = Field(
+        ...,
+        description="Module identifier (text_generate, video_generate, throughput_optimizer)",
+    )
     form_schema_version: str = Field(..., description="Form schema version (semver)")
-    params: dict = Field(..., description="Form field values (validated client-side; runner validates internally)")
+    params: dict = Field(
+        ...,
+        description="Form field values (validated client-side; runner validates internally)",
+    )
     explicitly_touched: list[str] | None = Field(
         None,
         description="Field IDs the user explicitly interacted with (mirrors CLI argv-present semantics for wants_provided validators)",

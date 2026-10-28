@@ -69,7 +69,7 @@ def assemble_result_envelope(
         return _assemble_text_result(records, input_config, job_id)
     elif module_id == "video_generate":
         return _assemble_video_result(records, input_config, job_id)
-    elif module_id == "throughput_optimizer":
+    elif module_id in ("throughput_optimizer", "throughput_optimizer_benchmark"):
         return _assemble_throughput_result(records, input_config, job_id)
     else:
         logger.warning(f"Unknown module_id {module_id}, returning empty envelope")
@@ -205,6 +205,9 @@ def _sweep_row_from_record(record: dict[str, Any]) -> dict[str, Any]:
         "qps": summary.get("qps"),
         "ttft_ms": summary.get("ttft_ms"),
         "tpot_ms": summary.get("tpot_ms"),
+        "input_throughput_token_s": summary.get("input_throughput_token_s"),
+        "per_card_input_throughput_token_s": summary.get("per_card_input_throughput_token_s"),
+        "per_card_output_throughput_token_s": summary.get("per_card_output_throughput_token_s"),
         "num_devices": config.get("num_devices"),
         "batch_size": config.get("batch_size"),
         # Memory columns
@@ -457,13 +460,20 @@ def _assemble_throughput_result(
             "best_config": None,
             "sweep_rows": [],
             "cross_hardware": [],
+            "pd_pairs": None,
         }
 
     # Multi-case grouping (Phase D2): if records span multiple cases (distinct
     # tpot/ttft/quant combos), build a per-case envelope. Each case's records
     # are fed back through this assembler (so each case keeps its own
     # best_config / sweep_rows / cross_hardware).
-    _CASE_FIELDS = ("device", "tpot_limits", "ttft_limits", "quantize_linear_action", "quantize_attention_action")
+    _CASE_FIELDS = (
+        "device",
+        "tpot_limits",
+        "ttft_limits",
+        "quantize_linear_action",
+        "quantize_attention_action",
+    )
     case_keys = [tuple(r.get("config", {}).get(k) for k in _CASE_FIELDS) for r in records]
     if len(set(case_keys)) > 1:
         from services.trace_store import trace_path
@@ -475,6 +485,33 @@ def _assemble_throughput_result(
                 groups[key] = []
                 order.append(key)
             groups[key].append(r)
+
+        def _case_input_config(case_records: list[dict[str, Any]]) -> dict[str, Any]:
+            """Extract input_config from a case's records for PD-pair calculation.
+
+            Multi-case grouping passes None for input_config, but each case's
+            records carry their own input/output lengths in config. Extract them
+            so PD-pair calculation works for each case independently.
+
+            Falls back to the top-level input_config if the case records don't
+            have the lengths (which can happen when the CLI doesn't write them
+            to the config).
+            """
+            first = case_records[0] if case_records else {}
+            config = first.get("config", {})
+            # Try to extract from config first (CLI may write them)
+            in_len = config.get("input_length") or config.get("input-length")
+            out_len = config.get("output_length") or config.get("output-length")
+            # Fall back to top-level input_config if not in config
+            if in_len is None or out_len is None:
+                top_ic = input_config or {}
+                in_len = in_len if in_len is not None else top_ic.get("input-length")
+                out_len = out_len if out_len is not None else top_ic.get("output-length")
+            return {
+                "input-length": in_len,
+                "output-length": out_len,
+            }
+
         return {
             "mode": "throughput_optimization",
             "multi_case": True,
@@ -488,7 +525,8 @@ def _assemble_throughput_result(
                     # both the Top-N SLO/dedup filter and the per-case local
                     # re-rank (so rank=1 = best for THIS case among survivors;
                     # job_runner's rank is global across all cases).
-                    **_assemble_throughput_result(groups[key], None, job_id),
+                    # Extract per-case input_config so PD-pair calculation works.
+                    **_assemble_throughput_result(groups[key], _case_input_config(groups[key]), job_id),
                     "chrome_trace": {
                         "available": (
                             any(trace_path(job_id, r["seq"]).exists() for r in groups[key] if "seq" in r)
@@ -523,6 +561,7 @@ def _assemble_throughput_result(
             "disagg_prefill": None,
             "disagg_decode": None,
             "pd_ratio_rows": None,
+            "pd_pairs": None,
             "note": "No configurations satisfy the current TTFT/TPOT filters.",
         }
     records = _reassign_local_ranks(records)
@@ -553,14 +592,20 @@ def _assemble_throughput_result(
             "tpot_ms": summary.get("tpot_ms"),
         }
     else:
+        out = summary.get("throughput_token_s")
+        inp = summary.get("input_throughput_token_s")
         best_config = {
             "device": config.get("device"),
             "parallel": config.get("parallel"),
             "concurrency": config.get("concurrency"),
-            "throughput_token_s": summary.get("throughput_token_s"),
+            "throughput_token_s": out,
             "qps": summary.get("qps"),
             "ttft_ms": summary.get("ttft_ms"),
             "tpot_ms": summary.get("tpot_ms"),
+            "input_throughput_token_s": inp,
+            "e2e_throughput_token_s": out + inp if out is not None and inp is not None else None,
+            "per_card_input_throughput_token_s": summary.get("per_card_input_throughput_token_s"),
+            "per_card_output_throughput_token_s": summary.get("per_card_output_throughput_token_s"),
             "num_devices": config.get("num_devices"),
             "batch_size": config.get("batch_size"),
             # Memory columns
@@ -575,16 +620,22 @@ def _assemble_throughput_result(
     for record in records:
         summary = record.get("summary", {})
         config = record.get("config", {})
+        out = summary.get("throughput_token_s")
+        inp = summary.get("input_throughput_token_s")
         sweep_rows.append(
             {
                 "device": config.get("device"),
                 "rank": record.get("rank"),
                 "parallel": config.get("parallel"),
                 "concurrency": config.get("concurrency"),
-                "throughput_token_s": summary.get("throughput_token_s"),
+                "throughput_token_s": out,
                 "qps": summary.get("qps"),
                 "ttft_ms": summary.get("ttft_ms"),
                 "tpot_ms": summary.get("tpot_ms"),
+                "input_throughput_token_s": inp,
+                "e2e_throughput_token_s": out + inp if out is not None and inp is not None else None,
+                "per_card_input_throughput_token_s": summary.get("per_card_input_throughput_token_s"),
+                "per_card_output_throughput_token_s": summary.get("per_card_output_throughput_token_s"),
                 "num_devices": config.get("num_devices"),
                 "batch_size": config.get("batch_size"),
                 # Memory columns
@@ -605,10 +656,10 @@ def _assemble_throughput_result(
     for device_name in devices_in_config:
         # Find the best record for this device
         best_for_device = None
-        best_rank = float('inf')
+        best_rank = float("inf")
         for record in records:
             if record.get("config", {}).get("device") == device_name:
-                rank = record.get("rank", float('inf'))
+                rank = record.get("rank", float("inf"))
                 if rank < best_rank:
                     best_rank = rank
                     best_for_device = record
@@ -635,6 +686,7 @@ def _assemble_throughput_result(
     disagg_prefill = None
     disagg_decode = None
     pd_ratio_rows = []
+    pd_pairs: list[dict[str, Any]] | None = None
 
     # Disaggregated: partition records by phase (now correctly labeled per-row
     # by _agg_disagg_row: ttft→disagg_prefill, tpot→disagg_decode).
@@ -647,6 +699,16 @@ def _assemble_throughput_result(
         if decode_recs:
             decode_recs.sort(key=lambda r: r.get("rank", 999))
             disagg_decode = [_sweep_row_from_record(r) for r in decode_recs]
+        # PD-pair system estimate (upper bound) — needs both phase tables and
+        # the original lengths from input_config (multi-case passes None and
+        # therefore skips this).
+        if disagg_prefill and disagg_decode and input_config:
+            pd_pairs = _pd_pair_rows(
+                disagg_prefill,
+                disagg_decode,
+                input_config.get("input-length"),
+                input_config.get("output-length"),
+            )
     elif mode == "pd_ratio":
         # Extract pd_ratio rows
         for record in records:
@@ -680,6 +742,22 @@ def _assemble_throughput_result(
         any(trace_path(job_id, r["seq"]).exists() for r in records if "seq" in r) if job_id else False
     )
 
+    # 7-metrics safety net: ensure the throughput metrics are always present
+    # in best_config and sweep_rows (even if the runner didn't write them).
+    # Uses setdefault so existing values are preserved.
+    _BENCHMARK_METRICS = (
+        "input_throughput_token_s",
+        "e2e_throughput_token_s",
+        "per_card_input_throughput_token_s",
+        "per_card_output_throughput_token_s",
+    )
+    if best_config:
+        for key in _BENCHMARK_METRICS:
+            best_config.setdefault(key, None)
+    for row in sweep_rows:
+        for key in _BENCHMARK_METRICS:
+            row.setdefault(key, None)
+
     return {
         "mode": mode,
         "input_config": input_config or {},
@@ -689,6 +767,7 @@ def _assemble_throughput_result(
         "disagg_prefill": disagg_prefill,
         "disagg_decode": disagg_decode,
         "pd_ratio_rows": pd_ratio_rows if pd_ratio_rows else None,
+        "pd_pairs": pd_pairs,
         "chrome_trace": {"available": chrome_trace_available},
     }
 
@@ -701,3 +780,79 @@ def _get_devices_in_config(config: dict[str, Any]) -> list[str]:
     if isinstance(device, str):
         return [device]
     return []
+
+
+def _to_float(value: Any) -> float | None:
+    """Coerce to float; None for missing/NaN/unparseable."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(f) else f
+
+
+def _pd_pair_rows(
+    prefill_rows: list[dict[str, Any]],
+    decode_rows: list[dict[str, Any]],
+    input_length: Any,
+    output_length: Any,
+) -> list[dict[str, Any]]:
+    """Pure: cartesian prefill×decode pairs with system-level upper-bound metrics.
+
+    Disagg sweeps measure each phase INDEPENDENTLY (each row assumes all
+    devices on that phase), so a pair's "system" numbers are an UPPER BOUND:
+    the steady-state capability if both sides could simultaneously sustain
+    their measured throughput. The bottleneck side (lower phase QPS) sets it.
+
+    Pairs where either side lacks a computable QPS are skipped — without QPS
+    there is no system metric to derive. Rows are sorted by system QPS desc
+    (ties: lower TTFT, then lower TPOT) and ranked 1..N, so rank=1 is the
+    recommended pair. ``e2e_throughput_token_s`` = system output + input
+    throughput (None when either length is unknown). Does not mutate its inputs.
+    """
+    in_len = _to_float(input_length)
+    out_len = _to_float(output_length)
+    pairs: list[dict[str, Any]] = []
+    for p in prefill_rows:
+        p_qps = _to_float(p.get("qps"))
+        if p_qps is None or p_qps <= 0:
+            continue
+        for d in decode_rows:
+            d_qps = _to_float(d.get("qps"))
+            if d_qps is None or d_qps <= 0:
+                continue
+            sys_qps = min(p_qps, d_qps)
+            sys_out = sys_qps * out_len if out_len else None
+            sys_in = sys_qps * in_len if in_len else None
+            pairs.append(
+                {
+                    "rank": 0,  # assigned after sort
+                    "parallel_p": p.get("parallel"),
+                    "parallel_d": d.get("parallel"),
+                    "p_qps": p_qps,
+                    "d_qps": d_qps,
+                    "system_qps": sys_qps,
+                    "system_output_throughput_token_s": sys_out,
+                    "system_input_throughput_token_s": sys_in,
+                    "e2e_throughput_token_s": sys_out + sys_in if sys_out is not None and sys_in is not None else None,
+                    "p_utilization": sys_qps / p_qps,
+                    "d_utilization": sys_qps / d_qps,
+                    "bottleneck": "p" if p_qps < d_qps else ("d" if d_qps < p_qps else "balanced"),
+                    "ttft_ms": p.get("ttft_ms"),
+                    "tpot_ms": d.get("tpot_ms"),
+                }
+            )
+
+    def _sort_key(row: dict[str, Any]) -> tuple:
+        ttft = _to_float(row.get("ttft_ms"))
+        tpot = _to_float(row.get("tpot_ms"))
+        return (
+            -row["system_qps"],
+            float("inf") if ttft is None else ttft,
+            float("inf") if tpot is None else tpot,
+        )
+
+    pairs.sort(key=_sort_key)
+    for i, row in enumerate(pairs, start=1):
+        row["rank"] = i
+    return pairs

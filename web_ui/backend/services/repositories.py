@@ -184,6 +184,12 @@ class JobRepository:
                 description="Sweep parallel/concurrency configs to find the best throughput per device.",
             ),
             orm.ModuleRow(
+                id="throughput_optimizer_benchmark",
+                display_name="Throughput Optimizer (Benchmark)",
+                runner_class="ParallelRunner",
+                description="Benchmark mode: simplified form with convention fields for throughput optimization.",
+            ),
+            orm.ModuleRow(
                 id="image_generate",
                 display_name="Image Generation",
                 runner_class="ImageGenerateRunner",

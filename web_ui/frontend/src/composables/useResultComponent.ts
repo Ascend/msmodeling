@@ -37,13 +37,22 @@ import ThroughputMultiCaseResult from '@/components/result/throughput/Throughput
 export function resolveResultComponent(
   moduleId: string | undefined,
   multiCase: boolean | undefined,
+  // Accepted-but-ignored: callers pass result.mode, but routing is by
+  // module_id alone (benchmark jobs carry their own module_id and share the
+  // throughput result components). The underscore keeps vue-tsc's
+  // noUnusedParameters check green.
+  _resultMode?: string,
 ): Component | null {
+  // Benchmark mode uses the same result component as throughput_optimizer
+  // (both run the same underlying module, just with different input forms)
+
   switch (moduleId) {
     case 'text_generate':
       return multiCase ? TextMultiCaseResult : TextGenerateResult
     case 'video_generate':
       return multiCase ? VideoMultiCaseResult : VideoGenerateResult
     case 'throughput_optimizer':
+    case 'throughput_optimizer_benchmark':
       return multiCase ? ThroughputMultiCaseResult : ThroughputOptimizerResult
     default:
       return null

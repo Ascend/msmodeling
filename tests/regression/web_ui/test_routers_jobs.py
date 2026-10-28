@@ -55,7 +55,13 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _job(status=JobStatus.RUNNING, params=None, module_id="text_generate", job_id="job-1", log_text=None):
+def _job(
+    status=JobStatus.RUNNING,
+    params=None,
+    module_id="text_generate",
+    job_id="job-1",
+    log_text=None,
+):
     """Build a Job-like mock with a real JobStatus and all attrs the router reads."""
     job = MagicMock()
     job.id = job_id
@@ -161,7 +167,10 @@ class TestCreateJob:
         assert "9.9.9" in exc.value.detail
 
     def test_submits_job_and_returns_body(self):
-        submitted = _job(JobStatus.PENDING, params={"model-id": "test-model", "num-queries": 1, "query-length": 128})
+        submitted = _job(
+            JobStatus.PENDING,
+            params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+        )
         job_manager = AsyncMock()
         job_manager.submit_async.return_value = submitted
         job_repo = MagicMock()
@@ -173,7 +182,11 @@ class TestCreateJob:
             req = JobSubmitRequest(
                 module_id="text_generate",
                 form_schema_version="1.0.0",
-                params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+                params={
+                    "model-id": "test-model",
+                    "num-queries": 1,
+                    "query-length": 128,
+                },
             )
             result = _run(create_job(req, job_repo, job_manager, MagicMock()))
         job_manager.submit_async.assert_awaited_once()
@@ -182,7 +195,11 @@ class TestCreateJob:
         submitted_job = call_args.args[0] if call_args.args else call_args.kwargs.get("job")
         assert submitted_job.module_id == "text_generate"
         assert submitted_job.form_schema_version == "1.0.0"
-        assert submitted_job.params == {"model-id": "test-model", "num-queries": 1, "query-length": 128}
+        assert submitted_job.params == {
+            "model-id": "test-model",
+            "num-queries": 1,
+            "query-length": 128,
+        }
         assert submitted_job.status == JobStatus.PENDING
         assert result.job_id == "job-1"
         assert result.status == "pending"
@@ -238,13 +255,20 @@ class TestCreateJob:
         """_expand_job_cases_strict ValueError → 400 (catches oversized/invalid
         multi-value fields before the job is submitted).
         """
-        with patch("api.routers.jobs._expand_job_cases_strict", side_effect=ValueError("too many cases")):
+        with patch(
+            "api.routers.jobs._expand_job_cases_strict",
+            side_effect=ValueError("too many cases"),
+        ):
             with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
                 mock_reg.return_value.get_form_schema.return_value = {"fields": []}
                 req = JobSubmitRequest(
                     module_id="text_generate",
                     form_schema_version="1.0.0",
-                    params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+                    params={
+                        "model-id": "test-model",
+                        "num-queries": 1,
+                        "query-length": 128,
+                    },
                 )
                 with pytest.raises(HTTPException) as exc:
                     _run(create_job(req, MagicMock(), AsyncMock(), MagicMock()))
@@ -267,7 +291,11 @@ class TestCreateJob:
             req = JobSubmitRequest(
                 module_id="text_generate",
                 form_schema_version="1.0.0",
-                params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+                params={
+                    "model-id": "test-model",
+                    "num-queries": 1,
+                    "query-length": 128,
+                },
             )
             with pytest.raises(HTTPException) as exc:
                 _run(create_job(req, job_repo, job_manager, MagicMock()))
@@ -282,7 +310,10 @@ class TestCreateJob:
         original payload. The Job.params should store the normalized True, not the
         original string.
         """
-        submitted = _job(JobStatus.PENDING, params={"model-id": "test-model", "chrome-trace-file": True})
+        submitted = _job(
+            JobStatus.PENDING,
+            params={"model-id": "test-model", "chrome-trace-file": True},
+        )
         job_manager = AsyncMock()
         job_manager.submit_async.return_value = submitted
         job_repo = MagicMock()
@@ -293,7 +324,10 @@ class TestCreateJob:
             req = JobSubmitRequest(
                 module_id="text_generate",
                 form_schema_version="1.0.0",
-                params={"model-id": "test-model", "chrome-trace-file": "true"},  # Valid boolean-like string
+                params={
+                    "model-id": "test-model",
+                    "chrome-trace-file": "true",
+                },  # Valid boolean-like string
             )
             original_params = dict(req.params)  # snapshot before call
             _run(create_job(req, job_repo, job_manager, MagicMock()))
@@ -308,7 +342,9 @@ class TestCreateJob:
         from services.params_hash import compute_params_hash
 
         expected_hash = compute_params_hash(
-            "text_generate", "1.0.0", {"model-id": "test-model", "chrome-trace-file": True}
+            "text_generate",
+            "1.0.0",
+            {"model-id": "test-model", "chrome-trace-file": True},
         )
         assert submitted_job.params_hash == expected_hash
 
@@ -361,7 +397,11 @@ class TestCreateJob:
             req = JobSubmitRequest(
                 module_id="text_generate",
                 form_schema_version="1.0.0",
-                params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+                params={
+                    "model-id": "test-model",
+                    "num-queries": 1,
+                    "query-length": 128,
+                },
             )
             result = _run(create_job(req, job_repo, job_manager, MagicMock()))
 
@@ -400,7 +440,11 @@ class TestCreateJob:
             req = JobSubmitRequest(
                 module_id="text_generate",
                 form_schema_version="1.0.0",
-                params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+                params={
+                    "model-id": "test-model",
+                    "num-queries": 1,
+                    "query-length": 128,
+                },
             )
             result = _run(create_job(req, job_repo, job_manager, MagicMock()))
 
@@ -519,7 +563,10 @@ class TestGetJob:
             module_id="video_generate",
             params={"model_id": "m", "device": "A100", "ulysses_size": "4"},
         )
-        with patch("runners._cli_command.build_cli_command_string", side_effect=lambda m, p: f"{m}:{p.get('device')}"):
+        with patch(
+            "runners._cli_command.build_cli_command_string",
+            side_effect=lambda m, p: f"{m}:{p.get('device')}",
+        ):
             result = _run(get_job("job-1", repo, MagicMock()))
         # Single device → one case → commands[0] == command
         assert result.command is not None
@@ -533,7 +580,10 @@ class TestGetJob:
             module_id="video_generate",
             params={"model_id": "m", "device": ["A100", "H100"], "ulysses_size": "4"},
         )
-        with patch("runners._cli_command.build_cli_command_string", side_effect=lambda m, p: f"{m}:{p.get('device')}"):
+        with patch(
+            "runners._cli_command.build_cli_command_string",
+            side_effect=lambda m, p: f"{m}:{p.get('device')}",
+        ):
             result = _run(get_job("job-1", repo, MagicMock()))
         assert result.commands is not None
         assert len(result.commands) == 2
@@ -553,7 +603,10 @@ class TestGetJob:
         with patch("runners._cli_command.build_cli_command_string") as mock_cmd:
             mock_cmd.return_value = "python -m cli.inference.text_generate m --chrome-trace /path/to/trace.json"
             with patch("runners._multicase.compute_case_hash", return_value="hash123"):
-                with patch("services.trace_store.legacy_hash_path", return_value=Path("/path/to/trace.json")):
+                with patch(
+                    "services.trace_store.legacy_hash_path",
+                    return_value=Path("/path/to/trace.json"),
+                ):
                     result = _run(get_job("job-1", repo, MagicMock()))
         # Verify build_cli_command_string was called with the synthesized path
         call_args = mock_cmd.call_args
@@ -597,7 +650,11 @@ class TestExpandJobCases:
     def test_text_generate_cartesian_product(self):
         cases = _expand_job_cases(
             "text_generate",
-            {"device": ["A", "B"], "num-queries": "2 3", "quantize-linear-action": "W8A8_DYNAMIC"},
+            {
+                "device": ["A", "B"],
+                "num-queries": "2 3",
+                "quantize-linear-action": "W8A8_DYNAMIC",
+            },
         )
         # 2 devices x 2 num_queries x 1 quantize = 4 cases
         assert len(cases) == 4
@@ -614,6 +671,26 @@ class TestExpandJobCases:
         assert len(cases) == 2
         assert cases[0]["device"] == "A"
         assert cases[1]["device"] == "B"
+
+    def test_throughput_optimizer_benchmark_expands_like_full_mode(self):
+        """Benchmark module shares the worker's multi-field expansion, so the
+        API-side preflight/status expansion must dispatch it the same way —
+        otherwise preflight sees 1 case while the worker runs N (and the
+        case-cap check is silently skipped for benchmark submits).
+        """
+        cases = _expand_job_cases(
+            "throughput_optimizer_benchmark",
+            {
+                "device": ["A", "B"],
+                "pd-mode": "aggregation",
+                "quantize-preset": "W8A8C8",
+            },
+        )
+        assert len(cases) == 2
+        assert cases[0]["device"] == "A"
+        assert cases[1]["device"] == "B"
+        # Convention fields pass through unexpanded (frontend expands them)
+        assert cases[0]["pd-mode"] == "aggregation"
 
     def test_unknown_module_falls_back_to_single_case(self):
         cases = _expand_job_cases("unknown_module", {"foo": "bar"})
@@ -775,7 +852,10 @@ class TestGetJobResult:
         result_repo.list_for_job.return_value = [_record(0), _record(1)]
         with (
             patch("api.routers.jobs.SchemaRegistry") as mock_reg,
-            patch("api.routers.jobs.assemble_result_envelope", return_value={"envelope": True}),
+            patch(
+                "api.routers.jobs.assemble_result_envelope",
+                return_value={"envelope": True},
+            ),
         ):
             mock_reg.return_value.get_form_schema.return_value = {"fields": []}
             result = _run(get_job_result("job-1", repo, result_repo))

@@ -108,9 +108,13 @@ const bestMetrics = computed(() => {
     ]
   }
   return [
-    { label: t({ zh: '吞吐', en: 'Throughput' }), value: bc["throughput_token_s"] != null ? `${Number(bc["throughput_token_s"]).toFixed(2)} token/s` : '-' },
+    { label: t({ zh: '输出吞吐', en: 'Output Throughput' }), value: bc["throughput_token_s"] != null ? `${Number(bc["throughput_token_s"]).toFixed(2)} token/s` : '-' },
+    { label: t({ zh: '单卡输出吞吐', en: 'Per-card Output' }), value: bc["per_card_output_throughput_token_s"] != null ? `${Number(bc["per_card_output_throughput_token_s"]).toFixed(2)} token/s·卡` : '-' },
+    { label: t({ zh: '输入吞吐', en: 'Input Throughput' }), value: bc["input_throughput_token_s"] != null ? `${Number(bc["input_throughput_token_s"]).toFixed(2)} token/s` : '-' },
+    { label: t({ zh: '单卡输入吞吐', en: 'Per-card Input' }), value: bc["per_card_input_throughput_token_s"] != null ? `${Number(bc["per_card_input_throughput_token_s"]).toFixed(2)} token/s·卡` : '-' },
     { label: 'TTFT', value: bc["ttft_ms"] != null ? `${Number(bc["ttft_ms"]).toFixed(2)} ms` : '-' },
     { label: 'TPOT', value: bc["tpot_ms"] != null ? `${Number(bc["tpot_ms"]).toFixed(2)} ms` : '-' },
+    { label: 'QPS', value: bc["qps"] != null ? `${Number(bc["qps"]).toFixed(2)} req/s` : '-' },
   ]
 })
 
@@ -136,9 +140,15 @@ const bestParallel = computed(() => {
         <el-card v-if="prefillBest" class="best-config-card phase-card">
           <div class="phase-card-label">{{ t({ zh: 'Prefill 最优', en: 'Best Prefill' }) }}</div>
           <div class="best-metrics">
+            <!-- Prefill phase only processes input (prompt) tokens: its throughput
+                 IS the input processing rate — no separate output metric exists. -->
             <div class="metric">
-              <span class="metric-label">{{ t({ zh: '吞吐', en: 'Throughput' }) }}</span>
-              <span class="metric-value">{{ prefillBest["throughput_token_s"] != null ? Number(prefillBest["throughput_token_s"]).toFixed(2) + ' token/s' : '-' }}</span>
+              <span class="metric-label">{{ t({ zh: '输入吞吐', en: 'Input Throughput' }) }}</span>
+              <span class="metric-value">{{ prefillBest["input_throughput_token_s"] != null ? Number(prefillBest["input_throughput_token_s"]).toFixed(2) + ' token/s' : '-' }}</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">{{ t({ zh: '单卡输入吞吐', en: 'Per-card Input' }) }}</span>
+              <span class="metric-value">{{ prefillBest["per_card_input_throughput_token_s"] != null ? Number(prefillBest["per_card_input_throughput_token_s"]).toFixed(2) + ' token/s·卡' : '-' }}</span>
             </div>
             <div class="metric">
               <span class="metric-label">TTFT</span>
@@ -155,8 +165,12 @@ const bestParallel = computed(() => {
           <div class="phase-card-label">{{ t({ zh: 'Decode 最优', en: 'Best Decode' }) }}</div>
           <div class="best-metrics">
             <div class="metric">
-              <span class="metric-label">{{ t({ zh: '吞吐', en: 'Throughput' }) }}</span>
+              <span class="metric-label">{{ t({ zh: '输出吞吐', en: 'Output Throughput' }) }}</span>
               <span class="metric-value">{{ decodeBest["throughput_token_s"] != null ? Number(decodeBest["throughput_token_s"]).toFixed(2) + ' token/s' : '-' }}</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">{{ t({ zh: '单卡输出吞吐', en: 'Per-card Output' }) }}</span>
+              <span class="metric-value">{{ decodeBest["per_card_output_throughput_token_s"] != null ? Number(decodeBest["per_card_output_throughput_token_s"]).toFixed(2) + ' token/s·卡' : '-' }}</span>
             </div>
             <div class="metric">
               <span class="metric-label">TPOT</span>

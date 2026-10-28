@@ -171,11 +171,12 @@ class TestRegistryStructure:
         assert "ParallelRunner" in _REGISTRY
 
     def test_module_to_runner_mapping(self):
-        """Module to runner mapping covers all three modules."""
-        assert len(_MODULE_TO_RUNNER_CLASS) == 3
+        """Module to runner mapping covers all modules (benchmark shares ParallelRunner)."""
+        assert len(_MODULE_TO_RUNNER_CLASS) == 4
         assert "text_generate" in _MODULE_TO_RUNNER_CLASS
         assert "video_generate" in _MODULE_TO_RUNNER_CLASS
         assert "throughput_optimizer" in _MODULE_TO_RUNNER_CLASS
+        assert _MODULE_TO_RUNNER_CLASS["throughput_optimizer_benchmark"] == "ParallelRunner"
 
 
 class TestRunnerPort:

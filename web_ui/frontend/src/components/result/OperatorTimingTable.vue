@@ -115,8 +115,11 @@ const boundLabels: Record<string, string> = {
   compute_bound_gp: 'GP',
 }
 
-// Bound tag color mapping
-function boundTagType(bound: string): '' | 'success' | 'warning' | 'danger' | 'info' {
+// Bound tag color mapping. Unknown bound values fall back to 'info' (grey):
+// el-tag's `type` prop contract doesn't include undefined, and a default of
+// 'primary' (el-tag's fallback) would render unknown classifications as if
+// they were a normal category.
+function boundTagType(bound: string): 'success' | 'warning' | 'danger' | 'info' {
   switch (bound) {
     case 'memory_bound': return 'danger'
     case 'communication_bound': return 'warning'

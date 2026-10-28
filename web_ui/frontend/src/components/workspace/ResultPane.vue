@@ -47,7 +47,7 @@ const moduleMeta: Record<string, { icon: any; title: { zh: string; en: string } 
 }
 
 const resultComponent = computed(() =>
-  resolveResultComponent(props.moduleId, props.runner?.result?.multi_case)
+  resolveResultComponent(props.moduleId, props.runner?.result?.multi_case, props.runner?.result?.mode)
 )
 
 const statusText = computed(() => {

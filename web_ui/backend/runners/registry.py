@@ -50,6 +50,7 @@ _MODULE_TO_RUNNER_CLASS: dict[str, str] = {
     "text_generate": "ModelRunner",
     "video_generate": "VideoGenerateRunner",
     "throughput_optimizer": "ParallelRunner",
+    "throughput_optimizer_benchmark": "ParallelRunner",  # Benchmark uses same runner
 }
 
 

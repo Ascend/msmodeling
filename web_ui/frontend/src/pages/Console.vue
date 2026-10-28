@@ -96,6 +96,8 @@ onBeforeUnmount(() => {
   // Stop all background polling when the console is destroyed.
   Object.values(runners).forEach((r) => r.teardown())
 })
+
+// Job restoration disabled: page loads with a clean slate (no previous job state/result)
 </script>
 
 <template>

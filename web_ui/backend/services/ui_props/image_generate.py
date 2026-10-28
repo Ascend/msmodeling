@@ -26,7 +26,7 @@ from cli.registry.modules import get_spec
 from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
-VERSION = "2.3.3"
+VERSION = "2.3.5"
 TITLE = I18nText("图像生成", "Image Generate")
 RUNNER = "ImageGenerateRunner"
 
@@ -181,8 +181,14 @@ UI: dict[str, UIFieldProps] = {
         option_source={
             "type": "inline",
             "values": [
-                {"value": "huggingface", "label": {"zh": "HuggingFace", "en": "HuggingFace"}},
-                {"value": "modelscope", "label": {"zh": "ModelScope", "en": "ModelScope"}},
+                {
+                    "value": "huggingface",
+                    "label": {"zh": "HuggingFace", "en": "HuggingFace"},
+                },
+                {
+                    "value": "modelscope",
+                    "label": {"zh": "ModelScope", "en": "ModelScope"},
+                },
             ],
         },
     ),

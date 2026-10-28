@@ -1,0 +1,53 @@
+{
+  "models": {
+    "zai-org/GLM-5.2": {
+      "description": "GLM-5.2：prefill 默认 DSA-CP，decode 默认 MLAPO，量化 W8A8C8",
+      "overrides": {
+        "compilation-config": [
+          "enable_sequence_parallel",
+          "enable_mlapo"
+        ],
+        "word-embedding-tp": "row",
+        "quantize-linear-action": "W8A8_DYNAMIC",
+        "quantize-attention-action": "FP8",
+        "quantize-non-expert-linear-action": "W8A8_DYNAMIC"
+      }
+    },
+    "deepseek-ai/DeepSeek-V4-Flash": {
+      "description": "DeepSeek-V4-Flash：默认 fused-mc2，量化 W4A8C8",
+      "overrides": {
+        "compilation-config": [
+          "enable_dispatch_ffn_combine"
+        ],
+        "quantize-preset": "W4A8C8",
+        "quantize-linear-action": "W4A8_DYNAMIC",
+        "quantize-attention-action": "FP8",
+        "quantize-non-expert-linear-action": "W8A8_DYNAMIC"
+      }
+    },
+    "deepseek-ai/DeepSeek-V4-Pro": {
+      "description": "DeepSeek-V4-Pro：默认 fused-mc2，量化 W4A8C8",
+      "overrides": {
+        "compilation-config": [
+          "enable_dispatch_ffn_combine"
+        ],
+        "quantize-preset": "W4A8C8",
+        "quantize-linear-action": "W4A8_DYNAMIC",
+        "quantize-attention-action": "FP8",
+        "quantize-non-expert-linear-action": "W8A8_DYNAMIC"
+      }
+    },
+    "moonshotai/Kimi-K3": {
+      "description": "Kimi-K3：decode 默认 MLAPO，量化 W4A8C8",
+      "overrides": {
+        "compilation-config": [
+          "enable_mlapo"
+        ],
+        "quantize-preset": "W4A8C8",
+        "quantize-linear-action": "W4A8_DYNAMIC",
+        "quantize-attention-action": "FP8",
+        "quantize-non-expert-linear-action": "W8A8_DYNAMIC"
+      }
+    }
+  }
+}

@@ -23,13 +23,15 @@
  * reads/writes a shared `runner` (useJobRunner) so the result survives tab switches.
  */
 import { ref, computed, onBeforeUnmount, watch, nextTick } from 'vue'
-import { ElButton, ElIcon, ElDrawer, ElSkeleton, ElInput, ElMessage, ElMessageBox } from 'element-plus'
+import { ElButton, ElIcon, ElDrawer, ElSkeleton, ElInput, ElMessage, ElMessageBox, ElRadioGroup, ElRadioButton } from 'element-plus'
 import { Document, DocumentCopy, VideoCamera, TrendCharts, Loading } from '@element-plus/icons-vue'
 import { useLocale } from '@/composables/useLocale'
+import { useModelFeatures } from '@/composables/useModelFeatures'
 import SchemaForm from '@/components/form/SchemaForm.vue'
 import ResultPane from './ResultPane.vue'
 import { getJobLog, getCaseLog } from '@/services/api'
 import { trackEvent } from '@/services/telemetrySink'
+import { expandBenchmarkConventionFields } from '@/utils/benchmark'
 
 const props = defineProps<{
   moduleId: string
@@ -43,6 +45,11 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useLocale()
+const { getCurrentQuantizeOverrides, getCurrentQuantizePreset } = useModelFeatures()
+
+// Benchmark mode switcher (only for throughput_optimizer)
+const formMode = ref<'full' | 'benchmark'>('benchmark')
+const isBenchmarkMode = computed(() => props.moduleId === 'throughput_optimizer')
 
 const statusText = computed(() => {
   switch (props.runner?.status) {
@@ -260,13 +267,43 @@ const meta = computed(() => moduleMeta[props.moduleId])
 
 const topStyle = computed(() => ({ height: props.splitPercent + '%' }))
 
+// Effective module ID for SchemaForm (benchmark mode uses different schema)
+const effectiveModuleId = computed(() => {
+  if (props.moduleId === 'throughput_optimizer' && formMode.value === 'benchmark') {
+    return 'throughput_optimizer_benchmark'
+  }
+  return props.moduleId
+})
+
 function triggerSubmit() {
   trackEvent(props.moduleId, 'run', 'submit')
   schemaFormRef.value?.submit()
 }
 
 async function handleSubmit(data: { moduleId: string; params: Record<string, any>; formSchemaVersion: string; explicitlyTouched: string[] }) {
-  await props.runner.submit(data.params, data.formSchemaVersion, data.explicitlyTouched)
+  // Filter params to only include fields in the active schema
+  // This prevents convention fields (pd-mode, quantize-preset) from leaking to full mode
+  // and prevents advanced params from leaking to benchmark mode
+  const activeSchema = schemaFormRef.value?.getActiveSchemaFields() || []
+  let filteredParams = Object.fromEntries(
+    Object.entries(data.params).filter(([key]) => activeSchema.includes(key))
+  )
+
+  // Expand benchmark convention fields before submitting. Pass schema
+  // defaults so deliberately-set quantize values (e.g., model-feature mixed
+  // quantization) survive the preset expansion. Also pass model overrides
+  // so the preset expansion uses override-aware QUANTIZE_PRESETS.
+  if (formMode.value === 'benchmark') {
+    filteredParams = expandBenchmarkConventionFields(
+      filteredParams,
+      schemaFormRef.value?.getSchemaFieldDefaults() || {},
+      getCurrentQuantizeOverrides(),
+      getCurrentQuantizePreset(),
+    )
+  }
+
+  // Pass the effective moduleId (benchmark uses a different schema)
+  await props.runner.submit(filteredParams, data.formSchemaVersion, data.explicitlyTouched, effectiveModuleId.value)
 }
 
 async function handleCancel() {
@@ -376,6 +413,16 @@ onBeforeUnmount(() => {
           <span class="pane-sub">{{ t({ zh: '配置', en: 'Config' }) }}</span>
         </span>
         <div class="header-actions">
+          <!-- Benchmark mode switcher (only for throughput_optimizer) -->
+          <el-radio-group
+            v-if="isBenchmarkMode"
+            v-model="formMode"
+            size="small"
+            style="margin-right: 12px;"
+          >
+            <el-radio-button value="benchmark">{{ t({ zh: 'Benchmark', en: 'Benchmark' }) }}</el-radio-button>
+            <el-radio-button value="full">{{ t({ zh: '全量模式', en: 'Full' }) }}</el-radio-button>
+          </el-radio-group>
           <el-button
             type="primary"
             :loading="runner.submitting || runner.isBusy"
@@ -397,7 +444,12 @@ onBeforeUnmount(() => {
 
       <div class="pane-body">
         <Suspense>
-          <schema-form ref="schemaFormRef" :module-id="moduleId" @submit="handleSubmit" />
+          <schema-form
+            ref="schemaFormRef"
+            :module-id="effectiveModuleId"
+            :skip-reset-on-schema-change="true"
+            @submit="handleSubmit"
+          />
           <template #fallback>
             <el-skeleton :rows="6" animated />
           </template>

@@ -31,7 +31,6 @@
 import { ref, computed } from 'vue'
 import { useLocale } from '@/composables/useLocale'
 import { useChartTheme } from '@/composables/useChartTheme'
-import { ElTag } from 'element-plus'
 import ChartWrapper from '../ChartWrapper.vue'
 import TextGenerateResult from './TextGenerateResult.vue'
 import ChromeTraceDownloads from '../ChromeTraceDownloads.vue'

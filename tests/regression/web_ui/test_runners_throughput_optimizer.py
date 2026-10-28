@@ -292,9 +292,39 @@ class TestRowHelpers:
         assert _fnum(None) is None
         assert _fnum(float("nan")) is None
 
-    def test_disagg_qps_prefill(self):
+    def test_disagg_qps_prefill_from_input_throughput(self):
+        """Primary caliber: QPS = engine token/s ÷ input_length (the input
+        rate divided by request length — QPS × input_length == token/s by
+        construction, matching the core's compute_request_qps).
+        """
+        r = self._row(concurrency=10.0, ttft=5.0, **{"token/s": 512000.0})
+        assert _disagg_qps(r, 100, "disagg_prefill", input_length=1024) == 512000.0 / 1024
+
+    def test_disagg_qps_prefill_variable_length_makespan_fallback(self):
+        """Variable-length rows (no single input_length) fall back to the CLI's
+        makespan caliber: QPS = concurrency / prefill_phase_makespan.
+        """
+        r = self._row(concurrency=10.0, ttft=5.0, prefill_phase_makespan_ms=8.0)
+        assert _disagg_qps(r, 100, "disagg_prefill") == 10.0 / 8.0 * 1000.0
+
+    def test_disagg_qps_prefill_legacy_ttft_fallback(self):
+        """Legacy rows without the makespan column fall back to concurrency/ttft."""
         r = self._row(concurrency=10.0, ttft=5.0)
         assert _disagg_qps(r, 100, "disagg_prefill") == 10.0 / 5.0 * 1000.0
+
+    def test_disagg_qps_prefill_none_when_makespan_value_missing(self):
+        """Modern rows with a None makespan (OOM/partial phase) have no QPS —
+        a TTFT-based value would use the wrong caliber (same as the core).
+        """
+        r = self._row(concurrency=10.0, ttft=5.0, prefill_phase_makespan_ms=None)
+        assert _disagg_qps(r, 100, "disagg_prefill") is None
+
+    def test_disagg_qps_decode_from_output_throughput(self):
+        """Primary caliber: QPS = engine token/s ÷ output_length (QPS ×
+        output_length == token/s by construction).
+        """
+        r = self._row(concurrency=10.0, tpot=2.0, **{"token/s": 100.0})
+        assert _disagg_qps(r, 50, "disagg_decode") == 100.0 / 50
 
     def test_disagg_qps_decode(self):
         r = self._row(concurrency=10.0, tpot=2.0)
@@ -320,7 +350,11 @@ class TestRowHelpers:
 
     def test_agg_disagg_row_aggregation(self):
         r = self._row(
-            parallel="TP=1", concurrency=4, num_devices=1, batch_size=8, **{"token/s": 100.0, "ttft": 10.0, "tpot": 5.0}
+            parallel="TP=1",
+            concurrency=4,
+            num_devices=1,
+            batch_size=8,
+            **{"token/s": 100.0, "ttft": 10.0, "tpot": 5.0},
         )
         args = SimpleNamespace(output_length=100)
         row = _agg_disagg_row(r, "TEST_DEVICE", "aggregation", args)
@@ -344,7 +378,11 @@ class TestRowHelpers:
     def test_agg_disagg_row_disagg_decode(self):
         """A disagg row without ttft is labeled disagg_decode."""
         r = self._row(
-            parallel="TP=1", concurrency=4, num_devices=1, batch_size=8, **{"token/s": 100.0, "ttft": None, "tpot": 5.0}
+            parallel="TP=1",
+            concurrency=4,
+            num_devices=1,
+            batch_size=8,
+            **{"token/s": 100.0, "ttft": None, "tpot": 5.0},
         )
         args = SimpleNamespace(output_length=100)
         row = _agg_disagg_row(r, "TEST_DEVICE", "disagg_prefill", args)
@@ -383,7 +421,16 @@ class TestRowHelpers:
 
         summary = MagicMock()
         summary.get_summary_df.return_value = pd.DataFrame(
-            [{"balanced_qps": 50.0, "pd_ratio": 1.0, "p_qps": 30.0, "d_qps": 20.0, "ttft_p": 10.0, "tpot_d": 5.0}]
+            [
+                {
+                    "balanced_qps": 50.0,
+                    "pd_ratio": 1.0,
+                    "p_qps": 30.0,
+                    "d_qps": 20.0,
+                    "ttft_p": 10.0,
+                    "tpot_d": 5.0,
+                }
+            ]
         )
         rows = _summary_to_rows(summary, "TEST_DEVICE", "pd_ratio", SimpleNamespace())
         assert len(rows) == 1
@@ -432,7 +479,11 @@ class TestExecute:
             recs1, _ = execute(dict(_TINY_THROUGHPUT_PARAMS), form_schema_version="1.0.0")
             ch = recs1[0]["case_hash"]
             mock_sweep.reset_mock()
-            recs2, skipped = execute(dict(_TINY_THROUGHPUT_PARAMS), cached_hashes={ch}, form_schema_version="1.0.0")
+            recs2, skipped = execute(
+                dict(_TINY_THROUGHPUT_PARAMS),
+                cached_hashes={ch},
+                form_schema_version="1.0.0",
+            )
         assert recs2 == []
         assert skipped == [ch]
         mock_sweep.assert_not_called()
@@ -441,7 +492,10 @@ class TestExecute:
         """PD ratio enabled without the required device counts raises ValueError."""
         with pytest.raises(ValueError, match="prefill-devices-per-instance"):
             execute(
-                {**_TINY_THROUGHPUT_PARAMS, "enable-optimize-prefill-decode-ratio": True},
+                {
+                    **_TINY_THROUGHPUT_PARAMS,
+                    "enable-optimize-prefill-decode-ratio": True,
+                },
                 form_schema_version="1.0.0",
             )
 
@@ -483,7 +537,10 @@ class TestExecute:
 
         with patch("runners.throughput_optimizer._run_throughput_sweep") as mock_sweep:
             mock_sweep.return_value = [{"config": {}, "summary": {}, "tables": {}}]
-            with patch("services.trace_store.legacy_hash_path", return_value=Path("/trace/path.json")) as mock_path:
+            with patch(
+                "services.trace_store.legacy_hash_path",
+                return_value=Path("/trace/path.json"),
+            ) as mock_path:
                 records, _ = execute(
                     {**_TINY_THROUGHPUT_PARAMS, "chrome-trace-file": True},
                     job_id="job-123",

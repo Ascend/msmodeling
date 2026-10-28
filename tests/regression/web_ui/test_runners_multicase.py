@@ -30,6 +30,7 @@ from runners._multicase import (
     as_list,
     compute_case_hash,
     expand_cases,
+    expand_module_cases_strict,
     parse_float_list,
     parse_int_list,
     resolve_model_id_path,
@@ -223,7 +224,11 @@ class TestExpandCases:
         # 11 × 11 = 121 > max_search_combinations (100)
         with pytest.raises(ValueError, match="too many cases.*> 100"):
             expand_cases(
-                {"a": list(range(11)), "b": list(range(11)), "max-search-combinations": 100},
+                {
+                    "a": list(range(11)),
+                    "b": list(range(11)),
+                    "max-search-combinations": 100,
+                },
                 {"a": as_list, "b": as_list},
             )
 
@@ -246,6 +251,49 @@ class TestExpandCases:
             {},  # empty fields → keys is empty → for-loop skipped
         )
         assert len(cases) == 1  # one case with just the original params
+
+
+class TestExpandModuleCasesStrict:
+    """Tests for expand_module_cases_strict per-module dispatch."""
+
+    def test_unknown_module_returns_single_case(self):
+        params = {"model-id": "m", "device": "ATLAS_350_425T_112G"}
+        assert expand_module_cases_strict("image_generate", params) == [params]
+
+    def test_text_generate_delegates_and_expands(self):
+        cases = expand_module_cases_strict(
+            "text_generate",
+            {"tp-size": [1, 2], "fixed": "y"},
+        )
+        assert len(cases) == 2
+        assert {c["tp-size"] for c in cases} == {1, 2}
+        assert all(c["fixed"] == "y" for c in cases)
+
+    def test_video_generate_expands_multi_field(self):
+        cases = expand_module_cases_strict(
+            "video_generate",
+            {"device": ["ATLAS_350_425T_112G", "ATLAS_800T_A2"]},
+        )
+        assert len(cases) == 2
+        assert {c["device"] for c in cases} == {"ATLAS_350_425T_112G", "ATLAS_800T_A2"}
+
+    def test_throughput_optimizer_expands_multi_field(self):
+        cases = expand_module_cases_strict(
+            "throughput_optimizer",
+            {"device": ["ATLAS_350_425T_112G", "ATLAS_800T_A2"]},
+        )
+        assert len(cases) == 2
+        assert {c["device"] for c in cases} == {"ATLAS_350_425T_112G", "ATLAS_800T_A2"}
+
+    def test_throughput_optimizer_benchmark_expands_multi_field(self):
+        """The benchmark module shares the throughput multi-field expansion."""
+        cases = expand_module_cases_strict(
+            "throughput_optimizer_benchmark",
+            {"device": ["ATLAS_350_425T_112G", "ATLAS_800T_A2"], "fixed": "x"},
+        )
+        assert len(cases) == 2
+        assert {c["device"] for c in cases} == {"ATLAS_350_425T_112G", "ATLAS_800T_A2"}
+        assert all(c["fixed"] == "x" for c in cases)
 
 
 class TestRunCases:
@@ -338,8 +386,17 @@ class TestRunCases:
             captured["chrome-trace-file"] = cp.get("chrome-trace-file")
             return {"config": cp, "summary": {}, "tables": {}}
 
-        with patch("services.trace_store.legacy_hash_path", return_value=Path("/tmp/trace.json")):
-            run_cases({"a": 1, "chrome-trace-file": True}, {}, run_one, case_hash_ctx=ctx, job_id="job-1")
+        with patch(
+            "services.trace_store.legacy_hash_path",
+            return_value=Path("/tmp/trace.json"),
+        ):
+            run_cases(
+                {"a": 1, "chrome-trace-file": True},
+                {},
+                run_one,
+                case_hash_ctx=ctx,
+                job_id="job-1",
+            )
         assert captured["chrome-trace-file"] == "/tmp/trace.json" or str(captured["chrome-trace-file"]).endswith(
             "trace.json"
         )

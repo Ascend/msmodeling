@@ -127,7 +127,11 @@ def _build_convention_field(fid: str, ui, cfg: FormConfig) -> dict | None:
     """
     if getattr(ui, "hidden", False):
         return None
-    f = {"id": fid, "control": ui.control or "text", "dataType": ui.data_type or "string"}
+    f = {
+        "id": fid,
+        "control": ui.control or "text",
+        "dataType": ui.data_type or "string",
+    }
     if ui.label:
         f["label"] = _i18n(ui.label)
     if ui.tooltip:
@@ -144,7 +148,13 @@ def _build_convention_field(fid: str, ui, cfg: FormConfig) -> dict | None:
         label = ui.label
         zh = f"{label.zh}为必填项" if label else f"{fid}为必填项"
         en = f"{label.en} is required" if label else f"{fid} is required"
-        f["validation"] = [{"rule": "required", "message": {"zh": zh, "en": en}, "trigger": ["change", "blur"]}]
+        f["validation"] = [
+            {
+                "rule": "required",
+                "message": {"zh": zh, "en": en},
+                "trigger": ["change", "blur"],
+            }
+        ]
     return f
 
 
@@ -174,7 +184,12 @@ def _build_form_validation(spec: ModuleSpec, cfg: FormConfig) -> list[dict]:
     return result
 
 
-def _infer_control(data_type: str, choices: list | None, option_source: dict | None) -> str:
+def _infer_control(
+    data_type: str,
+    choices: list | None,
+    option_source: dict | None,
+    cli_action: str = "store",
+) -> str:
     """Auto-infer frontend control type from data_type and options.
 
     Mapping:
@@ -187,7 +202,9 @@ def _infer_control(data_type: str, choices: list | None, option_source: dict | N
     """
     if data_type == "boolean":
         return "switch"
-    if data_type.endswith("[]"):
+    # Check both data_type array suffix and cli_action="append"
+    is_array = data_type.endswith("[]") or cli_action == "append"
+    if is_array:
         # Array types
         if choices or option_source:
             return "multi-select"
@@ -236,7 +253,7 @@ def _build_field(p: Param, cfg: FormConfig) -> dict:
         _set_if(field_dict, "group", _resolve_group(p.group, cfg.group_labels))
 
     # UI control attributes (auto-infer from data_type if not explicitly set)
-    control = ui.control or _infer_control(data_type, choices, ui.option_source)
+    control = ui.control or _infer_control(data_type, choices, ui.option_source, getattr(p, "cli_action", "store"))
     field_dict["control"] = control
     _set_if(field_dict, "optionSource", ui.option_source)
     _set_if(field_dict, "disabled", True if ui.disabled else None)
@@ -260,7 +277,11 @@ def _build_field(p: Param, cfg: FormConfig) -> dict:
 
 
 def _build_validation(
-    p: Param, label_zh: str, label_en: str, required: bool = False, data_type: str = "string"
+    p: Param,
+    label_zh: str,
+    label_en: str,
+    required: bool = False,
+    data_type: str = "string",
 ) -> list[dict]:
     """Build async-validator rules from Param constraints.
 
@@ -276,25 +297,38 @@ def _build_validation(
     """
     range_type = data_type if data_type == "integer" else "number" if data_type == "number" else None
     # Array fields: type 'array' so required checks non-empty list (device multi-select).
-    if data_type.endswith("[]"):
+    # Also check cli_action="append" which makes scalar types into lists
+    is_array = data_type.endswith("[]") or getattr(p, "cli_action", None) == "append"
+    if is_array:
         range_type = "array"
     rules = []
     if required:
-        rule: dict = {"rule": "required", "message": {"zh": f"{label_zh}为必填项", "en": f"{label_en} is required"}}
+        rule: dict = {
+            "rule": "required",
+            "message": {"zh": f"{label_zh}为必填项", "en": f"{label_en} is required"},
+        }
         # For array types, required needs type:'array' to check non-empty list
         # (otherwise async-validator treats any non-None value as "present").
-        if data_type.endswith("[]"):
+        if is_array:
             rule["type"] = "array"
         # NOTE: deliberately no `type: "number"` here — text controls store
         # strings; type check would reject "4" as a string-vs-number mismatch.
         rules.append(rule)
     if p.min is not None:
-        _r: dict = {"rule": "min", "value": p.min, "message": {"zh": f"必须 ≥ {p.min}", "en": f"must be ≥ {p.min}"}}
+        _r: dict = {
+            "rule": "min",
+            "value": p.min,
+            "message": {"zh": f"必须 ≥ {p.min}", "en": f"must be ≥ {p.min}"},
+        }
         if range_type:
             _r["type"] = range_type
         rules.append(_r)
     if p.max is not None:
-        _r: dict = {"rule": "max", "value": p.max, "message": {"zh": f"必须 ≤ {p.max}", "en": f"must be ≤ {p.max}"}}
+        _r: dict = {
+            "rule": "max",
+            "value": p.max,
+            "message": {"zh": f"必须 ≤ {p.max}", "en": f"must be ≤ {p.max}"},
+        }
         if range_type:
             _r["type"] = range_type
         rules.append(_r)
@@ -302,7 +336,10 @@ def _build_validation(
         _g: dict = {
             "rule": "gt",
             "value": p.exclusive_min,
-            "message": {"zh": f"必须 > {p.exclusive_min}", "en": f"must be > {p.exclusive_min}"},
+            "message": {
+                "zh": f"必须 > {p.exclusive_min}",
+                "en": f"must be > {p.exclusive_min}",
+            },
         }
         if range_type and range_type != "array":
             _g["type"] = range_type
@@ -311,13 +348,22 @@ def _build_validation(
         _l: dict = {
             "rule": "lt",
             "value": p.exclusive_max,
-            "message": {"zh": f"必须 < {p.exclusive_max}", "en": f"must be < {p.exclusive_max}"},
+            "message": {
+                "zh": f"必须 < {p.exclusive_max}",
+                "en": f"must be < {p.exclusive_max}",
+            },
         }
         if range_type and range_type != "array":
             _l["type"] = range_type
         rules.append(_l)
     if p.pattern:
-        rules.append({"rule": "pattern", "value": p.pattern, "message": {"zh": "格式不匹配", "en": "format mismatch"}})
+        rules.append(
+            {
+                "rule": "pattern",
+                "value": p.pattern,
+                "message": {"zh": "格式不匹配", "en": "format mismatch"},
+            }
+        )
     if p.max_length is not None:
         # async-validator has no 'length' rule type — a string max-length check is
         # expressed as type:'string' + max (chars). 'type' must be a REAL async-validator
@@ -463,7 +509,11 @@ if __name__ == "__main__":
         description="JSON adapter CLI: generate / check form JSONs against the registry",
     )
     parser.add_argument("--generate", action="store_true", help="(Re)generate all bundled form JSONs")
-    parser.add_argument("--check", action="store_true", help="Verify bundled JSONs match the registry; exit 1 on drift")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify bundled JSONs match the registry; exit 1 on drift",
+    )
     args = parser.parse_args()
 
     if args.generate:

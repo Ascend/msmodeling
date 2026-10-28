@@ -175,7 +175,7 @@ class TestJobRepositoryModules:
 
         Alembic's 0001 migration already seeds the modules, so to exercise the
         empty-table insert path we init a fresh DB (creates tables + alembic
-        seed), wipe the module rows, then call seed_modules — it must re-insert 4.
+        seed), wipe the module rows, then call seed_modules — it must re-insert 5.
         """
         db.reset_engine()
         db.init_db(str(tmp_path / "empty.db"))
@@ -190,7 +190,7 @@ class TestJobRepositoryModules:
             session.commit()
         n = repo.seed_modules()
         db.reset_engine()
-        assert n == 4
+        assert n == 5
 
     def test_get_module_returns_entity(self, repo_db):
         mod = JobRepository().get_module("text_generate")
@@ -203,15 +203,25 @@ class TestJobRepositoryModules:
 
     def test_list_modules_returns_all(self, repo_db):
         mods = JobRepository().list_modules()
-        assert len(mods) == 4
-        assert {m.id for m in mods} == {"text_generate", "video_generate", "throughput_optimizer", "image_generate"}
+        assert len(mods) == 5
+        assert {m.id for m in mods} == {
+            "text_generate",
+            "video_generate",
+            "throughput_optimizer",
+            "throughput_optimizer_benchmark",
+            "image_generate",
+        }
 
 
 class TestJobRepositoryJobs:
     """Tests for job CRUD + queries."""
 
     def _job(self, **kw):
-        defaults = {"module_id": "text_generate", "params": {"x": 1}, "form_schema_version": "1.0.0"}
+        defaults = {
+            "module_id": "text_generate",
+            "params": {"x": 1},
+            "form_schema_version": "1.0.0",
+        }
         defaults.update(kw)
         return Job(**defaults)
 
@@ -456,13 +466,25 @@ class TestResultRepository:
     """Tests for result record persistence."""
 
     def _seed_job(self, repo, job_id="j1", status=JobStatus.SUCCEEDED):
-        job = Job(id=job_id, module_id="text_generate", params={}, form_schema_version="1.0.0", status=status)
+        job = Job(
+            id=job_id,
+            module_id="text_generate",
+            params={},
+            form_schema_version="1.0.0",
+            status=status,
+        )
         repo.add(job)
         return job
 
     def _record(self, job_id="j1", seq=0, case_hash="ch1"):
         return ResultRecord(
-            id=f"r{seq}", job_id=job_id, seq=seq, config={"c": 1}, summary={"s": 1}, tables=[], case_hash=case_hash
+            id=f"r{seq}",
+            job_id=job_id,
+            seq=seq,
+            config={"c": 1},
+            summary={"s": 1},
+            tables=[],
+            case_hash=case_hash,
         )
 
     def test_add_and_list_for_job(self, repo_db):

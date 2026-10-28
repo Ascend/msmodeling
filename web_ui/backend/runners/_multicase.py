@@ -90,7 +90,7 @@ def expand_module_cases_strict(module_id: str, params: dict[str, Any]) -> list[d
         from runners.video_generate import _VIDEO_MULTI_FIELDS
 
         return expand_cases(params, _VIDEO_MULTI_FIELDS)
-    if module_id == "throughput_optimizer":
+    if module_id in ("throughput_optimizer", "throughput_optimizer_benchmark"):
         from runners.throughput_optimizer import _THROUGHPUT_MULTI_FIELDS
 
         return expand_cases(params, _THROUGHPUT_MULTI_FIELDS)
@@ -316,7 +316,11 @@ def run_cases(
                 records.append(
                     {
                         "config": cfg,
-                        "summary": {"error": error, "error_fields": error_fields, "validation_failed": True},
+                        "summary": {
+                            "error": error,
+                            "error_fields": error_fields,
+                            "validation_failed": True,
+                        },
                         "tables": {},
                         "case_hash": ch,
                         "case_log": "",
@@ -375,7 +379,11 @@ def run_cases(
                 records.append(
                     {
                         "config": cfg,
-                        "summary": {"error": error, "error_fields": error_fields, "validation_failed": True},
+                        "summary": {
+                            "error": error,
+                            "error_fields": error_fields,
+                            "validation_failed": True,
+                        },
                         "tables": {},
                         "case_hash": ch,
                         "case_log": "",
@@ -389,7 +397,10 @@ def run_cases(
                 # Divider + CLI command + key values. No case index label.
                 print(f"{_divider}", flush=True)
                 if module_id:
-                    print(f"CLI: {build_cli_command_string(module_id, case_params)}", flush=True)
+                    print(
+                        f"CLI: {build_cli_command_string(module_id, case_params)}",
+                        flush=True,
+                    )
                 print(" ".join(f"{k}={v}" for k, v in cfg.items()), flush=True)
                 print(flush=True)
                 rec = run_one(case_params)

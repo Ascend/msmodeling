@@ -46,7 +46,7 @@ interface CaseWithTrace {
 }
 
 interface Props {
-  jobId: string
+  jobId?: string
   cases: CaseWithTrace[]
 }
 

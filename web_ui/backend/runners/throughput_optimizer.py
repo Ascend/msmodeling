@@ -26,14 +26,45 @@ from __future__ import annotations
 import argparse
 import copy
 import logging
+import math
 import sys
 from typing import Any, Callable
 
 from models.entities import ResultRecord
-from runners._multicase import as_list, expand_cases, parse_float_list, resolve_model_id_path
+from runners._multicase import (
+    as_list,
+    expand_cases,
+    parse_float_list,
+    resolve_model_id_path,
+)
 from services.case_validation import validate_case_for_module
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_aggregation_input_throughput(qps, input_length, num_devices) -> tuple[float | None, float | None]:
+    """Pure function: aggregation-mode (pd_mixed) input throughput.
+
+    The aggregation engine computes only the OUTPUT token/s; the steady-state
+    input flow derives from the request rate: input_throughput = QPS ×
+    input_length (same caliber as the PD-pair system input estimate).
+
+    Args:
+        qps: Requests per second (from _disagg_qps aggregation branch).
+        input_length: Input length in tokens.
+        num_devices: Device count of the candidate.
+
+    Returns:
+        Tuple of (input_throughput, per_card_input_throughput), or (None, None)
+        if not computable.
+    """
+    if not (qps and input_length and num_devices):
+        return None, None
+    try:
+        input_throughput = qps * float(input_length)
+        return input_throughput, input_throughput / float(num_devices)
+    except (ValueError, TypeError):
+        return None, None
 
 
 def _get_multi_case_fields() -> tuple[tuple[str, Callable], ...]:
@@ -109,7 +140,10 @@ def _run_throughput_sweep(params: dict[str, Any]) -> list[dict[str, Any]]:
         List of record dicts, one per device/config.
     """
     from serving_cast.parallel_runner import ParallelRunner
-    from serving_cast.service.utils import count_search_combinations, resolve_parallel_search_candidates
+    from serving_cast.service.utils import (
+        count_search_combinations,
+        resolve_parallel_search_candidates,
+    )
     from tensor_cast import device_profiles  # noqa: F401  registers builtins
     from tensor_cast.core.quantization.datatypes import (
         QuantizeAttentionAction,
@@ -229,7 +263,10 @@ def execute(
     from runners._multicase import compute_case_hash
 
     print_logo()
-    print(f"[case-dedup] throughput_optimizer cached_hashes={len(cached_hashes or [])}", flush=True)
+    print(
+        f"[case-dedup] throughput_optimizer cached_hashes={len(cached_hashes or [])}",
+        flush=True,
+    )
 
     # Validate PD ratio parameters early so the error reaches job_runner
     # (not swallowed by _multicase's per-case exception handler).
@@ -281,9 +318,15 @@ def execute(
         # executed. No `[case i/n]` stamp — just the commands separated by blank
         # lines (the divider goes between cases in the per-case loop below).
         print(f"{_divider}", flush=True)
-        print(f"[throughput_optimizer] Expanding into {n} case(s) based on multi-field values:", flush=True)
+        print(
+            f"[throughput_optimizer] Expanding into {n} case(s) based on multi-field values:",
+            flush=True,
+        )
         for case_params in cases:
-            print(f"  {build_cli_command_string('throughput_optimizer', case_params)}", flush=True)
+            print(
+                f"  {build_cli_command_string('throughput_optimizer', case_params)}",
+                flush=True,
+            )
         print(flush=True)
 
     for case_params in cases:
@@ -302,7 +345,11 @@ def execute(
             all_records.append(
                 {
                     "config": {k: case_params.get(k) for k in _THROUGHPUT_MULTI_FIELDS},
-                    "summary": {"error": error, "error_fields": error_fields, "validation_failed": True},
+                    "summary": {
+                        "error": error,
+                        "error_fields": error_fields,
+                        "validation_failed": True,
+                    },
                     "tables": {},
                     "case_hash": ch,
                 }
@@ -315,7 +362,10 @@ def execute(
                 # — the divider separates cases visually; the CLI + keys
                 # identify each case unambiguously.
                 print(f"{_divider}", flush=True)
-                print(f"CLI: {build_cli_command_string('throughput_optimizer', case_params)}", flush=True)
+                print(
+                    f"CLI: {build_cli_command_string('throughput_optimizer', case_params)}",
+                    flush=True,
+                )
                 print(
                     " ".join(f"{k}={case_params.get(k)}" for k in _THROUGHPUT_MULTI_FIELDS),
                     flush=True,
@@ -444,6 +494,9 @@ def _coerce_param(p, raw: Any) -> Any:
 
     default = p.default
     is_enum_defaulted = p.data_type == "string" and hasattr(default, "value") and hasattr(default, "name")
+    # cli_action="append" makes scalar types into lists — check once at entry
+    # so all branches (missing/empty, list input, scalar) can reference it.
+    is_append = getattr(p, "cli_action", None) == "append"
 
     # ── Missing / empty input: fall back to default ────────────────────
     # Treat None, "", and whitespace-only strings as "missing" so downstream
@@ -454,7 +507,8 @@ def _coerce_param(p, raw: Any) -> Any:
             return None
         # Optional list fields (default=None): None stays None so downstream
         # ``if ns.tp_sizes is None`` branches still work (legacy CLI compat).
-        if p.data_type.endswith("[]") and default is None:
+        # Also check cli_action="append" which makes scalar types into lists
+        if (p.data_type.endswith("[]") or is_append) and default is None:
             return None
         # integer fields with default=None: None stays None (not 0) so downstream
         # ``if ns.prefill_devices_per_instance is not None`` branches work correctly.
@@ -467,7 +521,8 @@ def _coerce_param(p, raw: Any) -> Any:
         # speculative search path; an empty string would incorrectly activate it).
         # The previous cli_type-only guard (input-length YAML path dispatch) is
         # subsumed by this broader rule.
-        if p.data_type == "string" and default is None:
+        # Exclude append fields (they should remain as lists, not None)
+        if p.data_type == "string" and default is None and not is_append:
             return None
         if default is not None:
             return default
@@ -476,7 +531,7 @@ def _coerce_param(p, raw: Any) -> Any:
 
     # ── List input ─────────────────────────────────────────────────────
     if isinstance(raw, list):
-        if p.data_type.endswith("[]"):
+        if p.data_type.endswith("[]") or is_append:
             return _coerce_list(p, raw)
         # Scalar field got a list — take first element (defensive)
         return _coerce_param(p, raw[0] if raw else None)
@@ -512,7 +567,7 @@ def _coerce_param(p, raw: Any) -> Any:
                     return raw
                 return coerce_enum(enum_cls, str(raw))
             return str(raw)
-        if p.data_type.endswith("[]"):
+        if p.data_type.endswith("[]") or is_append:
             # Single scalar value for a list field — wrap and recurse
             return _coerce_list(p, [raw])
     except (TypeError, ValueError):
@@ -578,6 +633,24 @@ def _build_namespace(params: dict[str, Any]) -> argparse.Namespace:
     # and ParallelRunner dispatch on `is not None` / `is True`.
     if "chrome-trace-file" not in params:
         ns.chrome_trace_file = None
+    # pp_layer_partitions: registry stores it as a string (JSON text), but
+    # ParallelRunner expects list[list[int]]. Mirror the CLI's post-parse
+    # (cli/inference/throughput_optimizer.py:173-181): parse JSON eagerly so
+    # format errors surface here rather than deep in the search logic.
+    import json as _json
+
+    raw_pp = getattr(ns, "pp_layer_partitions", None)
+    if isinstance(raw_pp, str) and raw_pp.strip():
+        try:
+            parsed = _json.loads(raw_pp)
+        except _json.JSONDecodeError as exc:
+            raise ValueError(f"pp-layer-partitions must be valid JSON: {exc}")
+        if not isinstance(parsed, list) or not all(isinstance(p, list) for p in parsed):
+            raise ValueError("pp-layer-partitions must be a JSON list of lists, e.g. '[[31,30],[16,15,15,15]]'")
+        ns.pp_layer_partitions = [list(p) for p in parsed]
+    elif isinstance(raw_pp, str):
+        # Empty / whitespace-only string → None (not provided)
+        ns.pp_layer_partitions = None
     # num_mtp_tokens: registry declares integer[] (multi-value), but runner
     # reads args.num_mtp_tokens as a SINGLE int. Mirror the CLI's
     # _normalize_mtp_token_values: first candidate → num_mtp_tokens (int),
@@ -731,8 +804,6 @@ def _fnum(value: Any) -> float | None:
         f = float(value)
     except (TypeError, ValueError):
         return None
-    import math
-
     return None if math.isnan(f) else f
 
 
@@ -763,13 +834,47 @@ def _agg_disagg_row(r, device_name: str, mode: str, args) -> dict[str, Any]:
         actual_mode = "disagg_prefill" if ttft is not None else "disagg_decode"
     else:
         actual_mode = mode
-    qps = _disagg_qps(r, getattr(args, "output_length", None), actual_mode)
+    qps = _disagg_qps(
+        r,
+        getattr(args, "output_length", None),
+        actual_mode,
+        getattr(args, "input_length", None),
+    )
+
+    # Phase-appropriate throughput reuse. The engine's ``token/s`` IS the phase
+    # token rate: for prefill rows the INPUT rate (concurrency × input_length /
+    # drain makespan — the saturated caliber the core emits; see the core's
+    # "TTFT (no-queue anchor) and throughput (saturated anchor)" distinction),
+    # for decode and aggregation rows the OUTPUT rate. Reuse it directly
+    # instead of re-deriving via the no-queue TTFT anchor, which would
+    # overestimate multi-wave prefill. Aggregation rows carry no engine input
+    # rate, so their input flow derives from the steady-state QPS.
+    per_card_output = _fnum(r.get("token/s/device"))
+    if actual_mode == "disagg_prefill":
+        input_throughput = throughput
+        per_card_input_throughput = per_card_output
+        per_card_output = None  # prefill has no decode (output) phase
+    elif actual_mode == "aggregation":
+        input_throughput, per_card_input_throughput = _derive_aggregation_input_throughput(
+            qps, getattr(args, "input_length", None), _fnum(r.get("num_devices"))
+        )
+    else:
+        input_throughput = None
+        per_card_input_throughput = None
+
     summary = {
         "throughput_token_s": throughput,
         "qps": qps,
         "ttft_ms": ttft,
         "tpot_ms": tpot,
         "mode": actual_mode,
+        # Per-card output throughput (engine-computed, token/s/device column;
+        # None for prefill rows which have no output phase)
+        "per_card_output_throughput_token_s": per_card_output,
+        # Input throughput: prefill = engine token/s (token/s/device per card);
+        # aggregation = steady-state QPS × input_length
+        "input_throughput_token_s": input_throughput,
+        "per_card_input_throughput_token_s": per_card_input_throughput,
         # Memory columns (used by the frontend to display memory breakdown and
         # filter OOM rows from scatter plots, mirroring the CLI's _memory_filter).
         # Column names in summary_df come from MEMORY_KEY_TO_COLUMN in
@@ -794,13 +899,32 @@ def _agg_disagg_row(r, device_name: str, mode: str, args) -> dict[str, Any]:
     }
 
 
-def _disagg_qps(r, output_length, mode: str) -> float | None:
-    """Compute QPS for disagg row.
+def _disagg_qps(r, output_length, mode: str, input_length=None) -> float | None:
+    """Compute QPS for disagg/aggregation row — unified caliber.
+
+    QPS = phase throughput ÷ phase token length (the core's
+    ``compute_request_qps`` caliber), so QPS × length == the displayed engine
+    throughput by construction for every mode:
+
+    - prefill: ``token/s`` (input rate) ÷ input_length
+    - decode: ``token/s`` (output rate) ÷ output_length
+    - aggregation: ``token/s`` ÷ output_length == concurrency / end-to-end
+      latency. The aggregation row's tpot is AMORTIZED
+      (``tpot = (ttft + decode_step × L_out) / L_out``, so
+      ``tpot × L_out == e2el``); the former
+      ``concurrency / (ttft + L_out × tpot)`` double-counted TTFT.
+
+    Fallbacks when the engine throughput is unavailable: decode/aggregation
+    derive from ``concurrency / (tpot × output_length)`` (identical math);
+    prefill variable-length rows (no single input_length) fall back to the
+    CLI's makespan caliber (``concurrency / prefill_phase_makespan_ms``),
+    then the legacy ``concurrency / ttft`` for rows without that column.
 
     Args:
         r: DataFrame row.
         output_length: Output length in tokens.
-        mode: Either 'disagg_prefill' or 'disagg_decode'.
+        mode: Either 'disagg_prefill', 'disagg_decode', or 'aggregation'.
+        input_length: Input length in tokens (prefill primary formula).
 
     Returns:
         QPS value or None if not computable.
@@ -808,11 +932,22 @@ def _disagg_qps(r, output_length, mode: str) -> float | None:
     conc = _fnum(r.get("concurrency"))
     if conc is None or conc <= 0:
         return None
+    throughput = _fnum(r.get("token/s"))
     if mode == "disagg_prefill":
+        if throughput and input_length:
+            return throughput / float(input_length)
+        # Variable-length rows: no single input_length — fall back to the
+        # CLI's makespan caliber. Modern rows with a None makespan (OOM/partial
+        # phase) have no QPS, same as the core's _compute_disagg_request_qps.
+        if "prefill_phase_makespan_ms" in r.index:
+            makespan = _fnum(r.get("prefill_phase_makespan_ms"))
+            return conc / makespan * 1000.0 if makespan and makespan > 0 else None
         ttft = _fnum(r.get("ttft"))
         if ttft and ttft > 0:
             return conc / ttft * 1000.0
-    if mode == "disagg_decode":
+    if mode in ("disagg_decode", "aggregation"):
+        if throughput and output_length:
+            return throughput / float(output_length)
         tpot = _fnum(r.get("tpot"))
         if tpot and tpot > 0 and output_length:
             return conc / (tpot * float(output_length)) * 1000.0

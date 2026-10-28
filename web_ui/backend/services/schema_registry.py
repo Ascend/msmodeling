@@ -179,6 +179,9 @@ def generate_form_configs(dst: Path | None = None) -> Path:
     from services.ui_props.throughput_optimizer import (
         generate_form_json as to_generate,
     )
+    from services.ui_props.throughput_optimizer_benchmark import (
+        generate_form_json as tobm_generate,
+    )
     from services.ui_props.video_generate import (
         generate_form_json as vg_generate,
     )
@@ -186,6 +189,7 @@ def generate_form_configs(dst: Path | None = None) -> Path:
     modules = [
         ("text_generate", tg_export),
         ("throughput_optimizer", to_generate),
+        ("throughput_optimizer_benchmark", tobm_generate),
         ("video_generate", vg_generate),
     ]
 

@@ -34,6 +34,7 @@ _CLI_MODULE = {
     "text_generate": "cli.inference.text_generate",
     "video_generate": "cli.inference.video_generate",
     "throughput_optimizer": "cli.inference.throughput_optimizer",
+    "throughput_optimizer_benchmark": "cli.inference.throughput_optimizer",  # Benchmark uses same CLI
 }
 
 # Field names to skip entirely when building the CLI command (removed from CLI or
@@ -44,7 +45,7 @@ _SKIP_FIELDS: set[str] = set()
 # space-separated tokens. The CLI's argparse defines these as a single string
 # argument (split internally on "," by run_inference). Contrast with nargs="+"
 # fields (mtp-acceptance-rates, tp-sizes, ...) which DO need comma-splitting.
-_NO_SPLIT_FIELDS = {"cache-step-range", "cache-block-range"}
+_NO_SPLIT_FIELDS = {"cache-step-range", "cache-block-range", "pp-layer-partitions"}
 
 
 def build_cli_command_string(module_id: str, params: dict[str, Any]) -> str:
@@ -61,7 +62,9 @@ def build_cli_command_string(module_id: str, params: dict[str, Any]) -> str:
     try:
         from cli.registry.modules import get_spec
 
-        spec = get_spec(module_id)
+        # Benchmark mode uses the same CLI spec as throughput_optimizer
+        spec_module_id = "throughput_optimizer" if module_id == "throughput_optimizer_benchmark" else module_id
+        spec = get_spec(spec_module_id)
         valid_fields = {field.name for field in spec.fields}
     except Exception:
         # If registry lookup fails, fall back to including all params
