@@ -1,0 +1,41 @@
+StepFun Model License 1.0
+
+Copyright (c) 2026 StepFun AI
+
+1. Grant of Rights
+
+Subject to the terms and conditions of this License, StepFun AI hereby grants You a perpetual (subject to Section 5), worldwide, non-exclusive, no-charge, royalty-free license to use, copy, distribute, and sublicense the StepFun model identified in the model card (the "Model Card"), including its weights, parameters, configuration, tokenizer, model-specific code, and documentation (collectively, the "Model"), and to modify the Model and create Derivative Works thereof.
+
+StepFun AI and each Contributor hereby grant You a perpetual (subject to Section 5), worldwide, non-exclusive, no-charge, royalty-free patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Model and Derivative Works, where such license applies only to those patent claims licensable by StepFun AI or such Contributor, respectively, that are necessarily infringed by the Model or a Derivative Work, in each case in the form provided by StepFun AI or such Contributor. This patent license terminates as of the date You institute patent litigation against any entity (including a cross-claim or counterclaim in a lawsuit) alleging that the Model or a Derivative Work in the form provided by StepFun AI or such Contributor constitutes direct or contributory patent infringement.
+
+"Derivative Work" means a fine-tuned, distilled, merged, quantized, pruned, continually pre-trained, or otherwise modified model that reproduces or contains a substantial part of the Model. A separate application that only calls the Model through an API is not a Derivative Work solely for that reason. A model trained to a material extent on outputs of the Model is deemed to reproduce or contain a substantial part of the Model. "Contributor" means any individual or legal entity that creates a Derivative Work and distributes or otherwise makes it available under this License.
+
+2. Conditions
+
+(a) Redistribution. When You distribute the Model or a Derivative Work, You must provide a copy of this License, retain all copyright, patent, trademark, and attribution notices, identify Your modifications with prominent notices, include any NOTICE file supplied with the Model, and provide the Model Card or a link to it. The contents of any NOTICE file are for informational purposes only and do not modify this License. You may add Your own attribution notices within Derivative Works that You distribute, alongside or as an addendum to the NOTICE text from the Model, provided that such notices cannot be construed as modifying this License.
+
+(b) Attribution. If, in any calendar month, any commercial product or service provided by You or Your affiliates that uses or incorporates the Model or a Derivative Work has more than 100,000,000 active users or generates revenue exceeding US$20,000,000 (or the equivalent in another currency), You must thereafter prominently display "Powered by StepFun AI" (or such Model name as StepFun AI designates in writing) on the user interface of that product or service (including the "About" page) and in its user agreement or product documentation with prominence at least equal to that of any other third-party component notice, and retain the Model name and license notices in related documentation.
+
+(c) Commercial License. You must enter into a separate commercial license agreement with StepFun AI before You or Your affiliates: (i) acting as a manufacturer or brand owner of hardware devices (including, without limitation, phones, vehicles, smart glasses, wearables, robots, or smart-home devices) supplied to end users, first make the capabilities of the Model or any Derivative Work commercially available as a feature of those devices or their accompanying services, whether directly or through third parties acting on Your or their behalf, whether deployed on the device, remotely, or on infrastructure supplied with the device, and whether delivered at shipment or later by activation, download, or update; or (ii) use the Model or any Derivative Work for any commercial purpose while You or any of Your affiliates operate a MaaS business, if the combined revenue of You and Your affiliates from all sources exceeds US$20,000,000 (or the equivalent in another currency) over any consecutive twelve-month period.
+
+This Section 2(c) does not apply to internal use that does not make the Model or a Derivative Work, or the outputs or underlying capabilities thereof, available to any third party, or to use of the Model or any Derivative Work obtained through a distribution channel certified by StepFun AI, within the scope of such certification.
+
+"Model as a Service" (MaaS) means giving a third party inference or fine-tuning access to the Model or a Derivative Work, including through an API, where the third party has meaningful control over inputs, parameters, or training data. Neither embedding the Model's capabilities in a specific end-user feature without giving that control to a third party, nor merely relaying requests to another provider's model, constitutes MaaS.
+
+3. Compliance and Trademarks
+
+You are solely responsible for complying with all applicable laws and regulations, including those relating to data, privacy, security, safety, export control, sanctions, consumer protection, and sector-specific compliance, and for respecting third-party rights in connection with Your use, modification, or distribution of the Model or any Derivative Work. This License does not grant permission to use the trade names, trademarks, service marks, or product names of StepFun AI, except for reasonable and customary use in describing the origin of the Model and the limited display required by Section 2(b). You must not state or imply that StepFun AI endorses You or Your products or services.
+
+4. Disclaimer and Liability
+
+UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING: (A) THE MODEL AND ANY DERIVATIVE WORK ARE PROVIDED "AS IS", WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING ANY WARRANTIES OR CONDITIONS OF TITLE, NON-INFRINGEMENT, MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR REGARDING THE ACCURACY, RELIABILITY, OR QUALITY OF ANY OUTPUT, AND YOU ARE SOLELY RESPONSIBLE FOR DETERMINING THE APPROPRIATENESS OF USING OR REDISTRIBUTING THE MODEL OR ANY DERIVATIVE WORK, AND FOR ASSUMING ANY RISKS ASSOCIATED WITH YOUR EXERCISE OF PERMISSIONS UNDER THIS LICENSE; AND (B) IN NO EVENT AND UNDER NO LEGAL THEORY, WHETHER IN TORT (INCLUDING NEGLIGENCE), CONTRACT, OR OTHERWISE, SHALL STEPFUN AI, ITS AFFILIATES, OR ANY CONTRIBUTOR BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES OF ANY CHARACTER ARISING AS A RESULT OF THIS LICENSE OR OUT OF THE USE OR INABILITY TO USE THE MODEL, ANY DERIVATIVE WORK, OR ANY OUTPUT.
+
+5. Termination
+
+Any material breach of this License terminates the rights granted to You hereunder. Your rights will be reinstated if the breach is cured within thirty (30) days after written notice from StepFun AI, or if StepFun AI confirms such reinstatement in writing. Upon termination, You must immediately cease all use of, and destroy all copies of, the Model and any Derivative Work in Your possession, except that compliant recipients who lawfully acquired copies thereof prior to termination may continue to exercise their rights under this License.
+
+6. Miscellaneous
+
+The English version of this License shall prevail over any translation. For any questions regarding this License, please contact license@stepfun.ai.
+
+END OF TERMS AND CONDITIONS

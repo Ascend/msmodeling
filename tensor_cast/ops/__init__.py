@@ -38,4 +38,5 @@ from . import (  # noqa: F401
     minimax_m3_sparse_attention,
     situ,
     swiglu,
+    step5,
 )

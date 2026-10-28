@@ -12,6 +12,7 @@ file; the other files here were added for the notices listed below.
 | [`LICENSE-DeepSeek-MIT`](LICENSE-DeepSeek-MIT) | MIT | `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-V3.1` |
 | [`LICENSE-Kimi-K2.5-Modified-MIT`](LICENSE-Kimi-K2.5-Modified-MIT) | Modified MIT | `moonshotai/Kimi-K2.5` |
 | [`LICENSE-inclusionAI-Ling-MIT`](LICENSE-inclusionAI-Ling-MIT) | MIT | `inclusionAI/Ling-flash-2.0` |
+| [`LICENSE-Step5-Preview-StepFun-1.0`](LICENSE-Step5-Preview-StepFun-1.0) | StepFun Model License 1.0 | `stepfun-ai/Step-5-Preview` |
 
 `LICENSE` is one file holding several sections, in this order: the Apache-2.0
 text, the TensorFlow/Caffe notice, the `DeepSeek-V4 related files (AGPL-3.0)`
@@ -30,6 +31,7 @@ MIT terms and the same copyright holder, so one text covers both.
 | `tests/assets/model_config/kimi_k2_5/configuration_kimi_k25.py` | `moonshotai/Kimi-K2.5` | reformatted only |
 | `tests/assets/model_config/ling_flash_2_0/configuration_bailing_moe_v2.py` | `inclusionAI/Ling-flash-2.0` | unmodified copy |
 | `tensor_cast/transformers/builtin_model/bailing_moe_hf/configuration_bailing_moe_v2.py` | `inclusionAI/Ling-flash-2.0` | `model_type` added, `super().__init__` rewritten |
+| `tests/assets/model_config/step5_preview/config.json` | `stepfun-ai/Step-5-Preview` | FP8 quantization metadata removed for BF16 simulation |
 
 ## Adding a new text
 

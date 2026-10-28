@@ -20,6 +20,7 @@ input_generation
 
 import json
 import math
+import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -489,6 +490,14 @@ def generate_image_inputs(model, image_batch_size, image_height, image_width, co
     vision_config = hf_config.vision_config
     if hf_config.model_type == "deepseek_v41":
         return _generate_deepseek_v41_image_inputs(
+            model,
+            image_batch_size,
+            image_height,
+            image_width,
+            concurrency,
+        )
+    if hf_config.model_type == "step5_vl":
+        return _generate_step5_image_inputs(
             model,
             image_batch_size,
             image_height,
@@ -1701,6 +1710,36 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
         if attention_layer is not None and not _layer_uses_sparse_attention_indexer(attention_layer):
             continue
 
+        # Instance lookup keeps working through compile wrappers (OptimizedModule
+        # forwards attribute access to _orig_mod) and picks up bound methods; the
+        # ismethod guard keeps spec-less mocks on the legacy resolution path.
+        allocator = getattr(attention_layer, "allocate_indexer_cache", None)
+        if inspect.ismethod(allocator):
+            result = allocator(num_blocks, block_size, batch_size, total_kv_tokens)
+            if not (isinstance(result, tuple) and len(result) == 3):
+                raise TypeError(
+                    "allocate_indexer_cache must return a 3-tuple (cache, num_blocks, block_size), "
+                    f"got {type(result).__name__}"
+                )
+            cache, eff_num_blocks, eff_block_size = result
+            if not isinstance(cache, torch.Tensor) or cache.device.type != "meta":
+                raise TypeError(f"allocate_indexer_cache must return a meta-device tensor, got {type(cache).__name__}")
+            # Failing fast on invalid spans beats a max(..., 1) guard: a protocol
+            # violation should surface here, not skew per-token accounting.
+            if (
+                not isinstance(eff_num_blocks, int)
+                or not isinstance(eff_block_size, int)
+                or eff_num_blocks <= 0
+                or eff_block_size <= 0
+            ):
+                raise ValueError(
+                    "allocate_indexer_cache must return positive block spans, got "
+                    f"(num_blocks={eff_num_blocks!r}, block_size={eff_block_size!r})"
+                )
+            indexer_cache_by_layers[i] = cache
+            indexer_cache_per_token += bytes_of_tensor(cache) / (eff_num_blocks * eff_block_size)
+            continue
+
         cache_width = _resolve_sparse_attention_indexer_cache_width(model, attention_layer)
         if cache_width is None:
             continue
@@ -2021,6 +2060,40 @@ def _generate_deepseek_v41_image_inputs(
         "vision_grid_height": vit_h,
         "vision_grid_width": vit_w,
         "num_image_tokens": int(image_batch_size) * image_span_tokens,
+    }
+
+
+def _generate_step5_image_inputs(
+    model,
+    image_batch_size: int,
+    image_height: int,
+    image_width: int,
+    concurrency: int,
+) -> dict[str, Any]:
+    """Return Step5 image tensors using the patch-aligned vision geometry."""
+    vision_config = model.model_config.hf_config.vision_config
+    patch = vision_config.patch_size
+    # Guard the modulo before it can fail as ZeroDivisionError/NoneType ops.
+    if not isinstance(patch, int) or patch <= 0:
+        raise ValueError(f"Step5 vision_config.patch_size must be a positive integer, got {patch!r}")
+    if image_height % patch or image_width % patch:
+        raise ValueError("Step5 image dimensions must be multiples of the vision patch size")
+    parallel_config = model.model_config.parallel_config
+    batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
+    # Two stride-2 downsamplers reduce each patch grid axis by 4 before the projector.
+    grid_h, grid_w = image_height // patch, image_width // patch
+    pixel_values = torch.empty(
+        batch_size * int(image_batch_size),
+        3,
+        image_height,
+        image_width,
+        dtype=model.model_config.dtype,
+        device="meta",
+    )
+    return {
+        "pixel_values": pixel_values,
+        "num_image_tokens": int(image_batch_size)
+        * (((grid_h + 3) // 4) * ((grid_w + 3) // 4) + VISION_IMAGE_BOUNDARY_TOKEN_COUNT),
     }
 
 

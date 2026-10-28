@@ -75,6 +75,13 @@
 </details>
 
 <details>
+<summary><b>Step 系列</b></summary>
+
+🔹 [2026.10.26] msModeling 新增 **Step 5 Preview** 模型支持（文本与图像输入）<br>
+
+</details>
+
+<details>
 <summary><b>近期特性更新</b></summary>
 
 🔹 [2026.09.15] 新增校准解析性能模型，可使用校准画像修正 Roofline 延迟估算<br>

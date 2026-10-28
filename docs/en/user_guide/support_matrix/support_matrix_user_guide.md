@@ -27,7 +27,8 @@ This document summarizes the currently supported model types and simulation feat
 | Text models | GLM | GLM-5.3-Flash, GLM5.2, GLM5.1, GLM5, GLM-4 MoE |
 | Text models | ERNIE | ERNIE 4.5 MoE |
 | Text models | Bailing/MiMo/MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2.7, MiniMax M2.5, MiniMax M2, MiniMax M3 |
-| Vision-language models | VL Models | DeepSeek-V4.1-Flash, Qwen3-VL, Qwen3-VL MoE, GLM-4V, GLM-4V MoE, InternVL |
+| Text models | Step | Step 5 Preview |
+| Vision-language models | VL Models | DeepSeek-V4.1-Flash, Step 5 Preview, Qwen3-VL, Qwen3-VL MoE, GLM-4V, GLM-4V MoE, InternVL |
 | Image generation/editing models | Diffusers DiT image models | FLUX.1-dev, Qwen-Image-Edit |
 | Video generation models | Diffusers DiT | Wan, HunyuanVideo, HunyuanVideo1.5 |
 

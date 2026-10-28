@@ -63,7 +63,7 @@ class FakePopen:
 
     def kill(self) -> None:
         self.kill_calls += 1
-        self._returncode = -signal.SIGKILL
+        self._returncode = -getattr(signal, "SIGKILL", 9)
 
 
 class FakePopenTimeoutOnFirstWait(FakePopen):
@@ -73,5 +73,5 @@ class FakePopenTimeoutOnFirstWait(FakePopen):
         self.wait_calls += 1
         if self.wait_calls == 1:
             raise subprocess.TimeoutExpired(cmd=["pytest"], timeout=timeout or 0.01)
-        self._returncode = -signal.SIGKILL
+        self._returncode = -getattr(signal, "SIGKILL", 9)
         return self._returncode

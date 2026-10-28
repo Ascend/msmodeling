@@ -47,6 +47,7 @@ _VENDORED_MODEL_CONFIG_DIRS: dict[str, str] = {
     "deepseek-ai/DeepSeek-V3.2": "deepseek_v32",
     "deepseek-ai/DeepSeek-V4-Flash": "deepseek_v4_flash",
     "deepseek-ai/DeepSeek-V4.1-Flash": "deepseek_v41_flash",
+    "stepfun-ai/Step-5-Preview": "step5_preview",
     "zai-org/GLM-4.1V-9B-Thinking": "glm4v_9b_thinking",
     "zai-org/GLM-4.5V": "glm4v_moe_4_5v",
     "zai-org/GLM-4.7": "glm4_7",

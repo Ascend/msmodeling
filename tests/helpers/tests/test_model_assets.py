@@ -51,6 +51,7 @@ from tests.helpers.model_assets import (
         "deepseek-ai/DeepSeek-V3.2",
         "deepseek-ai/DeepSeek-V4-Flash",
         "deepseek-ai/DeepSeek-V4.1-Flash",
+        "stepfun-ai/Step-5-Preview",
         "zai-org/GLM-4.1V-9B-Thinking",
         "zai-org/GLM-4.5V",
         "zai-org/GLM-4.7",

@@ -42,6 +42,7 @@ _MTP_PATH_SEGMENT_MARK = "mtp"
 _ATTENTION_CORE_OPS = frozenset(
     {
         "attention",
+        "step5_attention",
         "attention_quant",
         "attention_route_generate",
         "block_sparse_attention",

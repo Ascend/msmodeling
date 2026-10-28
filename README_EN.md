@@ -76,6 +76,13 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 </details>
 
 <details>
+<summary><b>Step Series</b></summary>
+
+🔹 **[Oct 26, 2026]**: msModeling adds support for the **Step 5 Preview** model with text and image inputs.<br>
+
+</details>
+
+<details>
 <summary><b>Recent Feature Updates</b></summary>
 
 🔹 **[Sep 15, 2026]**: Adds a calibrated analytical performance model that corrects Roofline latency estimates with a calibration profile.<br>

@@ -1,0 +1,9 @@
+{
+  "model_id": "stepfun-ai/Step-5-Preview",
+  "revision": "364b3b03fed2477aa0953fe855a2c4c8c48ee3cc",
+  "source": "https://huggingface.co/stepfun-ai/Step-5-Preview",
+  "license": "tensor_cast/transformers/builtin_model/licenses/LICENSE-Step5-Preview-StepFun-1.0",
+  "changes": [
+    "Removed checkpoint FP8 quantization metadata for explicit BF16 simulation; architecture unchanged."
+  ]
+}
