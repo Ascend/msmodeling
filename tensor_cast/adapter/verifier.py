@@ -67,10 +67,15 @@ class KeyOpCheck:
     op_breakdown: Dict[str, int]
     basis: str
     severity: str = "error"
+    acceptance_basis: Optional[str] = None
+
+    @property
+    def count_matched(self) -> bool:
+        return self.expected_count == self.actual_count
 
     @property
     def matched(self) -> bool:
-        return self.expected_count == self.actual_count
+        return self.count_matched or self.acceptance_basis is not None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -78,9 +83,11 @@ class KeyOpCheck:
             "expected_count": self.expected_count,
             "actual_count": self.actual_count,
             "matched": self.matched,
+            "count_matched": self.count_matched,
             "op_breakdown": dict(self.op_breakdown),
             "basis": self.basis,
             "severity": self.severity,
+            "acceptance_basis": self.acceptance_basis,
         }
 
 
@@ -143,6 +150,10 @@ def _moe_path_op_count(actual: ActualSummary) -> int:
     return sum(op.count for name, op in actual.ops.items() if _is_moe_path_op(name))
 
 
+def _moe_path_op_breakdown(actual: ActualSummary) -> Dict[str, int]:
+    return {name: op.count for name, op in actual.ops.items() if _is_moe_path_op(name)}
+
+
 def _check_severity(user_input: Any) -> str:
     """Key-op equality is only asserted for basic cases.
 
@@ -160,6 +171,7 @@ def verify_key_op_counts(
     basis: ExpectationBasis,
     actual: ActualSummary,
     user_input: Any = None,
+    moe_patch_replacements: Optional[int] = None,
 ) -> List[KeyOpCheck]:
     severity = _check_severity(user_input) if user_input is not None else "error"
     actual_by_category = summarize_key_ops(actual.ops)
@@ -167,14 +179,30 @@ def verify_key_op_counts(
     for category in KEY_OP_CATEGORIES:
         expectation = basis.expectations[category]
         actual_entry = actual_by_category.get(category, {"count": 0, "op_breakdown": {}})
+        actual_count = int(actual_entry["count"])
+        acceptance_basis = None
+        if category == MOE_GATING_CATEGORY and expectation.expected_count > 0 and actual_count == 0:
+            moe_path_breakdown = _moe_path_op_breakdown(actual)
+            if moe_patch_replacements and int(moe_patch_replacements) == expectation.expected_count:
+                acceptance_basis = (
+                    f"{moe_patch_replacements} MoE blocks were replaced by the doctor build; "
+                    "the model uses a standard non-tensor-cast gating path"
+                )
+            elif moe_path_breakdown:
+                evidence = ", ".join(f"{name} x{count}" for name, count in moe_path_breakdown.items())
+                acceptance_basis = (
+                    "TensorCast MoE-path operators prove the adapted MoE path executed "
+                    f"despite no direct tensor_cast gating op: {evidence}"
+                )
         checks.append(
             KeyOpCheck(
                 category=category,
                 expected_count=expectation.expected_count,
-                actual_count=int(actual_entry["count"]),
+                actual_count=actual_count,
                 op_breakdown=dict(actual_entry["op_breakdown"]),
                 basis=expectation.basis,
                 severity=severity,
+                acceptance_basis=acceptance_basis,
             )
         )
     return checks
@@ -216,13 +244,19 @@ def collect_verification_issues(
             continue
         if check.category == MOE_GATING_CATEGORY and check.expected_count > 0 and check.actual_count == 0:
             if moe_patch_replacements or _moe_path_op_count(actual) > 0:
-                # MoE blocks execute on the TensorCast path (a non-empty MoE
-                # patch report or routing/dispatch ops prove it) and this
-                # model gates through the standard non-tensor-cast path (HF
-                # pre-computed top-k or torch.topk), so there is no
-                # tensor_cast gating op to count. An empty patch report
-                # (module name mismatch, missing fields) is not evidence and
-                # falls through to MOE_NOT_ADAPTED.
+                issues.append(
+                    VerificationIssue(
+                        category="VERIFICATION_EVIDENCE_NOT_APPLIED",
+                        message=(
+                            "MoE adaptation evidence exists, but the gating KeyOpCheck was not marked "
+                            "as accepted. Pass the doctor MoE replacement count to verify_key_op_counts "
+                            "or preserve the TensorCast MoE-path evidence."
+                        ),
+                        severity="error",
+                        expected=check.expected_count,
+                        actual=check.actual_count,
+                    )
+                )
                 continue
             issues.append(
                 VerificationIssue(

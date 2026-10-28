@@ -38,7 +38,7 @@
 | `msmodeling-ci-recovery` | 读取 openLiBing 结果、定位日志、修复、复验并循环至通过或明确阻塞 |
 | `msmodeling-review-feedback` | 分析和处理 PR 检视意见，验证修改并通过 CLI 回复 |
 | `profiling-database-lifecycle` | 串联轴密度规则、Shape 生成、NPU 采集、生产回放、异常审计和数据库 PR 发布 |
-| `model-adaptation-validation-workflow` | 先执行跑通级模型适配，再串联 Theory↔Runtime Shape/dtype 看护和 NPU 实测分层对账 |
+| `model-adaptation-validation-workflow` | 从自然语言目标或现有 case 出发，完整串联或独立执行模型适配、Shape/dtype 看护、NPU 实测对账和校准 handoff |
 | `model-adaptation-calibration-loop` | 对非通过项进行人工映射审查、最小代码修正和受影响门禁复验 |
 
 默认是逐阶段确认的 `guided` 模式。用户明确给出仓库、Issue、分支和目标范围后，可切换为
@@ -143,22 +143,47 @@ TensorCast 新模型接入流程 skill（跑通级）——从仿真命令出发
 
 ## model-adaptation-validation-workflow
 
-模型适配精度闭环执行 Skill。第一阶段调用当前 `model-adaptation`，完成 doctor、Profile 人工确认、关键算子次数 verify 和原始仿真命令；后续再执行 Shape/dtype 看护和可选 NPU profiling 分层对账。
+交互式模型适配精度闭环执行 Skill。它既可以按完整顺序执行，也可以只运行一个独立阶段。用户可以直接说自然语言目标，不必记住模式名；显式写出模式名可以更严格地限定执行范围。
+
+### Execution modes
+
+| 模式 | 典型说法 | 执行范围 | 最少输入 |
+| ---- | ------- | ------- | ------- |
+| `full` | “执行完整工作流”“做模型适配精度闭环” | 基础适配 → Shape/dtype → 可选 NPU 对账 → 汇总/校准 handoff | 已确认仿真命令；语义阶段的 Theory/run profile；实测阶段的 CSV+trace |
+| `adaptation-only` | “只做模型适配”“只跑 doctor/verify/仿真” | doctor、Profile 检查点、verify、原始仿真 | 已确认仿真命令 |
+| `semantic-only` | “只跑算子精度防护网”“只检查 Shape/dtype” | `tools.model_diagnostics --theory-compare` | 匹配的 Theory Spec 和 run-profile YAML |
+| `profiling-only` | “只做实测对账”“只比较 CSV 和 trace” | `npu_layer_compare.py` | 同场景的 kernel CSV 和 TensorCast `trace.json` |
+| `calibration-only` | “进入校准审核”“修复非通过项” | 转交 `model-adaptation-calibration-loop` | 最新 summary/finding、证据和明确修复授权 |
+
+独立模式不要求补跑完整流程中的前序阶段：`semantic-only` 不需要先运行 doctor，`profiling-only` 不需要先运行 doctor 或 Theory。未请求的阶段在报告中标记为 `NOT_REQUESTED`。
+
+### Quick start
+
+在仓库根目录的 AI 对话中说明所需模式和输入即可，例如：
+`"请使用 model-adaptation-validation-workflow 的 semantic-only 模式，使用 <run-profile.yaml> 只检查 Shape/dtype。"`
+
+五种模式的完整可复制提示词见
+[`references/interactive-dialog.md`](skills/model-adaptation-validation-workflow/references/interactive-dialog.md#7-copyable-mode-invocation-examples)。如果只想执行一次 `text_generate` 仿真，应使用 `text-generate-executor`，不要启动本工作流。
 
 ### File layout
 
 | File | Purpose |
 | ---- | ------- |
-| `model-adaptation-validation-workflow/SKILL.md` | 主流程、人工停止点和完成标准 |
-| `model-adaptation-validation-workflow/references/execution.md` | Windows 命令、状态解释和 MiniMax-M2.7 示例 |
+| `model-adaptation-validation-workflow/SKILL.md` | 五种模式、主流程、人工停止点和完成标准 |
+| `model-adaptation-validation-workflow/references/interactive-dialog.md` | 自然语言路由、渐进问参、五种模式调用示例和多轮恢复规则 |
+| `model-adaptation-validation-workflow/references/execution.md` | 模式分发、Windows 命令和状态解释 |
 | `model-adaptation-validation-workflow/assets/workflow-summary-template.md` | 统一人工摘要模板 |
 
 ### Key constraints
 
+- 先解析 `full`、`adaptation-only`、`semantic-only`、`profiling-only` 或 `calibration-only`，只收集所选模式需要的输入。
+- 自然语言入口每轮最多询问三个当前阶段必需参数；完整命令必须先展示并确认，再写入 `command.txt` 或执行。
+- 用户只要求仿真时仅调用 `text-generate-executor`，不会静默扩展到 Profile 注册、Theory 或 profiling。
 - 实测 profiling 不进入基础 `model-adaptation` 的 doctor/verify。
 - Profile 缺失、无效或与候选不一致时，必须暂停并等待用户选择 `确认注册`、`仅保留草稿` 或 `修改字段`。
-- Theory 缺失时阻塞，不从 Runtime trace 倒推预期。
-- 缺少 kernel CSV 或 TensorCast trace 时，profiling 保持 pending/incomplete，不能写成完整通过。
+- 请求语义验证但 Theory 缺失时阻塞，不从 Runtime trace 倒推预期。
+- `profiling-only` 缺少 kernel CSV 或 TensorCast trace 时记为 `INCOMPLETE`；`full` 中没有可选 profiling 数据时不得写成完整性能通过。
+- 模式外阶段统一标记为 `NOT_REQUESTED`，不能标记为 `PASS` 或 `PENDING`。
 
 ---
 

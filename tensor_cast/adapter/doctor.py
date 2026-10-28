@@ -270,7 +270,12 @@ def run_simulation_verification(
         user_input,
         moe_patch_replacements=moe_patch_replacements,
     )
-    checks: List[KeyOpCheck] = verify_key_op_counts(basis, result.summary, user_input)
+    checks: List[KeyOpCheck] = verify_key_op_counts(
+        basis,
+        result.summary,
+        user_input,
+        moe_patch_replacements=moe_patch_replacements,
+    )
     issues: List[VerificationIssue] = collect_verification_issues(
         checks,
         basis,

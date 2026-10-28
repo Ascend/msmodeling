@@ -52,6 +52,8 @@ GitCode 配置：
 | 处理 PR 检视意见 | `msmodeling-review-feedback` |
 | 请求检视或启动合入流程 | `sig-review` |
 | 执行实测算子数据库从密度规则、采集、审计到发布的完整流程 | `profiling-database-lifecycle` |
+| 从自然语言或现有 case 完整串联、或独立执行模型适配、算子 Shape/dtype 看护、NPU 实测分层对账 | `model-adaptation-validation-workflow` |
+| 人工审查算子映射并修正模型适配直到复验通过 | `model-adaptation-calibration-loop` |
 
 | Skill | 触发词 | 用途 |
 |-------|--------|------|
@@ -62,6 +64,8 @@ GitCode 配置：
 | `msmodeling-env-installer` | "安装 msmodeling 环境"、"uv sync" | 安装并验证当前仓库开发环境、依赖和必要环境变量 |
 | `gitcode-cli-installer` | "安装 gitcode-cli"、"gitcode 认证"、"gc auth login" | 安装和认证 gitcode CLI（npm + auth login + lark），一次性配置 |
 | `model-adaptation` | "接入新模型"、"生成 ModelProfile"、"处理 doctor report" | 从仿真命令和开源模型公开信息出发，完成 TensorCast 新模型跑通级适配（仿真跑通 + 关键算子调用次数对账） |
+| `model-adaptation-validation-workflow` | "模型适配精度闭环"、"串联模型适配和算子防护网"、"只跑算子精度防护网"、"只检查 Shape/dtype"、"只做实测分层对账" | 从自然语言渐进问参或现有 case 恢复；支持完整流程及 adaptation-only、semantic-only、profiling-only、calibration-only 独立模式 |
+| `model-adaptation-calibration-loop` | "人工确认算子映射"、"修正适配直到校对通过" | 审查非通过项、记录映射决策、最小修复适配代码并循环复验 |
 | `text-generate-executor` | "跑 text_generate"、"验证 best row"、"导出 trace" | 生成并执行 `python -m cli.inference.text_generate` 单点验证命令 |
 | `throughput-optimizer-executor` | "搜索最佳 TP/EP"、"硬件对比"、"PD 配比优化" | 生成并执行 `python -m cli.inference.throughput_optimizer` 吞吐规划命令 |
 | `throughput-optimizer-explainer` | "结果是否合理"、"为什么硬件不同"、"Cube/Vec/Comm/Mem 瓶颈" | 解释 optimizer 结果，并将 best row 映射到 `text_generate` 验证命令 |
@@ -144,6 +148,8 @@ python scripts/ai/resolve_repository_context.py --json
 | `msmodeling-ci-recovery` | openLiBing 流水线监控与修复循环 |
 | `msmodeling-review-feedback` | 检视意见分析、修复、回复和解决 |
 | `profiling-database-lifecycle` | 实测算子数据库从基线、采集计划、实测、质量检查到发布反馈的完整闭环 |
+| `model-adaptation-validation-workflow` | 从自然语言渐进问参或现有 case 恢复，完整串联或独立执行模型适配、语义防护和实测对账 |
+| `model-adaptation-calibration-loop` | 验证失败后的人工映射决策、最小修复和复验闭环 |
 
 ### 7.2 GitCode CLI Skills
 

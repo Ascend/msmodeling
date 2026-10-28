@@ -478,9 +478,19 @@ python -m cli.inference.text_generate MiniMaxAI/MiniMax-M2.7 \
         unadapted_basis = derive_key_op_expectations(structure, user_input)
         actual = _summary([_event("torch.ops.tensor_cast.attention.default")])
 
-        adapted_checks = verify_key_op_counts(adapted_basis, actual, user_input)
+        adapted_checks = verify_key_op_counts(
+            adapted_basis,
+            actual,
+            user_input,
+            moe_patch_replacements=1,
+        )
         # Standard gating path (torch.topk): no tensor_cast gating op, but the
         # MoE patch report proves the blocks were adapted.
+        gating_check = next(check for check in adapted_checks if check.category == "moe_gating")
+        self.assertTrue(gating_check.matched)
+        self.assertFalse(gating_check.count_matched)
+        self.assertIn("1 MoE blocks were replaced", gating_check.acceptance_basis)
+        self.assertFalse(gating_check.to_dict()["count_matched"])
         issues = collect_verification_issues(
             adapted_checks, adapted_basis, actual, user_input, moe_patch_replacements=1
         )
@@ -527,6 +537,10 @@ python -m cli.inference.text_generate MiniMaxAI/MiniMax-M2.7 \
         ]
         actual = _summary(moe_path_events)
         checks = verify_key_op_counts(basis, actual, user_input)
+        gating_check = next(check for check in checks if check.category == "moe_gating")
+        self.assertTrue(gating_check.matched)
+        self.assertFalse(gating_check.count_matched)
+        self.assertIn("init_routing_v2", gating_check.acceptance_basis)
         issues = collect_verification_issues(checks, basis, actual, user_input)
         self.assertEqual(
             [issue.category for issue in issues if issue.category == "MOE_NOT_ADAPTED"],

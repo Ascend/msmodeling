@@ -1,4 +1,4 @@
 interface:
   display_name: "Model Adaptation Validation Workflow"
-  short_description: "串联跑通级模型适配、Shape/dtype 看护与 NPU 实测分层对账"
-  default_prompt: "Use $model-adaptation-validation-workflow to inventory and explain every case input, announce the files used by each stage, run current model-adaptation doctor and verify first, pause for Profile approval when needed, then run semantic and profiling validation."
+  short_description: "完整或独立执行模型适配、Shape/dtype 看护与 NPU 实测对账"
+  default_prompt: "Use $model-adaptation-validation-workflow to resolve full, adaptation-only, semantic-only, profiling-only, or calibration-only mode from my request; collect only that mode's inputs, preserve its checkpoints, and report unrequested stages as NOT_REQUESTED."
