@@ -19,6 +19,13 @@ The throughput optimizer can be used for hardware planning, throughput optimizat
 
 You can add `--speculative-method {dflash,dspark}` to any of the preceding scenarios to enable speculative decoding. For MTP, you are advised to use the unified interface `--speculative-method mtp`. For details, see [Combining Speculative Decoding (Dflash/DSpark)](#combining-speculative-decoding-dflashdspark).
 
+`--max-concurrency` limits the total concurrent requests for each optimizer instance. It accepts a positive integer of at least 1 and defaults to `None`, which means that this option imposes no limit. Without this option, the existing search strategy is unchanged.
+
+- The optimizer applies the limit separately to each instance in aggregation, disaggregation, and PD-ratio modes. It does not limit the fleet as a whole.
+- For an attention DP value of `D`, the local batch limit is `floor(max_concurrency / D)`. For example, `--max-concurrency 10` with attention DP 4 allows a local batch size of 2, or 8 requests total.
+- The limit intersects with `--batch-range`. The optimizer skips infeasible ranges without running inference.
+- The limit does not change the independent `--max-batched-tokens` budget.
+
 ### 2.1 PD Aggregation Scenario
 
 Aggregation mode optimizes throughput for a combined prefill-decode serving architecture where both phases run on the same instance. The optimizer searches across all possible Tensor Parallelism (TP) and Data Parallelism (DP) configurations to find the best throughput under Service Level Objective (SLO) constraints.
@@ -45,8 +52,11 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --compile \
     --quantize-linear-action W8A8_DYNAMIC \
     --quantize-attention-action disabled \
-    --tpot-limit 50
+    --tpot-limit 50 \
+    --max-concurrency 128
 ```
+
+This example limits each instance to 128 concurrent requests. SLO and memory constraints can further reduce the result.
 
 #### Using Prefix Cache
 
@@ -599,10 +609,12 @@ Service Options:
                         merged, so the reported minimum is global across those budgets.
   --max-batched-tokens MAX_BATCHED_TOKENS
                         Max batched tokens per data-parallel replica for one prefill or mixed prefill/decode step. If omitted, starts from 4 * input_length and falls back on Prefill OOM. (default: None)
+  --max-concurrency <N>
+                        Maximum simultaneous requests per optimizer instance. (default: None)
   --prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE
                         Prefix cache hit rate for token-level prefill reuse approximation. Valid range: [0, 1). (default: 0.0)
   --batch-range BATCH_RANGE [BATCH_RANGE ...]
-                        Batch size range: [min max] or [max] (default: 1 for min, no limit for max) (default: None)
+                        Batch size range: min max, or a single max (min defaults to 1). (default: None)
   --serving-cost SERVING_COST
                         Serving cost represents the cost of service delivery (default: 0)
   --disagg              If set, run disaggregation mode. disagg means disaggregation mode. (default: False)
@@ -693,7 +705,8 @@ The main parameters are described as follows:
 | --tpot-limit                            | Service Options | Optional | Specifies the TPOT constraint under which to search for the best throughput.<br>1. Type: Float.<br>2. Value range: positive, in ms.<br>3. Default: `None`, meaning no TPOT limit. |
 | --target-qps                            | Service Options | Optional | Specifies the target request QPS (req/s). Setting it triggers capacity planning mode, which back-calculates the minimum device count that meets this QPS under the given SLO.<br>1. Type: Float.<br>2. Value range: positive number.<br>3. Default: `None`.<br>4. For how it works with `--num-devices`, and for the constraint that exactly one phase SLO is required under `--disagg`, see [2.5 Capacity Planning Scenario](#25-capacity-planning-scenario). |
 | --max-batched-tokens                    | Service Options | Optional | Specifies the maximum number of batched tokens for a single data parallelism (DP) replica in one prefill or mixed prefill/decode step.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: `None`. Automatic mode first uses `4 * input_length` and falls back to `2 * input_length` and then `1 * input_length` on prefill OOM. |
-| --batch-range                           | Service Options | Optional | Specifies the batch size search range.<br>1. Type: List[Int].<br>2. Format: `[min max]` or `[max]`.<br>3. Default: `None`. When `min` is not specified, the search starts from 1. When `max` is not specified, no upper limit is set. |
+| --max-concurrency                       | Service Options | Optional | Limits total concurrent requests per optimizer instance.<br>1. Type: Int.<br>2. Value range: positive integer, at least 1.<br>3. Default: `None`, meaning this option imposes no limit. |
+| --batch-range                           | Service Options | Optional | Specifies the batch size search range.<br>1. Type: List[Int].<br>2. Format: `[min max]` or `[max]`.<br>3. Default: `None`. When `min` is not specified, the search starts from 1. When `max` is not specified, this option imposes no upper limit. If `--max-concurrency` is set, it supplies an additional upper limit. |
 | --serving-cost                          | Service Options | Optional | Specifies the serving cost for cost-related metric calculation.<br>1. Type: Float.<br>2. Value range: non-negative.<br>3. Default: 0. |
 | --disagg                                | Service Options | Optional | Enables PD disaggregation mode.<br>1. Type: Bool.<br>2. Value range: switch parameter.<br>3. Default: `False`. |
 | --jobs                                  | Service Options | Optional | Specifies the number of parallel search jobs.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: 8. |
