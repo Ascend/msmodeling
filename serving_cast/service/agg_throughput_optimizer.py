@@ -339,8 +339,6 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             nonlocal mixed_steps
             shapes = tuple(sorted(shapes))
             mixed = any(s.is_decode for s in shapes) and any(not s.is_decode for s in shapes)
-            if mixed and ((data.dflash_block_size or 0) >= 2 or (data.dspark_block_size or 0) >= 2):
-                raise ValueError("Mixed-step draft speculative decoding is not supported yet")
 
             def phase_profile(phase_shapes):
                 if phase_shapes not in self._pp_step_cache:
@@ -544,8 +542,6 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             homogeneous = all(s == shapes[0] for s in shapes)
             mixed = any(s.is_decode for s in shapes) and any(not s.is_decode for s in shapes)
             decode_interpolated = False
-            if mixed and ((data.dflash_block_size or 0) >= 2 or (data.dspark_block_size or 0) >= 2):
-                raise ValueError("Mixed-step draft speculative decoding is not supported yet")
             if not homogeneous and offload_enabled:
                 raise ValueError("Heterogeneous aggregation steps with KV offload are not supported")
             if mixed:

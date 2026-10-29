@@ -175,6 +175,31 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(strategy._last_aggregation_timeline.steps[1][1], 10)
         self.assertGreaterEqual(metrics.makespan, 20)
 
+    def test_draft_mixed_step_pays_full_verification_cost(self):
+        for method, block_field, acceptance_field in (
+            ("dflash", "dflash_block_size", "dflash_acceptance_length"),
+            ("dspark", "dspark_block_size", "dspark_acceptance_length"),
+        ):
+            with self.subTest(method=method):
+                strategy = self.make_strategy(latency=lambda is_decode: 12.0 if is_decode else 10.0)
+                data = self.data(batch_size=4, output_length=10, max_batched_tokens=20)
+                data.speculative_method = method
+                setattr(data, block_field, 6)
+                setattr(data, acceptance_field, 3.5)
+
+                metrics = strategy._get_timeline_metrics(data, 4)
+                timeline = strategy._last_aggregation_timeline
+                mixed = [
+                    (shapes, latency)
+                    for shapes, latency in timeline.steps
+                    if any(s.is_decode for s in shapes) and any(not s.is_decode for s in shapes)
+                ]
+                self.assertTrue(mixed)
+                self.assertTrue(all(latency == 12.0 for _, latency in mixed))
+                self.assertTrue(all(s.query_len == 6 for shapes, _ in mixed for s in shapes if s.is_decode))
+                self.assertEqual(sum(sum(s.is_decode for s in shapes) for shapes, _ in timeline.steps), 8)
+                self.assertAlmostEqual(metrics.output_throughput, 40_000 / timeline.elapsed_ms)
+
     def test_multichunk_and_dp_share_same_metric_identity(self):
         for dp in (1, 2):
             strategy = self.make_strategy(dp)
@@ -710,6 +735,40 @@ class TestAggPipelineParallel(unittest.TestCase):
                 self.assertEqual(len(decode_steps), 2)  # one full pass per request
                 self.assertTrue(all(s.query_len == 6 for shapes in decode_steps for s in shapes))
                 self.assertEqual(row["tpot"], round((timeline.e2e - timeline.ttft) / 3, 3))
+
+    def test_pp_draft_mixed_step_uses_full_block_and_phase_max(self):
+        for method, block_field, acceptance_field in (
+            ("dflash", "dflash_block_size", "dflash_acceptance_length"),
+            ("dspark", "dspark_block_size", "dspark_acceptance_length"),
+        ):
+            with self.subTest(method=method):
+                strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1, microbatch_size=2)
+                profile = _agg_pp_profile((0.001, 0.001))
+                strategy.model_runner.run_inference.return_value = _AggPPMetrics(profile)
+                data = OptimizerData(
+                    length_distribution=LengthDistribution(bins=[LengthBin(1, 2, 1), LengthBin(10, 11, 5)]),
+                    output_length=10,
+                    batch_size=6,
+                    max_batched_tokens=20,
+                    num_mtp_tokens=0,
+                    mtp_acceptance_rate=[],
+                    speculative_method=method,
+                )
+                setattr(data, block_field, 6)
+                setattr(data, acceptance_field, 3.5)
+
+                with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
+                    summary = strategy.get_inference_info(data)
+                timeline = strategy._last_aggregation_timeline
+                mixed = [
+                    shapes
+                    for shapes, _ in timeline.steps
+                    if any(s.is_decode for s in shapes) and any(not s.is_decode for s in shapes)
+                ]
+                self.assertTrue(mixed)
+                self.assertTrue(all(s.query_len == 6 for shapes in mixed for s in shapes if s.is_decode))
+                self.assertEqual(sum(sum(s.is_decode for s in shapes) for shapes, _ in timeline.steps), 12)
+                self.assertEqual(summary.get_summary_df().iloc[0]["tpot"], round((timeline.e2e - timeline.ttft) / 9, 3))
 
     def test_single_token_skips_decode_profile_schedule_and_oom(self):
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
