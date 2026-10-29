@@ -180,9 +180,9 @@ python -m cli.inference.text_generate <model_id> [options]
 | `ep-size` | Expert Parallel 数量，MoE 模型常用 |
 | `num-mtp-tokens` | MTP token 数，DeepSeek 等支持 MTP 的模型可用 |
 | `prefix-cache-hit-rate` | Prefix Cache 命中率，取值 `[0,1)`，用于估计 prefill token 复用收益 |
-| `quantize-linear-action` | Linear 层量化方式，如 `W8A8_DYNAMIC`、`fp8`、`mxfp4` |
+| `quantize-linear-action` | Linear 层量化方式，如 `W8A8_DYNAMIC`、`FP8`、`MXFP4`、`HIF8` |
 | `quantize-non-expert-linear-action` | 非专家 Linear 层量化覆盖项，主要用于 DeepSeek V4；作用于 attention projections、dense MLP 和 shared experts；routed MoE experts 仍使用 `quantize-linear-action` |
-| `quantize-attention-action` | KV Cache / Attention 量化方式，如 `disabled`、`int8`、`fp8` |
+| `quantize-attention-action` | KV Cache / Attention 量化方式，如 `disabled`、`int8`、`fp8`、`hif8` |
 | `image-height/image-width` | VL 图像尺寸 |
 
 ### 4.2 最小 LLM 示例：单芯片 decode
@@ -829,6 +829,10 @@ jobs: 8
 | 不希望引入量化影响 | `disabled` |
 | 显存压力明显 | 尝试 `int8` attention 或 `fp8` |
 | mxfp4 方案评估 | 使用 `mxfp4`，必要时调整 `mxfp4-group-size` |
+
+评估 A5 HIF8 时，选择 A5 设备，将 `quantize-linear-action` 设为 `HIF8`。默认使用动态逐 token 激活、逐输出通道权重和 FP32 scale；可通过 `quantize-non-expert-linear-action` 配置非专家层覆盖项。
+
+Attention/KV 通过 `quantize-attention-action` 独立配置。选择 `HIF8` 表示 KV Cache 使用 HIF8 存储、Attention 使用 BF16 计算（仅用于性能仿真），不表示采用 HIF8 Attention 矩阵计算。Linear 量化选项不会自动改变 Attention/KV 配置。
 
 注意：仿真工具关注性能和资源估计，不替代真实精度评估。量化后的模型质量仍需通过精度测试验证。
 

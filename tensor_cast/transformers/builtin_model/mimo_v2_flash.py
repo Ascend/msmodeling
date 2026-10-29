@@ -91,6 +91,9 @@ class MiMoV2AttentionTensorCast(AttentionTensorCast):
         query_lens = attention_meta.query_lens if attention_meta else None
         block_table = attention_meta.block_table_tensor if attention_meta else None
 
+        if self.quant_config is not None and self.quant_config.is_hif8_kv:
+            raise ValueError("HIF8 KV cache simulation is not supported for MiMo V2 Flash attention")
+
         if attention_meta is not None:
             if kv_cache is None:
                 raise ValueError("MiMo V2 attention metadata requires a packed KV cache")

@@ -18,7 +18,8 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from ..utils import register_tensor_cast_op
+from ..quantize_utils import _HIF8_OUTPUT_DTYPES, require_metadata_tensor
+from ..utils import HIF8_STORAGE_DTYPE, register_tensor_cast_op
 
 
 @register_tensor_cast_op("quantize")
@@ -121,3 +122,23 @@ def _(
         torch.empty_like(x, dtype=torch.int4),
         torch.empty((*x.shape[:-1], K_group), dtype=torch.float8_e8m0fnu, device="meta"),
     )
+
+
+@register_tensor_cast_op("dynamic_quantize_hif8")
+def dynamic_quantize_hif8(x: torch.Tensor, per_token: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+    require_metadata_tensor(x)
+    if x.ndim != 2 or x.dtype not in _HIF8_OUTPUT_DTYPES:
+        raise ValueError("HIF8 dynamic quantization requires a 2D floating-point input")
+    shape = (x.shape[0], 1) if per_token else ()
+    return (
+        torch.empty_like(x, dtype=HIF8_STORAGE_DTYPE),
+        torch.empty(shape, dtype=torch.float32, device=x.device),
+    )
+
+
+@register_tensor_cast_op("quantize_hif8")
+def quantize_hif8(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    require_metadata_tensor(x)
+    if x.dtype not in _HIF8_OUTPUT_DTYPES or scale.dtype != torch.float32 or scale.numel() != 1:
+        raise ValueError("HIF8 static quantization requires floating-point input and a scalar float32 scale")
+    return torch.empty_like(x, dtype=HIF8_STORAGE_DTYPE)

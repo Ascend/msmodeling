@@ -279,7 +279,34 @@ class AttentionTensorCast(AttentionBase):
             # attn_output below to survive (mirrors deepseek_v4's KV-producer binding).
             gathered_query = self.dcp_group.all_gather(query, dim=-1)
 
-        if attention_meta is not None:
+        hif8_kv = self.quant_config is not None and self.quant_config.is_hif8_kv
+        if hif8_kv:
+            out_dtype = query.dtype
+            if attention_meta is not None:
+                if kv_cache is None:
+                    raise ValueError("HIF8 KV attention metadata requires a KV cache")
+                torch.ops.tensor_cast.hif8_kv_cache_write(
+                    key, value, kv_cache, attention_meta.slot_mapping, self.quant_config.kv_scale
+                )
+                key, value = kv_cache[0], kv_cache[1]
+            else:
+                key = torch.ops.tensor_cast.quantize_hif8(key, self.quant_config.kv_scale)
+                value = torch.ops.tensor_cast.quantize_hif8(value, self.quant_config.kv_scale)
+            attn_output = torch.ops.tensor_cast.attention_hif8_kv(
+                query.to(torch.bfloat16),
+                key,
+                value,
+                attention_mask,
+                attention_meta.block_table_tensor if attention_meta is not None else None,
+                query_start_loc,
+                seq_lens,
+                query_lens,
+                self.quant_config.kv_scale,
+                key.shape[-1],
+                value.shape[-1],
+                None,
+            ).to(out_dtype)
+        elif attention_meta is not None:
             if self.quant_config is not None:
                 kv_scale = self.quant_config.kv_scale
                 kv_offset = self.quant_config.kv_offset
@@ -292,7 +319,7 @@ class AttentionTensorCast(AttentionBase):
             torch.ops.tensor_cast.reshape_and_cache(key, value, kv_cache, attention_meta.slot_mapping)
             key = kv_cache[0]
             value = kv_cache[1]
-        if self.quant_config is not None and attention_meta is not None:
+        if not hif8_kv and self.quant_config is not None and attention_meta is not None:
             out_dtype = query.dtype
             query = torch.ops.tensor_cast.quantize(
                 query,
@@ -317,7 +344,7 @@ class AttentionTensorCast(AttentionBase):
                 self.quant_config.attention_prob_offset,
                 out_dtype,
             )
-        else:
+        elif not hif8_kv:
             attn_output = torch.ops.tensor_cast.attention(
                 query,
                 key,

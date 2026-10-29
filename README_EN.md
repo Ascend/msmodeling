@@ -110,7 +110,7 @@ Click a module name to expand the list of **supported features**.<br>
 🔹 Prefix Cache simulation<br>
 🔹 MTP, DFlash, and DSpark speculative decoding simulation<br>
 🔹 Compilation and graph optimization, and multi-stream compute-communication overlap<br>
-🔹 Quantization simulation, including `W8A8`, `W4A8`, `FP8`, and `MXFP4`<br>
+🔹 Quantization simulation, including `W8A8`, `W4A8`, `FP8`, `MXFP4`, and `HIF8`<br>
 🔹 Parallelism and MoE extensions, including TP, DP, EP, PP, and DCP, as well as fine-grained parallelism such as Embedding TP and Vision TP<br>
 🔹 Switching among the Roofline, calibrated analytical, and Profiling performance models<br>
 🔹 Chrome Trace and debugging<br>

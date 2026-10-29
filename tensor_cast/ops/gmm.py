@@ -18,6 +18,7 @@ from typing import List, Optional, Tuple
 
 import torch
 
+from ..quantize_utils import validate_hif8_matmul
 from ..utils import register_tensor_cast_op
 
 
@@ -80,6 +81,26 @@ def _(
     M = sum(xi.shape[0] for xi in x)
     N = w[0].shape[1]
     return torch.empty((M, N), dtype=out_dtype, device="meta")
+
+
+@register_tensor_cast_op("grouped_matmul_hif8")
+def grouped_matmul_hif8(
+    x: List[torch.Tensor],
+    w: List[torch.Tensor],
+    w_scale: List[torch.Tensor],
+    x_scale: List[torch.Tensor],
+    bias: List[Optional[torch.Tensor]],
+    out_dtype: torch.dtype,
+    *,
+    is_mtp_unfused: bool = False,
+) -> torch.Tensor:
+    if not x or not (len(x) == len(w) == len(w_scale) == len(x_scale) == len(bias)):
+        raise ValueError("HIF8 GMM requires nonempty equally sized expert lists")
+    for xi, wi, xsi, wsi, bi in zip(x, w, x_scale, w_scale, bias):
+        validate_hif8_matmul(xi, wi, xsi, wsi, bi, out_dtype)
+        if wi.shape[1] != w[0].shape[1]:
+            raise ValueError("HIF8 GMM experts must share the output width")
+    return torch.empty((sum(xi.shape[0] for xi in x), w[0].shape[1]), dtype=out_dtype, device=x[0].device)
 
 
 def _grouped_matmul_swiglu_out(

@@ -138,6 +138,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --tpot-limit 50
 ```
 
+
 #### 2.3.2 查看优化结果
 
 命令执行成功后，终端会先打印输入配置和最优配置摘要，随后展示候选并行配置表。例如：

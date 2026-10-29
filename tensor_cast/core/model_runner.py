@@ -216,6 +216,13 @@ class ModelRunner:
         the replay path uses exactly the same analytic/profiling setup as
         ``ModelRunner``'s direct path.
         """
+        if any(
+            str(getattr(user_input, name, "")) == "HIF8"
+            for name in ("quantize_linear_action", "quantize_non_expert_linear_action")
+        ):
+            from ..device import require_hif8_support
+
+            require_hif8_support(device_profile)
         perf_model_types: List[str] = getattr(user_input, "performance_model", ["analytic"])
         if isinstance(perf_model_types, str):
             perf_model_types = [perf_model_types]

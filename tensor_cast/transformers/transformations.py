@@ -1542,6 +1542,32 @@ def _draft_attention_layer_indices(model: "ModelWrapperBase") -> set[int]:
     return set()
 
 
+def _exclude_hif8_kv_projection_linears(model):
+    """The MLA cache-only recipe executes decomposed KV projections in BF16.
+
+    Preserve their backing floating weight rather than retaining an unregistered
+    BF16 copy alongside a quantized kv_b_proj that the MLA path never executes.
+    Other Linear modules continue to use the requested quantization action.
+    """
+    quant_config = model.model_config.quant_config
+    if not any(qc is not None and qc.is_hif8_kv for qc in quant_config.attention_configs.values()):
+        return
+    projection_ids = set()
+    for module in model._inner.modules():
+        if not isinstance(module, MultiheadLatentAttentionBase):
+            continue
+        qc = quant_config.attention_configs.get(
+            getattr(module, "layer_idx", -1), quant_config.attention_configs.get(-1)
+        )
+        if qc is not None and qc.is_hif8_kv and hasattr(module, "kv_b_proj"):
+            projection_ids.add(id(module.kv_b_proj))
+    excluded = list(quant_config.modules_to_not_convert or [])
+    for name, module in model._inner.named_modules():
+        if id(module) in projection_ids and name not in excluded:
+            excluded.append(name)
+    quant_config.modules_to_not_convert = excluded
+
+
 def quantize_linear(
     model: "ModelWrapperBase",
     report: PatchReport | None = None,
@@ -1586,6 +1612,7 @@ def quantize_linear(
         ):
             _exclude_unquantized_dsa_linears(model.model_config)
         _ensure_draft_excluded_from_linear_quant(model)
+        _exclude_hif8_kv_projection_linears(model)
         before = {
             name: type(module).__name__
             for name, module in model._inner.named_modules()
@@ -1607,6 +1634,15 @@ def quantize_linear(
     return model
 
 
+def _bind_attention_quant_config(module, quant_config):
+    if quant_config is not None and quant_config.is_hif8_kv:
+        # Each layer owns one persistent FP32 scale; include it in model buffers
+        # rather than hiding scale storage in an untracked configuration object.
+        module.register_buffer("hif8_kv_scale", quant_config.kv_scale.to(device="meta").clone())
+        quant_config = dataclasses.replace(quant_config, kv_scale=module.hif8_kv_scale)
+    module.quant_config = quant_config
+
+
 def quantize_attention(
     model: "ModelWrapperBase",
     report: PatchReport | None = None,
@@ -1617,6 +1653,7 @@ def quantize_attention(
     attention_configs = model.model_config.quant_config.attention_configs
     default_attention_config = attention_configs.get(-1)
     draft_attn_idxs = _draft_attention_layer_indices(model)
+    hif8_mla_layers = set()
 
     if model.model_config.mla_config:
         for name, module in model._inner.named_modules():
@@ -1625,11 +1662,13 @@ def quantize_attention(
                 continue
             if isinstance(module, MultiheadLatentAttentionBase):
                 if hasattr(module, "layer_idx") and module.layer_idx in attention_configs:
-                    module.quant_config = attention_configs[module.layer_idx]
+                    _bind_attention_quant_config(module, attention_configs[module.layer_idx])
                 else:
-                    module.quant_config = default_attention_config
+                    _bind_attention_quant_config(module, default_attention_config)
                 if module.quant_config is not None:
                     module.quantize_params()
+                    if module.quant_config.is_hif8_kv and hasattr(module, "layer_idx"):
+                        hif8_mla_layers.add(module.layer_idx)
                     if report is not None:
                         report.add_replacement(
                             name,
@@ -1640,12 +1679,24 @@ def quantize_attention(
 
     if hasattr(model, "attention_by_layers"):
         for i in range(model.num_hidden_layers):
+            if i in hif8_mla_layers:
+                # MLA owns its scale; this ordinary attention registry entry is
+                # unused and must not introduce a second persistent scale.
+                continue
             if i in draft_attn_idxs:
                 # Keep draft attention unquantized (does not share target quant strategy).
                 continue
             if i not in model.attention_by_layers:
                 continue
-            model.attention_by_layers[i].quant_config = attention_configs.get(i, default_attention_config)
+            _bind_attention_quant_config(
+                model.attention_by_layers[i], attention_configs.get(i, default_attention_config)
+            )
+            attention_layer = model.attention_by_layers[i]
+            if attention_layer.quant_config is not None and attention_layer.quant_config.is_hif8_kv:
+                # attention_by_layers is a plain dict, not a registered ModuleDict.
+                # Anchor its persistent scale on the owning model for weight-size
+                # and PP accounting, while the attention op uses the same tensor.
+                model.register_buffer(f"attention_{i}_hif8_kv_scale", attention_layer.hif8_kv_scale)
             if report is not None and model.attention_by_layers[i].quant_config is not None:
                 report.add_replacement(
                     f"attention_by_layers.{i}",

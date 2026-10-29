@@ -25,9 +25,9 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
 from .. import ops  # noqa: F401
-from ..device import DeviceProfile
+from ..device import DeviceProfile, require_hif8_support
 from ..ops.mla import local_mla_phase_token_counts
-from ..utils import is_fp8_dtype, performance_dtype
+from ..utils import HIF8_STORAGE_DTYPE, is_fp8_dtype, performance_dtype, SimFormat
 from .bound_analyzer import StatsKey
 from .base import PerformanceModel
 from .cost_utils import (
@@ -296,6 +296,33 @@ def _(
     )
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.hif8_linear.default)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_hif8.default)
+def _hif8_matmul_properties(info):
+    named = get_named_args(info)
+    x, w = named["x"], named["w"]
+    biases = named["bias"]
+    xs, ws = named["x_scale"], named["w_scale"]
+    if isinstance(x, torch.Tensor):
+        x, w, biases = [x], [w], [biases]
+        xs, ws = [xs], [ws]
+    properties = info.get_memory_access_properties(exclude_input_ids={"x", "w", "x_scale", "w_scale", "bias"})
+    for xi, wi, xsi, wsi, bias in zip(x, w, xs, ws, biases):
+        m, k, n = xi.shape[0], xi.shape[1], wi.shape[1]
+        if m == 0 or k == 0 or n == 0:
+            continue
+        properties.memory_read_bytes += sum(bytes_of_tensor(t) for t in (xi, wi, xsi, wsi))
+        if bias is not None:
+            properties.memory_read_bytes += bytes_of_tensor(bias)
+        _accumulate_compute_ops(properties, SimFormat.HIF8, mma_ops=2 * m * n * k)
+        # Two output scaling multiplies; weights stay encoded inside MMA.
+        # No separate dequantization kernel or high-precision weight buffer.
+        _accumulate_compute_ops(properties, torch.float32, gp_ops=2 * m * n)
+        if bias is not None:
+            _accumulate_compute_ops(properties, bias.dtype, gp_ops=m * n)
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.fp8_linear.default)
 def _(
     op_invoke_info: OpInvokeInfo,
@@ -326,6 +353,51 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
         w_scale=op_invoke_info.args[3],
         bias=op_invoke_info.args[4],
     )
+
+
+def _hif8_quantization_ops(x: torch.Tensor, output_dtype: torch.dtype, num_scales: int = 0) -> int:
+    """Count logical FP32 GP stages, not instructions in an A5 conversion kernel.
+
+    HiFloat8 white paper, sections 2 and 3 (https://arxiv.org/abs/2409.16626):
+    conversion selects the Dot/exponent range and variable mantissa precision,
+    then applies forward-pass round-half-away and encodes the result. Count this
+    as one complete format conversion, as for FP8; the paper does not establish
+    separate instruction costs for those internal steps. uint8 is only storage,
+    so integer rounding/offset operations must not be added to this conversion.
+    """
+    if output_dtype != HIF8_STORAGE_DTYPE:
+        raise ValueError("HIF8 quantization requires uint8 payload storage")
+    elements = x.numel()
+    if elements == 0:
+        return 0
+    input_conversion = elements if x.dtype != torch.float32 else 0
+    scaling = elements
+    lower_saturation = elements
+    upper_saturation = elements
+    hif8_conversion = elements
+    work = input_conversion + scaling + lower_saturation + upper_saturation + hif8_conversion
+    if num_scales:
+        # absmax per group: one abs per element and (group_size - 1) max
+        # comparisons, followed by one division to construct each FP32 scale.
+        absolute_value = elements
+        maximum_reduction = elements - num_scales
+        scale_generation = num_scales
+        work += absolute_value + maximum_reduction + scale_generation
+    return work
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dynamic_quantize_hif8.default)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.quantize_hif8.default)
+def _hif8_quantization_properties(info):
+    named = get_named_args(info)
+    x = named["x"]
+    properties = info.get_memory_access_properties()
+    dynamic = info.func == torch.ops.tensor_cast.dynamic_quantize_hif8.default
+    payload = info.out[0] if dynamic else info.out
+    num_scales = info.out[1].numel() if dynamic else 0
+    work = _hif8_quantization_ops(x, payload.dtype, num_scales)
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=work)
+    return properties
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.quantize.default)
@@ -381,6 +453,18 @@ def _(
     index = op_invoke_info.args[2]
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
     properties.memory_read_bytes += bytes_of_tensor(input) * index.numel() / input.shape[dim]
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.hif8_kv_cache_write.default)
+def _hif8_kv_cache_write_properties(info):
+    named = get_named_args(info)
+    properties = info.get_memory_access_properties(exclude_input_ids={"kv_cache"})
+    cache_dtype = named["kv_cache"].dtype
+    for x in (named["key"], named["value"]):
+        if x is not None:
+            properties.memory_write_bytes += bytes_of_elements(x.numel(), cache_dtype)
+            _accumulate_compute_ops(properties, torch.float32, gp_ops=_hif8_quantization_ops(x, cache_dtype))
     return properties
 
 
@@ -953,6 +1037,48 @@ def _(
 
     properties.compute_ops.setdefault(query.dtype, OpInvokeInfo.ComputeOps()).mma_ops = bmm1_ops + bmm2_ops
     properties.compute_ops.setdefault(out_dtype, OpInvokeInfo.ComputeOps()).gp_ops = softmax_ops
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.attention_hif8_kv.default)
+def _hif8_kv_attention_properties(info):
+    named = get_named_args(info)
+    query, key, value = named["query"], named["key"], named["value"]
+    # Reuse the asymmetric BF16 attention formula, but retain the actual uint8
+    # KV tensors for byte counting. No integer/HIF8 MMA is introduced.
+    proxy = OpInvokeInfo(
+        torch.ops.tensor_cast.mimo_v2_attention.default,
+        tuple(
+            named[k]
+            for k in (
+                "query",
+                "key",
+                "value",
+                "attention_mask",
+                "block_table",
+                "query_start_loc",
+                "seq_lens",
+                "query_lens",
+            )
+        )
+        + (named["qk_head_dim"], named["v_head_dim"], named.get("sinks"), torch.bfloat16),
+        {},
+        info.out,
+    )
+    properties = proxy.get_perf_properties()
+    properties.memory_read_bytes += bytes_of_tensor(named["kv_scale"])
+    if named["block_table"] is None:
+        elements = key.numel() + value.numel()
+    else:
+        _, seq_lens = _normalize_query_lens_and_request_total_seq_lens(query, named["query_lens"], named["seq_lens"])
+        if _tensor_value_unavailable(seq_lens):
+            cache_tokens = named["block_table"].shape[0] * named["block_table"].shape[1] * key.shape[1]
+        else:
+            cache_tokens = int(seq_lens.sum().item())
+        elements = cache_tokens * key.shape[-2] * (key.shape[-1] + value.shape[-1])
+    # Decode payload to FP32, multiply by scale, cast to BF16. Tile-local data
+    # does not create a second, full-size BF16 cache or extra HBM write/read.
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=3 * elements)
     return properties
 
 
@@ -1959,6 +2085,33 @@ def _mla_quant_analytic_properties(
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.multihead_latent_attention_hif8_kv.default)
+def _hif8_kv_mla_properties(info):
+    # Do not inherit BF16 sparse-kernel fitted memory efficiency for an unverified
+    # HIF8 storage kernel. Use the existing physical/raw sparse read formula.
+    properties = _multihead_latent_attention_properties_helper(info, torch.bfloat16, False)
+    named = get_named_args(info)
+    cache = named["kv_cache"]
+    seq_lens, query_lens = named["seq_lens"], named["query_lens"]
+    if _tensor_value_unavailable(seq_lens) or _tensor_value_unavailable(query_lens):
+        batch = named["block_table"].shape[0]
+        elements = batch * _mla_metadata_attn_len(cache, named["block_table"]) * cache.shape[-1]
+    else:
+        topk = named["topk_indices"].shape[-1] if named["topk_indices"] is not None else named["topk_limit"]
+        breakdown = _estimate_sparse_mla_paged_kv_read_breakdown(
+            cache,
+            named["block_table"],
+            seq_lens,
+            query_lens,
+            topk,
+            named["topk_indices"],
+            _sparse_mla_decode_mask(query_lens, named.get("is_decode_values")),
+        )
+        elements = breakdown["kv_physical_read_bytes"]  # uint8, one byte per value
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=3 * elements)
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.multihead_latent_attention_quant.default)
 def _(
     op_invoke_info: OpInvokeInfo,
@@ -2947,6 +3100,50 @@ def _estimate_static_quant_linear_int4_all_reduce(
         "static_quant_linear_int4",
         "static_quant_linear_int4_time_s",
     )
+
+
+@register_op_estimator(torch.ops.tensor_cast.hif8_linear.default, None)
+@register_op_estimator(torch.ops.tensor_cast.grouped_matmul_hif8.default, None)
+@register_op_estimator(torch.ops.tensor_cast.dynamic_quantize_hif8.default, None)
+@register_op_estimator(torch.ops.tensor_cast.quantize_hif8.default, None)
+def _estimate_hif8(info, device_profile):
+    require_hif8_support(device_profile)
+    for dtype, work in info.get_perf_properties().compute_ops.items():
+        gp_peak = device_profile.gp_ops.get(dtype, 0)
+        if work.gp_ops and (not math.isfinite(gp_peak) or gp_peak <= 0):
+            raise ValueError(f"HIF8 simulation requires positive {dtype} GP throughput on {device_profile.name}")
+    result = _estimate_default(info, device_profile)
+    result.statistics.update(
+        logical_format="hif8",
+        storage_dtype="uint8",
+        performance_source="analytic",
+    )
+    return result
+
+
+@register_op_estimator(torch.ops.tensor_cast.hif8_kv_cache_write.default, None)
+@register_op_estimator(torch.ops.tensor_cast.attention_hif8_kv.default, None)
+@register_op_estimator(torch.ops.tensor_cast.multihead_latent_attention_hif8_kv.default, None)
+def _estimate_hif8_kv(info, device_profile):
+    # Storage-only quantization must not depend on HIF8 matrix throughput.
+    if not math.isfinite(device_profile.compute_efficiency) or device_profile.compute_efficiency <= 0:
+        raise ValueError("HIF8 KV simulation requires positive finite compute efficiency")
+    for dtype, work in info.get_perf_properties().compute_ops.items():
+        for count, rates in ((work.mma_ops, device_profile.mma_ops), (work.gp_ops, device_profile.gp_ops)):
+            peak = rates.get(dtype, 0)
+            if count and (not math.isfinite(peak) or peak <= 0):
+                raise ValueError(f"HIF8 KV simulation requires positive {dtype} throughput on {device_profile.name}")
+    result = _estimate_default(info, device_profile)
+    result.statistics.update(
+        logical_format="hif8",
+        storage_dtype="uint8",
+        kv_cache_format="hif8",
+        compute_dtype="bfloat16",
+        kv_scale_mode="static_per_tensor",
+        performance_source="analytic",
+        kv_conversion_model="tile_local_unverified",
+    )
+    return result
 
 
 @register_op_estimator(torch.ops.tensor_cast.fp8_linear_all_reduce.default, None)

@@ -20,12 +20,14 @@ import torch
 
 from .. import ops  # noqa: F401
 from ..model_config import LinearQuantConfig
+from ..utils import HIF8_STORAGE_DTYPE
 from ..quantize_utils import (
     LinearQuantType,
     quant_type_to_dynamic_quant_dtype,
     quant_type_to_weight_dtype,
     QuantGranularity,
     QuantScheme,
+    require_metadata_tensor,
 )
 from ..utils import DTYPE_FP4, DTYPE_FP8
 
@@ -42,6 +44,7 @@ class QuantLinearBase(torch.nn.Module):
         #               instead but they are not set correctly when the linear layer is sharded.
         self.in_features = linear_layer.weight.shape[1]
         self.out_features = linear_layer.weight.shape[0]
+        # Preserve the original floating-point dtype separately from qweight storage.
         self.weight_dtype = linear_layer.weight.dtype
         self.quant_config = quant_config
         self.dynamic_quant_dtype = quant_type_to_dynamic_quant_dtype(quant_config.quant_type)
@@ -56,7 +59,22 @@ class QuantLinearBase(torch.nn.Module):
 
         weight_scale = quant_config.weight_scale
         weight_offset = quant_config.weight_offset
-        if quant_config.weight_scale is None:
+        if quant_config.quant_type == LinearQuantType.HIF8:
+            require_metadata_tensor(linear_layer.weight)
+            scale_shape = (
+                (self.out_features,) if quant_config.weight_quant_granularity == QuantGranularity.PER_CHANNEL else ()
+            )
+            if weight_scale is None:
+                weight_scale = torch.empty(scale_shape, dtype=torch.float32, device=linear_layer.weight.device)
+            elif tuple(weight_scale.shape) != scale_shape:
+                raise ValueError(
+                    "HIF8 weight_scale must match "
+                    f"{quant_config.weight_quant_granularity.name}: expected shape {scale_shape}, "
+                    f"got {tuple(weight_scale.shape)}"
+                )
+            else:
+                weight_scale = weight_scale.to(device=linear_layer.weight.device)
+        elif quant_config.weight_scale is None:
             weight_scale, weight_offset = self._calculate_dynamic_qparams(
                 linear_layer.weight.data,
                 q_weight_dtype,
@@ -143,6 +161,9 @@ class QuantLinearBase(torch.nn.Module):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         """Generic quantization function."""
+        if self.quant_config.quant_type == LinearQuantType.HIF8:
+            require_metadata_tensor(tensor)
+            return torch.empty_like(tensor, dtype=HIF8_STORAGE_DTYPE)
         if offset is not None:
             # Asymmetric quantization
             tensor = tensor / scale + offset
@@ -185,6 +206,8 @@ class QuantLinearBase(torch.nn.Module):
 
     def dequantize_weight(self) -> torch.Tensor:
         """Dequantizes the weight tensor."""
+        if self.quant_config.quant_type == LinearQuantType.HIF8:
+            raise ValueError("HIF8 numerical dequantization is not implemented; use TensorCastQuantLinear")
         if self.quant_config.quant_type == LinearQuantType.W4A8:
             unpacked_qweight = self.unpack_int4(self.qweight)
         else:
@@ -381,6 +404,26 @@ class TensorCastQuantLinear(QuantLinearBase):
         x = x.reshape(-1, x_shape[-1])
         qweight = self.qweight.transpose(0, 1)
         out_dtype = self.quant_config.out_dtype if self.quant_config.out_dtype is not None else x.dtype
+        if self.quant_config.quant_type == LinearQuantType.HIF8:
+            # Keep the compute format in the operator target, never in uint8 dtype.
+            if external_activation_scale is not None:
+                if self.quant_config.out_dtype is None:
+                    # x is a uint8 payload here; use the original floating-point weight dtype.
+                    out_dtype = self.weight_dtype
+                activation_scale = external_activation_scale
+            elif self.activation_scale is not None:
+                activation_scale = self.activation_scale
+                x = torch.ops.tensor_cast.quantize_hif8(x, activation_scale)
+            else:
+                x, activation_scale = torch.ops.tensor_cast.dynamic_quantize_hif8(
+                    x, self.quant_config.dynamic_quant_granularity == QuantGranularity.PER_SAMPLE
+                )
+            # Bias is a separate high-precision epilogue. This also supports
+            # backends whose HIF8 quantized matmul does not accept bias.
+            out = torch.ops.tensor_cast.hif8_linear(x, qweight, activation_scale, self.weight_scale, None, out_dtype)
+            if self.bias is not None:
+                out = out + self.bias.to(out_dtype)
+            return out.reshape(*x_shape[:-1], out.shape[-1])
         if external_activation_scale is not None:
             activation_scale = external_activation_scale
             activation_offset = None

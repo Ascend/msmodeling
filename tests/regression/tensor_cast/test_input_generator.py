@@ -965,7 +965,7 @@ class TestDeepseekV4KvCacheHelpers:
 
     @patch("tensor_cast.core.input_generator.get_attention_quant_config")
     def test_resolve_indexer_cache_dtype_uses_attention_quant(self, mock_get_attn_quant):
-        mock_get_attn_quant.return_value = MagicMock(get_quant_dtype=lambda: torch.int8)
+        mock_get_attn_quant.return_value = MagicMock(get_quant_dtype=lambda: torch.int8, is_hif8_kv=False)
         model = MagicMock()
         model.model_config.dtype = torch.bfloat16
 

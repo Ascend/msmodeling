@@ -460,9 +460,8 @@ class TestExecuteReal:
         assert len(failed) == 1
         assert "case 0 boom" in failed[0]["summary"]["error"]
 
-    def test_chrome_trace_path_synthesized(self):
+    def test_chrome_trace_path_synthesized(self, tmp_path):
         """chrome_trace=True is replaced with a trace path inside execute."""
-        from pathlib import Path as _Path
 
         captured = {}
 
@@ -474,11 +473,12 @@ class TestExecuteReal:
 
         with (
             patch("runners.text_generate._run_one_case", side_effect=spy),
-            patch("services.trace_store.legacy_hash_path", return_value=_Path("/tmp/t.json")),
+            patch("services.trace_store.legacy_hash_path", return_value=tmp_path / "t.json"),
         ):
             execute(
                 {**_TINY_TEXT_PARAMS, "chrome-trace-file": True},
                 form_schema_version="1.0.0",
                 job_id="job-1",
             )
-        assert str(captured["chrome-trace-file"]).endswith("t.json")
+        assert captured["chrome-trace-file"] == str(tmp_path / "t.json")
+        assert (tmp_path / "t.json").is_file()

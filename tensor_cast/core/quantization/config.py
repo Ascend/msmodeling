@@ -40,6 +40,8 @@ def create_linear_quant_config(quantize_linear_action: QuantizeLinearAction, **k
         quant_type = LinearQuantType.W8A8
     elif quantize_linear_action == "FP8":
         quant_type = LinearQuantType.FP8
+    elif quantize_linear_action == "HIF8":
+        quant_type = LinearQuantType.HIF8
     elif quantize_linear_action == "MXFP4":
         quant_type = LinearQuantType.MXFP4
         if "weight_group_size" not in kwargs:
@@ -53,7 +55,7 @@ def create_linear_quant_config(quantize_linear_action: QuantizeLinearAction, **k
         "quant_type": quant_type,
     }
 
-    if "weight_scale" not in kwargs and quant_type != LinearQuantType.MXFP4:
+    if "weight_scale" not in kwargs and quant_type not in (LinearQuantType.MXFP4, LinearQuantType.HIF8):
         # For MXFP4, weight_scale is created from the weight tensor during model initialization
         config_args["weight_scale"] = torch.tensor(1.0)
 
@@ -64,6 +66,10 @@ def create_linear_quant_config(quantize_linear_action: QuantizeLinearAction, **k
 
 
 def create_attention_quant_config(quantize_attention_action: QuantizeAttentionAction):
+    if quantize_attention_action == QuantizeAttentionAction.HIF8:
+        # Static per-layer scale shared by K/V. Q/probability and MLA projection
+        # weights are deliberately not quantized by this storage-only recipe.
+        return MultiheadLatentAttentionQuantConfig(quant_type=get_attention_quant_type(quantize_attention_action))
     # default to symmetric quant with dummy scales
     # for simplicity, we use MLA quant config for both MLA and regular attention
     return MultiheadLatentAttentionQuantConfig(

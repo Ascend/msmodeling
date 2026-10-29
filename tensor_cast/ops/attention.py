@@ -14,11 +14,44 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
+from math import prod
 from typing import Optional
 
 import torch
 
+from ..quantize_utils import require_metadata_tensor, validate_hif8_kv_payload
 from ..utils import register_tensor_cast_op
+
+
+@register_tensor_cast_op("hif8_kv_cache_write", mutates_args=("kv_cache",))
+def hif8_kv_cache_write(
+    key: torch.Tensor,
+    value: Optional[torch.Tensor],
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_scale: torch.Tensor,
+) -> None:
+    """Encode new rows and scatter into cache; never rewrite allocated capacity.
+
+    ``value=None`` is a single latent MLA stream. Otherwise cache[0]/cache[1]
+    store K/V with equal row widths.
+    """
+    validate_hif8_kv_payload(kv_cache, kv_scale)
+    for x in (key, value):
+        if x is not None:
+            require_metadata_tensor(x)
+            if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                raise ValueError("HIF8 KV cache writes require floating-point rows")
+            if x.shape[0] != slot_mapping.numel():
+                raise ValueError("HIF8 KV cache writes require one slot per input token")
+    if value is None:
+        valid = key.shape[-1] == kv_cache.shape[-1]
+    else:
+        key_width = prod(key.shape[1:])
+        value_width = prod(value.shape[1:])
+        valid = kv_cache.shape[0] == 2 and key_width == value_width == kv_cache.shape[-2] * kv_cache.shape[-1]
+    if not valid:
+        raise ValueError("HIF8 KV cache layout does not match input row widths")
 
 
 @register_tensor_cast_op("reshape_and_cache", mutates_args=("kv_cache",))
@@ -129,6 +162,47 @@ def _(
     if query.ndim == 4:
         output_shape = (*query.shape[:-1], v_head_dim)
     return torch.empty(output_shape, dtype=out_dtype, device=query.device).contiguous()
+
+
+@register_tensor_cast_op("attention_hif8_kv")
+def attention_hif8_kv(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    block_table: Optional[torch.Tensor],
+    query_start_loc: Optional[torch.Tensor],
+    seq_lens: Optional[torch.Tensor],
+    query_lens: Optional[torch.Tensor],
+    kv_scale: torch.Tensor,
+    qk_head_dim: int,
+    v_head_dim: int,
+    sinks: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Read HIF8 KV tiles, decode to BF16, run BF16 attention.
+
+    Dequantized tiles are internal working data, not a persistent full-capacity
+    BF16 cache. This is an analytic semantic boundary, not a verified NPU fusion.
+    Q, probabilities and output are never quantized to HIF8.
+    """
+    require_metadata_tensor(query)
+    validate_hif8_kv_payload(key, kv_scale)
+    validate_hif8_kv_payload(value, kv_scale)
+    if query.dtype != torch.bfloat16:
+        raise ValueError("HIF8 KV attention requires BF16 query/compute")
+    if query.ndim not in (2, 4) or key.ndim < 3 or value.ndim != key.ndim:
+        raise ValueError("HIF8 KV attention requires packed/4D query and head-shaped KV payloads")
+    if qk_head_dim <= 0 or v_head_dim <= 0 or query.shape[-1] % qk_head_dim:
+        raise ValueError("HIF8 KV attention requires compatible positive head dimensions")
+    if key.shape[-1] != qk_head_dim or value.shape[-1] != v_head_dim:
+        raise ValueError("HIF8 KV attention payload head dimensions do not match")
+    heads = query.shape[-2] if query.ndim == 4 else query.shape[-1] // qk_head_dim
+    if key.shape[-2] != value.shape[-2] or key.shape[-2] <= 0 or heads % key.shape[-2]:
+        raise ValueError("HIF8 KV attention requires compatible query and KV head counts")
+    if sinks is not None and tuple(sinks.shape) != (heads,):
+        raise ValueError("HIF8 KV attention sink count must match query heads")
+    shape = (*query.shape[:-1], v_head_dim if query.ndim == 4 else heads * v_head_dim)
+    return torch.empty(shape, dtype=torch.bfloat16, device=query.device)
 
 
 @register_tensor_cast_op("attention_quant")

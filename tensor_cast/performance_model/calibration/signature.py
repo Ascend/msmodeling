@@ -28,7 +28,8 @@ from typing import Any, Mapping, Optional
 import torch
 
 from ..base import PerformanceModel
-from ..op_invoke_info import OpInvokeInfo
+from ..op_invoke_info import get_named_args, OpInvokeInfo
+from ..utils import is_hif8_op
 
 
 def _op_name(op_invoke_info: OpInvokeInfo) -> str:
@@ -107,6 +108,7 @@ def _linear_features(op_name: str, op_invoke_info: OpInvokeInfo) -> dict[str, An
 
 
 _GMM_VARIANTS = {
+    "tensor_cast.grouped_matmul_hif8.default": ("plain", "hif8"),
     "tensor_cast.grouped_matmul_quant.default": ("plain", "w8a8"),
     "tensor_cast.grouped_matmul_quant_swiglu.default": ("swiglu_quant", "w8a8"),
 }
@@ -194,6 +196,7 @@ def _grouped_features(op_name: str, op_invoke_info: OpInvokeInfo) -> dict[str, A
 
 
 _LINEAR_QUANTIZATION = {
+    "tensor_cast.hif8_linear.default": "hif8",
     "tensor_cast.static_quant_linear.default": "w8a8",
     "tensor_cast.static_quant_linear_int4.default": "w4a8",
     "tensor_cast.fp8_linear.default": "fp8",
@@ -223,6 +226,7 @@ def _attention_features(tensors: list[torch.Tensor], kwargs: Mapping[str, Any]) 
 
 
 _MLA_CORE_OPS = {
+    "tensor_cast.multihead_latent_attention_hif8_kv.default",
     "tensor_cast.multihead_latent_attention.default",
     "tensor_cast.multihead_latent_attention_quant.default",
     "tensor_cast.mla_sparse_attention.default",
@@ -241,7 +245,9 @@ _MLA_PROJECTION_OPS = {
 def _mla_runtime_features(op_name: str, op_invoke_info: OpInvokeInfo) -> dict[str, Any]:
     args = op_invoke_info.args
     q, projected_kv, absorbed_q, kv_cache = args[:4]
-    is_sparse = "mla_sparse_attention" in op_name
+    is_sparse = "mla_sparse_attention" in op_name or (
+        "hif8_kv" in op_name and (isinstance(args[10], int) or isinstance(args[11], torch.Tensor))
+    )
     query_lens = args[7] if len(args) > 7 else None
     seq_lens = args[6] if len(args) > 6 else None
     topk = args[10] if len(args) > 10 and isinstance(args[10], int) else None
@@ -423,10 +429,42 @@ def build_calibration_signature(
         family = "other"
         features = {}
 
+    if is_hif8_op(op_invoke_info.func):
+        named = get_named_args(op_invoke_info)
+        features.update(logical_format="hif8", storage_dtype="uint8")
+        if family == "matmul":
+            features.update(compute_dtype="hif8", weight_dtype="hif8", quantization="hif8")
+            xs, ws = named["x_scale"], named["w_scale"]
+            xs = xs[0] if isinstance(xs, (list, tuple)) else xs
+            ws = ws[0] if isinstance(ws, (list, tuple)) else ws
+            features["activation_scale_mode"] = "per_tensor" if xs.ndim < 2 else "per_token"
+            features["weight_scale_mode"] = "per_tensor" if ws.ndim == 0 else "per_channel"
+            features["output_dtype"] = _dtype_name(op_invoke_info.out)
+        elif "hif8_kv" in op_name:
+            features.update(
+                compute_dtype="bfloat16",
+                kv_cache_dtype="hif8",
+                quantization="hif8_kv_bf16_compute",
+                kv_scale_mode="static_per_tensor",
+            )
+            if op_name == "tensor_cast.attention_hif8_kv.default":
+                query, key = named["query"], named["key"]
+                head_dim = named["qk_head_dim"]
+                features.update(
+                    head_dim=head_dim,
+                    v_head_dim=named["v_head_dim"],
+                    kv_heads=int(key.shape[-2]),
+                    heads=int(query.shape[-2] if query.ndim == 4 else query.shape[-1] // head_dim),
+                )
+        else:
+            features["quantization_mode"] = "dynamic" if "dynamic" in op_name else "static"
+            if "dynamic" in op_name:
+                features["activation_scale_mode"] = "per_token" if named.get("per_token", True) else "per_tensor"
+
     return CalibrationSignature(
         tc_op=op_name,
         op_family=family,
         device=device_name,
-        dtype=_dtype_name(first_tensor),
+        dtype="hif8" if is_hif8_op(op_invoke_info.func) else _dtype_name(first_tensor),
         features=features,
     )

@@ -44,7 +44,7 @@
 | 投机解码仿真 | 支持 MTP、DFlash、DSpark，建模 proposal/draft 与 verify 的额外计算，评估投机解码对延迟与吞吐的影响。 |
 | 编译与图优化 | 对前向计算图进行编译改写，将 RMSNorm、Grouped Matmul 等典型子图融合为统一性能算子，更贴近实际部署下的执行形态。 |
 | 多流通算掩盖 | 在编译路径中通过多流调度将计算与通信拆分到不同执行流，建模流间同步开销与算通掩盖带来的端到端收益。 |
-| 量化仿真 | 分别建模 Linear、非 Expert Linear、LMHead、Attention 等路径的量化计算与访存成本，支持 W8A8、W4A8、FP8、MXFP4 等多种策略组合。 |
+| 量化仿真 | 分别建模 Linear、非 Expert Linear、LMHead、Attention 等路径的量化计算与访存成本，支持 W8A8、W4A8、FP8、MXFP4、HIF8 等多种策略组合。HIF8 支持 A5 上的 Dense Linear、Attention 线性投影和 MoE 专家 GMM，以及编译与 TP/EP 路径；Attention/KV 量化独立配置。MiMo V2 Flash 不支持 HIF8 KV Cache，CLI 与 Web UI 在配置解析阶段拒绝该组合；其原有 Attention 路径和独立的 Linear HIF8 不受影响。 |
 | 并行与 MoE 扩展 | 建模全局 TP / DP / EP 及细粒度并行（Embedding TP、Vision TP 等）切分后的通信与计算开销，覆盖 redundant experts、external/shared expert 等 MoE 部署形态。 |
 | 流水线并行（PP）仿真 | 支持 stage-local 模型构造、逻辑 send/recv 通信、stage 显存估算与显式层划分。 |
 | 解码上下文并行（DCP）仿真 | 沿序列维切分 Decode 阶段 KV cache，建模 DCP 的显存、attention 计算与集合通信变化；不表示支持 Prefill Context Parallel。 |

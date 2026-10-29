@@ -16,6 +16,7 @@
 
 import torch
 
+from ..utils import PerfDType
 from .op_invoke_info import OpInvokeInfo
 from .utils import bytes_of_elements
 
@@ -44,7 +45,7 @@ def l2norm_ops(num_rows: int, row_width: int) -> int:
 
 def accumulate_compute_ops(
     properties: OpInvokeInfo.PerformanceProperties,
-    dtype: torch.dtype,
+    dtype: PerfDType,
     mma_ops: int = 0,
     gp_ops: int = 0,
 ) -> None:

@@ -1855,6 +1855,7 @@ def test_model_runner_uses_pipeline_provided_activation_when_present():
     # formula (which would yield 100-60-50-9 = -19 GB and get clamped to 0).
     gib = 1024**3
     runner = ModelRunner.__new__(ModelRunner)
+    runner.device_profile = DeviceProfile.all_device_profiles["TEST_DEVICE"]
     runner.user_input = SimpleNamespace(
         num_queries=8,
         query_len=16,
@@ -1940,6 +1941,7 @@ def test_pipeline_parallel_single_module_has_coverage_visible_entrypoints(tmp_pa
 def test_model_runner_builds_metrics_from_pipeline_result():
     gib = 1024**3
     runner = ModelRunner.__new__(ModelRunner)
+    runner.device_profile = DeviceProfile.all_device_profiles["TEST_DEVICE"]
     runner.user_input = SimpleNamespace(
         num_queries=8,
         query_len=16,

@@ -16,10 +16,12 @@
 
 from dataclasses import dataclass, field, replace
 from enum import auto, Enum
+import math
 from typing import ClassVar, Dict, List
 
 import torch
 
+from .utils import PerfDType, SimFormat
 from .utils import DTYPE_FP4, DTYPE_FP8, performance_dtype
 
 
@@ -81,8 +83,8 @@ class StaticCost:
     comm_op_cost_s: float = 0
 
 
-def _normalize_perf_ops(perf_ops: Dict[torch.dtype, float], perf_name: str) -> Dict[torch.dtype, float]:
-    normalized_perf_ops: Dict[torch.dtype, tuple[torch.dtype, float]] = {}
+def _normalize_perf_ops(perf_ops: Dict[PerfDType, float], perf_name: str) -> Dict[PerfDType, float]:
+    normalized_perf_ops: Dict[PerfDType, tuple[PerfDType, float]] = {}
     for dtype, ops in perf_ops.items():
         normalized_dtype = performance_dtype(dtype)
         existing = normalized_perf_ops.get(normalized_dtype)
@@ -113,8 +115,8 @@ class DeviceProfile:
         DTYPE_FP4,
     ]
 
-    mma_ops: Dict[torch.dtype, float] = field(default_factory=dict)
-    gp_ops: Dict[torch.dtype, float] = field(default_factory=dict)
+    mma_ops: Dict[PerfDType, float] = field(default_factory=dict)
+    gp_ops: Dict[PerfDType, float] = field(default_factory=dict)
     compute_efficiency: float = 1.0
     memory_size_bytes: float = 0
     memory_bandwidth_bytes_ps: float = 0  # Bytes/s
@@ -136,6 +138,16 @@ class DeviceProfile:
         self.mma_ops = _normalize_perf_ops(self.mma_ops, "mma_ops")
         self.gp_ops = _normalize_perf_ops(self.gp_ops, "gp_ops")
         self.all_device_profiles[self.name] = self
+
+
+def require_hif8_support(device_profile):
+    peak = device_profile.mma_ops.get(SimFormat.HIF8, 0)
+    efficiency = device_profile.compute_efficiency
+    if not math.isfinite(peak) or peak <= 0 or not math.isfinite(efficiency) or efficiency <= 0:
+        raise ValueError(
+            f"HIF8 simulation requires a positive HIF8 MMA rate on {device_profile.name}; "
+            "select a supported A5 profile or configure mma_ops[SimFormat.HIF8]."
+        )
 
 
 TEST_INTERCONNECT = CommGrid(
@@ -167,6 +179,7 @@ TEST_DEVICE = DeviceProfile(
         torch.half: 353.9 * 1e12,
         torch.int8: 353.9 * 2 * 1e12,
         DTYPE_FP8: 353.9 * 2 * 1e12,
+        SimFormat.HIF8: 353.9 * 2 * 1e12,  # synthetic test profile
         DTYPE_FP4: 353.9 * 4 * 1e12,
     },
     gp_ops={
@@ -454,6 +467,7 @@ class A5:
                 torch.bfloat16: 432 * 1e12,
                 torch.half: 432 * 1e12,
                 torch.float8_e5m2: 865 * 1e12,
+                SimFormat.HIF8: 865 * 1e12,
                 torch.int8: 865 * 1e12,
                 DTYPE_FP4: 1730 * 1e12,
             },
@@ -471,6 +485,7 @@ class A5:
                 torch.bfloat16: 378 * 1e12,
                 torch.half: 378 * 1e12,
                 torch.float8_e5m2: 756 * 1e12,
+                SimFormat.HIF8: 756 * 1e12,
                 torch.int8: 756 * 1e12,
                 DTYPE_FP4: 1512 * 1e12,
             },

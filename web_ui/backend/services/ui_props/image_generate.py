@@ -27,6 +27,7 @@ from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
 VERSION = "2.3.5"
+
 TITLE = I18nText("图像生成", "Image Generate")
 RUNNER = "ImageGenerateRunner"
 
@@ -214,6 +215,7 @@ UI: dict[str, UIFieldProps] = {
                 {"value": "W8A8_DYNAMIC", "label": "W8A8_DYNAMIC"},
                 {"value": "W4A8_DYNAMIC", "label": "W4A8_DYNAMIC"},
                 {"value": "FP8", "label": "FP8"},
+                {"value": "HIF8", "label": "HIF8"},
                 {"value": "MXFP4", "label": "MXFP4"},
             ],
         },

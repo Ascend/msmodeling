@@ -37,6 +37,7 @@ class QuantizeLinearAction(StrEnum):
     W4A8_DYNAMIC = "W4A8_DYNAMIC"
     FP8 = "FP8"
     MXFP4 = "MXFP4"
+    HIF8 = "HIF8"
 
 
 class QuantizeAttentionAction(StrEnum):
@@ -44,3 +45,4 @@ class QuantizeAttentionAction(StrEnum):
     DISABLED = "DISABLED"
     INT8 = "INT8"
     FP8 = "FP8"
+    HIF8 = "HIF8"

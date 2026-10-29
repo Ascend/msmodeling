@@ -79,3 +79,9 @@ def bytes_of_elements(nelements: int, dtype: torch.dtype) -> float:
     especially for dtypes that might be packed.
     """
     return _bytes_of_dtype.get(dtype, dtype.itemsize) * nelements
+
+
+def is_hif8_op(func) -> bool:
+    """Dedicated operator targets preserve format identity through FX passes."""
+    name = str(func).removeprefix("torch.ops.")
+    return name.startswith("tensor_cast.") and "hif8" in name

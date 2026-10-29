@@ -21,10 +21,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tensor_cast.core.config_resolver import ConfigResolver, _resolve_model_dtype, _resolve_text_config
-from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
+from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.model_config import ParallelConfig
 
@@ -375,6 +376,31 @@ class DsparkDefaultsTestCase(unittest.TestCase):
         self.assertEqual(draft.proposal_count, config.get_text_config().dspark_block_size)
         self.assertEqual(draft.layers[0].mlp.gate.top_k, 3)
         self.assertEqual(draft.layers[0].mlp.gate.weight.shape[0], 128)
+
+
+@pytest.mark.parametrize(
+    "attention_action",
+    [
+        QuantizeAttentionAction.HIF8,
+        QuantizeAttentionAction.DISABLED,
+        QuantizeAttentionAction.INT8,
+        QuantizeAttentionAction.FP8,
+    ],
+)
+def test_mimo_attention_quantization_support_boundary(attention_action):
+    model_path = Path(__file__).resolve().parents[2] / "assets/model_config/mimo_v2_flash"
+    resolver = ConfigResolver(
+        user_input=UserInputConfig(
+            model_id=str(model_path),
+            quantize_linear_action=QuantizeLinearAction.HIF8,
+            quantize_attention_action=attention_action,
+        )
+    )
+    if attention_action == QuantizeAttentionAction.HIF8:
+        with pytest.raises(ValueError, match="not supported for MiMo"):
+            resolver.resolve()
+    else:
+        resolver.resolve()
 
 
 class DeepseekV41AttentionQuantValidationTestCase(unittest.TestCase):

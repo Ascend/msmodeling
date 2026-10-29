@@ -25,6 +25,7 @@ except ImportError:
 from typing import Callable, Dict, List, Optional, Type, Union
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensor
 from transformers import PretrainedConfig
 from transformers.utils.quantization_config import QuantizationConfigMixin
 
@@ -34,6 +35,7 @@ from .quantize_utils import (
     LinearQuantType,
     QuantGranularity,
     QuantScheme,
+    validate_hif8_kv_scale,
 )
 from .utils import get_modules_to_not_convert
 
@@ -91,6 +93,9 @@ class LinearQuantConfig:
     output is not common."""
 
     def __post_init__(self):
+        if self.quant_type == LinearQuantType.HIF8:
+            self._validate_hif8()
+            return
         if self.weight_quant_granularity is not None and self.dynamic_quant_granularity is None:
             self.dynamic_quant_granularity = self.weight_quant_granularity
         if self.weight_scale is None and self.weight_offset is not None:
@@ -130,6 +135,29 @@ class LinearQuantConfig:
             if self.activation_scale is not None or self.activation_offset is not None:
                 raise ValueError("MXFP4 quantization does not support static activation quantization")
 
+    def _validate_hif8(self):
+        if self.weight_quant_granularity is None:
+            self.weight_quant_granularity = QuantGranularity.PER_CHANNEL
+        if self.dynamic_quant_granularity is None:
+            self.dynamic_quant_granularity = QuantGranularity.PER_SAMPLE
+        if self.weight_quant_granularity not in (QuantGranularity.PER_TENSOR, QuantGranularity.PER_CHANNEL):
+            raise ValueError("HIF8 weights support PER_TENSOR or PER_CHANNEL granularity")
+        if self.dynamic_quant_granularity not in (QuantGranularity.PER_TENSOR, QuantGranularity.PER_SAMPLE):
+            raise ValueError("HIF8 activations support PER_TENSOR or PER_SAMPLE granularity")
+        if self.weight_quant_scheme != QuantScheme.SYMMETRIC or self.dynamic_quant_scheme != QuantScheme.SYMMETRIC:
+            raise ValueError("HIF8 only supports symmetric quantization")
+        if self.weight_offset is not None or self.activation_offset is not None:
+            raise ValueError("HIF8 does not support offsets")
+        if self.weight_group_size is not None:
+            raise ValueError("HIF8 is not an MX block format; weight_group_size must be None")
+        if self.activation_scale is not None and self.activation_scale.numel() != 1:
+            raise ValueError("HIF8 static activation_scale must be scalar")
+        for scale in (self.weight_scale, self.activation_scale):
+            if scale is not None and scale.dtype != torch.float32:
+                raise ValueError("HIF8 scales must use float32")
+        if self.out_dtype not in (None, torch.float16, torch.bfloat16, torch.float32):
+            raise ValueError("HIF8 output must use float16, bfloat16 or float32")
+
 
 @dataclasses.dataclass
 class AttentionQuantConfig:
@@ -158,6 +186,23 @@ class AttentionQuantConfig:
     query_offset: Optional[torch.Tensor] = None
     kv_offset: Optional[torch.Tensor] = None
     attention_prob_offset: Optional[torch.Tensor] = None
+
+    def __post_init__(self):
+        if not self.is_hif8_kv:
+            return
+        if any(x is not None for x in (self.query_offset, self.kv_offset, self.attention_prob_offset)):
+            raise ValueError("HIF8 KV cache supports symmetric quantization without offsets")
+        if self.kv_scale is None:
+            self.kv_scale = torch.tensor(1.0, dtype=torch.float32)
+        validate_hif8_kv_scale(self.kv_scale)
+        if not self.kv_scale.is_meta and not isinstance(self.kv_scale, FakeTensor):
+            if not bool(torch.isfinite(self.kv_scale).all()) or not bool((self.kv_scale > 0).all()):
+                raise ValueError("HIF8 KV cache scale must be positive and finite")
+
+    @property
+    def is_hif8_kv(self) -> bool:
+        """HIF8 storage with BF16 compute, independent of Linear quantization."""
+        return self.quant_type == AttentionQuantType.HIF8
 
     def get_quant_dtype(self) -> torch.dtype:
         return get_torch_dtype_from_quant_type(self.quant_type)

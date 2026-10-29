@@ -110,7 +110,7 @@
 🔹 Prefix Cache 仿真<br>
 🔹 MTP、DFlash、DSpark 投机解码仿真<br>
 🔹 编译与图优化、多流通算掩盖<br>
-🔹 量化仿真（W8A8 / W4A8 / FP8 / MXFP4 等）<br>
+🔹 量化仿真（W8A8 / W4A8 / FP8 / MXFP4 / HIF8 等）<br>
 🔹 并行与 MoE 扩展（TP / DP / EP / PP / DCP，及 Embedding TP、Vision TP 等细粒度并行）<br>
 🔹 性能模型切换（Roofline / 校准解析模型 / Profiling）<br>
 🔹 Chrome Trace / Debug<br>

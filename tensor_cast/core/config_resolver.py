@@ -193,6 +193,15 @@ class ConfigResolver:
             enable_dsa_cp=self.user_input.enable_sequence_parallel and self._has_dsa_structure(),
         )
         model_type = str(getattr(self.hf_config, "model_type", ""))
+        if model_type == "mimo_v2_flash" and self.user_input.quantize_attention_action == QuantizeAttentionAction.HIF8:
+            raise ValueError("HIF8 KV is not supported for MiMo V2 Flash")
+        if self.user_input.quantize_attention_action == QuantizeAttentionAction.HIF8 and model_type in {
+            "deepseek_v4",
+            "deepseek_v4_text",
+            "minimax_m3",
+            "minimax_m3_vl",
+        }:
+            raise ValueError(f"HIF8 KV cache is not supported for the specialized {model_type} cache layout")
         speculative_method = self.user_input.speculative_method
         if (
             model_type == "deepseek_v41"

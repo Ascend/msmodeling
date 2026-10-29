@@ -18,6 +18,7 @@ from typing import Optional
 
 import torch
 
+from ..quantize_utils import validate_hif8_matmul
 from ..utils import register_tensor_cast_op
 
 
@@ -107,3 +108,16 @@ def _(
     if out_dtype is None:
         out_dtype = torch.float16  # Default output for MXFP4
     return torch.empty((x.shape[0], w.shape[1]), dtype=out_dtype, device="meta")
+
+
+@register_tensor_cast_op("hif8_linear")
+def hif8_linear(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    validate_hif8_matmul(x, w, x_scale, w_scale, bias, out_dtype)
+    return torch.empty((x.shape[0], w.shape[1]), dtype=out_dtype, device=x.device)

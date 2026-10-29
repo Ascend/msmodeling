@@ -975,7 +975,8 @@ def _resolve_indexer_cache_dtype(model, layer_idx: int, attention_layer=None) ->
             return dtype
     cache_dtype = model_config.dtype
     if (attention_config := get_attention_quant_config(model, layer_idx)) is not None:
-        cache_dtype = attention_config.get_quant_dtype()
+        if not attention_config.is_hif8_kv:
+            cache_dtype = attention_config.get_quant_dtype()
     return cache_dtype
 
 

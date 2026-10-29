@@ -138,6 +138,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --tpot-limit 50
 ```
 
+
 #### 2.3.2 Check Optimization Results
 
 If the command succeeds, the terminal first prints the input configuration and best configuration summary, followed by a candidate parallel configuration table. For example:

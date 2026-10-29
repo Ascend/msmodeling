@@ -37,8 +37,8 @@ export const QUANTIZE_LINEAR_OPTIONS = [
   v('W8A16_DYNAMIC'), v('W8A8_DYNAMIC'), v('W4A8_DYNAMIC'), v('FP8'), v('MXFP4'),
 ]
 
-/** quantize-attention-action — 3 values (doc §2.1.3). */
-export const QUANTIZE_ATTENTION_OPTIONS = [v('DISABLED'), v('INT8'), v('FP8')]
+/** HIF8 stores KV in HIF8 and computes attention in BF16. */
+export const QUANTIZE_ATTENTION_OPTIONS = [v('DISABLED'), v('INT8'), v('FP8'), v('HIF8')]
 
 /** remote-source (doc §2.1.7). */
 export const REMOTE_SOURCE_OPTIONS = [v('huggingface'), v('modelscope')]

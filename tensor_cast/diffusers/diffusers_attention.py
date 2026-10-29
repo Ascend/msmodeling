@@ -131,6 +131,8 @@ def _run_attention(
     canonical_layout=False,
 ):
     quant_config = get_attention_quant_config()
+    if quant_config is not None and quant_config.is_hif8_kv:
+        raise ValueError("HIF8 attention is a KV-cache recipe for text inference; diffusion attention has no KV cache")
     route_plan = get_attention_route_plan()
     fallback_reason = _get_block_sparse_attention_fallback_reason(
         query,

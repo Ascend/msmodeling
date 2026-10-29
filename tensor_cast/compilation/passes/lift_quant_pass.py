@@ -39,6 +39,8 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
         torch.ops.tensor_cast.dynamic_quantize_asymmetric.default,
         torch.ops.tensor_cast.dynamic_quantize_symmetric.default,
         torch.ops.tensor_cast.dynamic_quantize_mxfp4.default,
+        torch.ops.tensor_cast.dynamic_quantize_hif8.default,
+        torch.ops.tensor_cast.quantize_hif8.default,
     ]
 
     """
@@ -98,7 +100,10 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
                 current_input = original_quant_node.args[0]
                 swappable_ops_chain = []
 
-                while is_swappable(current_input):
+                # HIF8 per-token scales describe the original [M,K] rows.
+                # Deduplicate identical calls, but do not move the reduction
+                # across a reshape that can change token/channel boundaries.
+                while is_swappable(current_input) and "hif8" not in str(quantize_op):
                     # As a safety check, we only lift through an op if it has a single user.
                     # Lifting an op with multiple users would affect other paths in the graph.
                     if len(current_input.users) > 1:

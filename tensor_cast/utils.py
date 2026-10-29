@@ -19,6 +19,7 @@ import logging
 import re
 import threading
 from contextlib import contextmanager
+from enum import Enum
 from typing import Iterator, List, Optional, Union
 
 import torch
@@ -27,6 +28,18 @@ from transformers.utils.quantization_config import (
     FineGrainedFP8Config,
     QuantizationConfigMixin,
 )
+
+
+class SimFormat(str, Enum):
+    HIF8 = "hif8"
+
+    def __str__(self):
+        return self.value
+
+
+PerfDType = Union[torch.dtype, SimFormat]
+HIF8_STORAGE_DTYPE = torch.uint8
+
 
 # placeholder for FP8, don't hard-code specific fp8 format
 DTYPE_FP8 = torch.float8_e5m2
@@ -39,7 +52,7 @@ def is_fp8_dtype(dtype: torch.dtype) -> bool:
     return str(dtype).startswith("torch.float8")
 
 
-def performance_dtype(dtype: torch.dtype) -> torch.dtype:
+def performance_dtype(dtype: PerfDType) -> PerfDType:
     if is_fp8_dtype(dtype):
         return DTYPE_FP8
     return dtype

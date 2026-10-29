@@ -70,6 +70,7 @@ import yaml
 
 from ... import config
 from ...device import DeviceProfile
+from ..utils import is_hif8_op
 from ...ops.mla import local_mla_phase_token_counts
 from ..op_invoke_info import get_named_args
 from .backend_projector import CANNBackendProjector
@@ -2656,7 +2657,15 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         See §14 in OP_PLUGIN_MAPPING_TUTORIAL.md for the full SOP.
         """
         self.last_shape_match_info = None
+        self.last_miss_reason = ""
         func_str = _normalize_func_name(op_invoke_info.func)
+        # HIF8 uint8 payloads cannot use generic dtype matching (unknown dtypes
+        # may be relaxed there). No verified HIF8 kernel/scale/layout projection
+        # ships with the database yet. Preserve a visible analytic fallback,
+        # even if an old mapping accidentally points at an INT8/FP8 kernel.
+        if is_hif8_op(op_invoke_info.func):
+            self.last_miss_reason = "hif8_requires_verified_profile"
+            return None
         mappings = self._op_mapping.get("operator_mappings", {})
         mapping = mappings.get(func_str)
         if mapping is None:

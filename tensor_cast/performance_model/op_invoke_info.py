@@ -24,6 +24,7 @@ from torch.utils._cxx_pytree import tree_map
 
 from .. import ops  # noqa: F401
 from ..utils import EquivalentKeyManager
+from ..utils import PerfDType
 from .utils import bytes_of_tensor, is_noop_self_copy_op, is_view_op, run_once
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ class OpInvokeInfo:
 
     @dataclasses.dataclass
     class PerformanceProperties:
-        compute_ops: Dict[torch.dtype, "OpInvokeInfo.ComputeOps"] = dataclasses.field(default_factory=dict)
+        compute_ops: Dict[PerfDType, "OpInvokeInfo.ComputeOps"] = dataclasses.field(default_factory=dict)
         memory_read_bytes: int = 0
         """Read-only bytes"""
         memory_write_bytes: int = 0

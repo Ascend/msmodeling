@@ -32,6 +32,7 @@ from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
 VERSION = "2.9.21"
+
 TITLE = I18nText("吞吐优化", "Throughput Optimizer")
 RUNNER = "ParallelRunner"
 
@@ -295,17 +296,18 @@ UI: dict[str, UIFieldProps] = {
             "Quantization action(s) for linear layers (multi-select; each value runs independently and yields a multi-case comparison).",
         ),
         option_source={
-            "type": "inline",
-            "values": [
-                {"value": "DISABLED", "label": "DISABLED"},
-                {"value": "W8A16_STATIC", "label": "W8A16_STATIC"},
-                {"value": "W8A8_STATIC", "label": "W8A8_STATIC"},
-                {"value": "W4A8_STATIC", "label": "W4A8_STATIC"},
-                {"value": "W8A16_DYNAMIC", "label": "W8A16_DYNAMIC"},
-                {"value": "W8A8_DYNAMIC", "label": "W8A8_DYNAMIC"},
-                {"value": "W4A8_DYNAMIC", "label": "W4A8_DYNAMIC"},
-                {"value": "FP8", "label": "FP8"},
-                {"value": "MXFP4", "label": "MXFP4"},
+            'type': 'inline',
+            'values': [
+                {'value': 'DISABLED', 'label': 'DISABLED'},
+                {'value': 'W8A16_STATIC', 'label': 'W8A16_STATIC'},
+                {'value': 'W8A8_STATIC', 'label': 'W8A8_STATIC'},
+                {'value': 'W4A8_STATIC', 'label': 'W4A8_STATIC'},
+                {'value': 'W8A16_DYNAMIC', 'label': 'W8A16_DYNAMIC'},
+                {'value': 'W8A8_DYNAMIC', 'label': 'W8A8_DYNAMIC'},
+                {'value': 'W4A8_DYNAMIC', 'label': 'W4A8_DYNAMIC'},
+                {'value': 'FP8', 'label': 'FP8'},
+                {'value': 'HIF8', 'label': 'HIF8'},
+                {'value': 'MXFP4', 'label': 'MXFP4'},
             ],
         },
         multi_values=True,

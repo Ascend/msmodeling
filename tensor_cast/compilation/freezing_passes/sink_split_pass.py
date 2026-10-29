@@ -177,6 +177,14 @@ class SinkSplitPass(TensorCastGraphModulePass):
             bias_list = [source_op.args[0] for source_op in source_op_group]
             return (x_list, w_list, bias_list), {}
 
+        def hif8_arg_builder(graph, match):
+            # Linear uses x_scale,w_scale; GMM uses w_scale,x_scale.
+            # The generic builder copies positional arguments and would swap
+            # token and channel scales, despite their similar storage dtypes.
+            nodes = match.source_op_group
+            args = [[node.args[i] for node in nodes] for i in (0, 1, 3, 2, 4)]
+            return (*args, nodes[0].args[5]), {}
+
         def _normalized_dim(dim: int, input_node: Node) -> int:
             """Resolve a split dimension against the input tensor's rank.
 
@@ -264,6 +272,23 @@ class SinkSplitPass(TensorCastGraphModulePass):
         )
         add_config(torch.ops.tensor_cast.dynamic_quantize_mxfp4.default, {0}, {0})
 
+        def hif8_quant_extra_check(split_node, source_op_group, split_args, uniform_args, template_kwargs):
+            source = source_op_group[0]
+            per_token = source.args[1] if len(source.args) > 1 else source.kwargs.get("per_token", True)
+            split_dim = split_node.args[2] if len(split_node.args) > 2 else 0
+            split_dim = _normalized_dim(split_dim, split_node.args[0])
+            # Per-tensor reductions cannot be moved across expert splits.
+            return per_token and split_dim == 0
+
+        add_config(
+            torch.ops.tensor_cast.dynamic_quantize_hif8.default,
+            {0},
+            {0, 1},
+            None,
+            None,
+            hif8_quant_extra_check,
+        )
+
         # Matmul Ops
         add_config(
             torch.ops.aten.mm.default,
@@ -296,6 +321,13 @@ class SinkSplitPass(TensorCastGraphModulePass):
             {0, 2},
             {0},
             torch.ops.tensor_cast.grouped_matmul_fp8.default,
+        )
+        add_config(
+            torch.ops.tensor_cast.hif8_linear.default,
+            {0, 2},
+            {0},
+            torch.ops.tensor_cast.grouped_matmul_hif8.default,
+            hif8_arg_builder,
         )
         add_config(
             torch.ops.tensor_cast.mxfp4_linear.default,

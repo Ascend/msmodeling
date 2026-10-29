@@ -289,6 +289,8 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         return None
 
     def _use_mlapo_fusion(self) -> bool:
+        if self.quant_config is not None and self.quant_config.is_hif8_kv:
+            return False  # Existing MLAPO contracts do not encode HIF8 cache writes.
         return config.compilation.fusion_patterns.enable_mlapo
 
     @torch.no_grad()
@@ -359,8 +361,8 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         projected = kv.new_empty((0, self._num_heads_per_rank, self.qk_nope_head_dim + self.v_head_dim))
         absorbed = q.new_empty((0, self._num_heads_per_rank, self.kv_lora_rank + self.qk_rope_head_dim))
         if prefill:
-            if self.quant_config is None:
-                projected = torch.mm(kv_input, self.kv_b_proj_weight_t)
+            if self.quant_config is None or self.quant_config.is_hif8_kv:
+                projected = torch.mm(kv_input, self.kv_b_proj_weight_t.to(kv_input.dtype))
             else:
                 qc = self.quant_config
                 quantized = torch.ops.tensor_cast.quantize(kv_input, qc.kv_projected_scale, qc.kv_projected_offset)
@@ -377,8 +379,8 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             projected = projected.view(-1, self._num_heads_per_rank, self.qk_nope_head_dim + self.v_head_dim)
         if decode:
             q_nope = q_decode[..., : self.qk_nope_head_dim].transpose(0, 1)
-            if self.quant_config is None:
-                absorbed = torch.bmm(q_nope, self.W_UK_T)
+            if self.quant_config is None or self.quant_config.is_hif8_kv:
+                absorbed = torch.bmm(q_nope, self.W_UK_T.to(q_nope.dtype))
             else:
                 qc = self.quant_config
                 quantized = torch.ops.tensor_cast.quantize(q_nope, qc.qk_scale, qc.qk_offset)
@@ -562,6 +564,10 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         query_lens = attention_meta.query_lens if attention_meta else None
 
         if not fuse_mlapo:
+            if self.quant_config is not None and self.quant_config.is_hif8_kv:
+                q_states = q_states.to(torch.bfloat16)
+                kv_c_normed = kv_c_normed.to(torch.bfloat16)
+                k_rot = k_rot.to(torch.bfloat16)
             num_prefill_tokens, num_decode_tokens = _get_mla_phase_token_counts(
                 attention_meta, int(q_states.shape[0]), self.decode_only
             )
@@ -610,7 +616,15 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                 min=1,
             )
 
-        if self.quant_config is not None:
+        hif8_kv = self.quant_config is not None and self.quant_config.is_hif8_kv
+        if hif8_kv:
+            if kv_cache is None or attention_meta is None:
+                raise ValueError("HIF8 KV MLA requires attention metadata and a latent KV cache")
+            values = torch.cat((kv_c_normed, k_rot), dim=-1)
+            torch.ops.tensor_cast.hif8_kv_cache_write(
+                values, None, kv_cache, attention_meta.slot_mapping.reshape(-1), self.quant_config.kv_scale
+            )
+        elif self.quant_config is not None:
             quant_config = self.quant_config
             out_dtype = self.quant_config.get_quant_dtype()
             q_states = torch.ops.tensor_cast.quantize(
@@ -645,7 +659,15 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             **self._get_backend_kwargs(pre_attn_out),
             **self._get_backend_metadata_kwargs(attention_meta),
         }
-        if self.quant_config is not None:
+        if hif8_kv:
+            attention_backend = partial(
+                torch.ops.tensor_cast.multihead_latent_attention_hif8_kv,
+                v_head_dim=self.v_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
+                kv_scale=self.quant_config.kv_scale,
+                **extra_backend_kwargs,
+            )
+        elif self.quant_config is not None:
             attention_backend = partial(
                 self._get_attention_op(quant_enabled=True),
                 v_head_dim=self.v_head_dim,
@@ -694,11 +716,12 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
 
         v_up_projection_op = (
             torch.ops.tensor_cast.mla_v_up_projection_quant
-            if self.quant_config is not None
+            if self.quant_config is not None and not hif8_kv
             else torch.ops.tensor_cast.mla_v_up_projection
         )
         if num_decode_tokens > 0:
-            decode_output = v_up_projection_op(decode_latent_output, self.W_UV)
+            v_weight = self.W_UV.to(decode_latent_output.dtype) if hif8_kv else self.W_UV
+            decode_output = v_up_projection_op(decode_latent_output, v_weight)
         else:
             decode_output = torch.empty(
                 0,
@@ -720,7 +743,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
 
         attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
         attn_output = self._postprocess_attention_output(attn_output, hidden_states)
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output.to(hidden_states.dtype) if hif8_kv else attn_output)
         return self._format_forward_output(attn_output, None, pre_attn_out)
 
     def _format_forward_output(self, attn_output, attn_weights, pre_attn_out) -> tuple:
@@ -790,6 +813,10 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
 
     def quantize_params(self):
         assert self.quant_config is not None, "quant_config must be set before quantization"
+        if self.quant_config.is_hif8_kv:
+            if not hasattr(self, "kv_b_proj_weight_t"):
+                raise ValueError("HIF8 KV cache requires the supported MLA latent-cache layout")
+            return  # KV storage changes; projection weights keep floating-point semantics.
         self._quantize_kv_b_decomposition()
 
     def _quantize_kv_b_decomposition(self) -> None:

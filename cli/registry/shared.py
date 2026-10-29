@@ -192,7 +192,7 @@ QUANTIZE_ATTENTION_ACTION = Param(
     default=QuantizeAttentionAction.DISABLED,
     choices=list(QuantizeAttentionAction),
     group="Quantization Options",
-    cli_help="Quantize the KV cache with the given action.",
+    cli_help="Quantize the KV cache. HIF8 uses HIF8 storage and BF16 attention compute (simulation only).",
 )
 
 MXFP4_GROUP_SIZE = Param(

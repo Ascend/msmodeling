@@ -21,6 +21,7 @@ import torch
 from torch import nn
 
 from ..parallel_group import ParallelGroup
+from ..quantize_utils import LinearQuantType
 from ..utils import exact_division
 from .quant_linear import QuantLinearBase
 from .utils import get_partial_sharded, ModelWrapperBase
@@ -134,7 +135,20 @@ class RowParallelLinear(ParallelLinearBase):
             if self.tp_rank != 0:
                 setattr(self._inner, self.inner_bias_name, None)
 
-        if self.is_quant and self._inner.weight_scale.ndim > 0 and self._inner.weight_scale.shape[0] > 0:
+        # Row TP splits K, while HIF8's 1D scales index output channels N.
+        # Every rank therefore retains all N scales for its partial products.
+        replicate_hif8_scale = (
+            self.is_quant
+            and self._inner.quant_config.quant_type == LinearQuantType.HIF8
+            and dim == 1
+            and self._inner.weight_scale.ndim == 1
+        )
+        if (
+            self.is_quant
+            and not replicate_hif8_scale
+            and self._inner.weight_scale.ndim > 0
+            and self._inner.weight_scale.shape[0] > 0
+        ):
             scale_dim = get_qparam_shard_dim(self._inner.weight_scale, dim)
             replace_with_sharded_tensor(
                 self._inner,

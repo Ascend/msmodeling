@@ -119,6 +119,7 @@ class MergeLinearPass(TensorCastGraphModulePass):
 
         if node.target in (
             torch.ops.tensor_cast.fp8_linear.default,
+            torch.ops.tensor_cast.hif8_linear.default,
             torch.ops.tensor_cast.mxfp4_linear.default,
         ):
             # Group by: x, x_scale, w_scale, out_dtype
@@ -128,7 +129,12 @@ class MergeLinearPass(TensorCastGraphModulePass):
 
             def grouping_key_func_fp8_mxfp4(n):
                 key = default_grouping_key_func(grouping_key_args, n)
-                if n.target == torch.ops.tensor_cast.fp8_linear.default:
+                if n.target == torch.ops.tensor_cast.hif8_linear.default:
+                    # Scalar scales may differ; require the same node rather
+                    # than silently sharing the first projection's scale.
+                    shape = get_node_shape(n.args[w_scale])
+                    w_scale_key = n.args[w_scale] if shape == () else ndim_key(n, w_scale)
+                elif n.target == torch.ops.tensor_cast.fp8_linear.default:
                     w_scale_key = ndim_key(n, w_scale)
                 else:
                     assert n.target == torch.ops.tensor_cast.mxfp4_linear.default
@@ -254,6 +260,7 @@ class MergeLinearPass(TensorCastGraphModulePass):
                 torch.ops.tensor_cast.static_quant_linear.default,
                 torch.ops.tensor_cast.static_quant_linear_int4.default,
                 torch.ops.tensor_cast.fp8_linear.default,
+                torch.ops.tensor_cast.hif8_linear.default,
             ):
                 # static_quant_linear case
                 if has_w_scale:

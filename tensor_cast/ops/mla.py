@@ -14,10 +14,11 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
+from ..quantize_utils import require_metadata_tensor, validate_hif8_kv_payload
 from ..utils import register_tensor_cast_op
 
 
@@ -449,6 +450,35 @@ def _(
     num_heads = prefill_output.shape[1] if prefill_output.shape[0] else decode_output.shape[1]
     value_dim = prefill_output.shape[-1] if prefill_output.shape[0] else decode_output.shape[-1]
     return torch.empty(num_tokens, num_heads, value_dim, dtype=prefill_output.dtype, device="meta")
+
+
+@register_tensor_cast_op("multihead_latent_attention_hif8_kv")
+def multihead_latent_attention_hif8_kv(
+    q: torch.Tensor,
+    projected_kv: torch.Tensor,
+    absorbed_q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_lens: Optional[torch.Tensor],
+    v_head_dim: int,
+    kv_lora_rank: int,
+    topk_limit: Optional[int],
+    topk_indices: Optional[torch.Tensor],
+    kv_scale: torch.Tensor,
+    *,
+    is_decode_values: Optional[List[bool]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    validate_hif8_kv_payload(kv_cache, kv_scale)
+    for x in (q, projected_kv, absorbed_q):
+        require_metadata_tensor(x)
+        if x.dtype != torch.bfloat16:
+            raise ValueError("HIF8 KV MLA requires BF16 queries and projections")
+    return (
+        torch.empty(projected_kv.shape[0], projected_kv.shape[1], v_head_dim, dtype=q.dtype, device=q.device),
+        torch.empty(absorbed_q.shape[0], absorbed_q.shape[1], kv_lora_rank, dtype=q.dtype, device=q.device),
+    )
 
 
 @register_tensor_cast_op("multihead_latent_attention_quant")

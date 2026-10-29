@@ -43,6 +43,7 @@ from .profiling_database.data_source import QueryResult, QuerySource
 
 # Human-readable descriptions for miss reason codes
 _MISS_REASON_LABELS = {
+    "hif8_requires_verified_profile": "HIF8 kernel/scale/layout profile unavailable; using HIF8 analytic model",
     "unmapped": "not in op_mapping.yaml",
     "shape_mismatch": "kernel found, no matching shape in CSV",
     "input_count_mismatch": "TC input count differs from CSV",

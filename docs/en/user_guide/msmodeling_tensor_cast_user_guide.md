@@ -59,6 +59,7 @@ You can also quantize the linear layers with various quantization schemes, such 
 python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 4500 --device TEST_DEVICE --quantize-linear-action W8A8_DYNAMIC --compile
 ```
 
+
 #### Decode Scenario
 
 Running the decode scenario is similar. You only need to adjust the input length `--query-length` and the context length `--context-length` of the requests. When MTP is disabled, `--query-length` is usually 1. When MTP is enabled, set `--query-length` to `1 + N`, where `N` is the number of MTP tokens. You are advised to use the unified interface `--speculative-method mtp --num-speculative-tokens N`. The original `--num-mtp-tokens` is still supported for compatibility. In this case, `--query-length` in decode must also be aligned to `N + 1` (the CLI can align it automatically).
@@ -66,6 +67,8 @@ Running the decode scenario is similar. You only need to adjust the input length
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 10 --query-length 1 --context-length 4500 --decode --device TEST_DEVICE --quantize-linear-action W8A8_STATIC --compile
 ```
+
+For MoE models, use `--quantize-non-expert-linear-action` to specify an independent quantization scheme for Attention projections, dense MLPs, and shared experts. Routed experts retain `--quantize-linear-action`.
 
 **Output:** A performance summary table. If `--chrome-trace-file` is set, a Chrome trace file is optionally generated.
 
@@ -100,6 +103,7 @@ Notes:
 - The default draft configuration is stored in `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`. For field descriptions and customization methods, see [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md).
 
 **Output:** A performance summary table. If `--chrome-trace-file` is set, a Chrome trace file is optionally generated.
+
 
 ### 2.2 Result (Text Generation)
 
@@ -304,10 +308,10 @@ usage: text_generate.py [-h]
                         [--num-draft-layers NUM_DRAFT_LAYERS]
                         [--draft-model-config-path DRAFT_MODEL_CONFIG_PATH]
                         [--compilation-config [{enable_multistream,enable_sequence_parallel,enable_matmul_allreduce,enable_dispatch_ffn_combine} ...]]
-                        [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
-                        [--quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
+                        [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4,HIF8}]
+                        [--quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4,HIF8}]
                         [--quantize-lmhead] [--mxfp4-group-size mxfp4_GROUP_SIZE]
-                        [--quantize-attention-action {DISABLED,INT8,FP8}] [--graph-log-path GRAPH_LOG_DIR]
+                        [--quantize-attention-action {DISABLED,INT8,FP8,HIF8}] [--graph-log-path GRAPH_LOG_DIR]
                         [--dump-input-shapes] [--dump-op-bound-results] [--chrome-trace-file CHROME_TRACE]
                         [--num-hidden-layers-override NUM_HIDDEN_LAYERS_OVERRIDE] [--tp-size TP_SIZE]
                         [--dp-size DP_SIZE] [--ep-size EP_SIZE] [--o-proj-tp-size O_PROJ_TP_SIZE]
@@ -354,11 +358,11 @@ The main parameters are as follows:
 | --compile                            | Optimization Options | Optional | Calls `torch.compile()` on the model before inference.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`. |
 | --compile-allow-graph-break          | Optimization Options | Optional | Allows graph breaks during `torch.compile()`.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`. |
 | --compilation-config                 | Optimization Options | Optional | Dynamically enables the specified compilation features. You can specify multiple options at a time.<br>1. Type: List[Str] (`nargs="*"`).<br>2. Values: `enable_multistream` (enables multi-stream scheduling), `enable_sequence_parallel` (enables the sequence parallel graph rewrite pass), `enable_matmul_allreduce` (enables matmul-allreduce fusion), and `enable_dispatch_ffn_combine` (enables dispatch_ffn_combine fusion).<br>3. Default: when not specified, all compilation features remain disabled (`False`).<br>4. Example: `--compilation-config enable_multistream enable_sequence_parallel`.<br>5. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `enable_multistream` and `enable-multistream`. |
-| --quantize-linear-action             | Quantization Options | Optional | Specifies the quantization scheme for linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `W8A8_DYNAMIC` and `w8a8-dynamic`, or `DISABLED` and `disabled`. |
-| --quantize-non-expert-linear-action  | Quantization Options | Optional | Specifies an independent quantization scheme for non-expert linear layers, such as attention projections, dense MLPs, and shared experts.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `DISABLED`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `DISABLED` and `disabled`. |
+| --quantize-linear-action             | Quantization Options | Optional | Specifies the quantization scheme for linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`, `HIF8`.<br>3. Default: `W8A8_DYNAMIC`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `W8A8_DYNAMIC` and `w8a8-dynamic`, or `DISABLED` and `disabled`. |
+| --quantize-non-expert-linear-action  | Quantization Options | Optional | Specifies an independent quantization scheme for non-expert linear layers, such as attention projections, dense MLPs, and shared experts.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`, `HIF8`.<br>3. Default: `DISABLED`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `DISABLED` and `disabled`. |
 | --quantize-lmhead                    | Quantization Options | Optional | Enables quantization for the lm head.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`. |
 | --mxfp4-group-size                   | Quantization Options | Optional | Specifies the group size for `mxfp4` quantization.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: 32. |
-| --quantize-attention-action          | Quantization Options | Optional | Specifies the quantization scheme for the KV cache.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `INT8`, `FP8`.<br>3. Default: `DISABLED`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `DISABLED` and `disabled`, or `INT8` and `int8`. |
+| --quantize-attention-action          | Quantization Options | Optional | Specifies the quantization scheme for the KV cache.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `INT8`, `FP8`, `HIF8`.<br>3. Default: `DISABLED`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `DISABLED` and `disabled`, or `INT8` and `int8`.<br>5. MiMo V2 Flash does not support `HIF8` KV cache and is rejected during configuration resolution. Independent HIF8 linear quantization remains available. |
 | --graph-log-path                     | Debugging Options | Optional | Specifies the output **directory** for the compilation graph log. Use it only when debugging the compile path. Each pass writes multiple dump files to this directory.<br>1. Type: Str.<br>2. Value range: directory path.<br>3. Default: `None`. |
 | --dump-input-shapes                  | Debugging Options | Optional | Outputs the input shape information to help troubleshoot the model input configuration.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`. |
 | --dump-op-bound-results              | Debugging Options | Optional | Outputs the operator-level memory, communication, MMA, and GP bound ratios in the result table.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`. |
@@ -612,7 +616,7 @@ usage: video_generate.py [-h] [-V] [-v] [-q]
                          [--height HEIGHT] [--width WIDTH] [--frame-num FRAME_NUM] [--sample-step SAMPLE_STEP]
                          [--log-level {debug,info,warning,error,critical}] [--dtype {float16,float32,bfloat16}]
                          [--remote-source {huggingface,modelscope}]
-                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
+                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4,HIF8}]
                          [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg]
                          [--attention-backend {dense,block_sparse_attention}] [--attention-block-size ATTENTION_BLOCK_SIZE]
                          [--attention-sparsity ATTENTION_SPARSITY] [--num-devices WORLD_SIZE]
@@ -643,7 +647,7 @@ The main parameters are as follows:
 | --log-level               | Options | Optional | Specifies the log level.<br>1. Type: Str.<br>2. Reference values: `debug`, `info`, `warning`, `error`, `critical`.<br>3. Default: `error`. |
 | --dtype                   | Options | Optional | Specifies the computation data type of the model.<br>1. Type: Str.<br>2. Reference values: `float16`, `float32`, `bfloat16`.<br>3. Default: `float16`. |
 | --remote-source           | Options | Optional | Specifies the remote model source for a non-local Diffusers repo ID.<br>1. Type: Str.<br>2. Reference values: `huggingface`, `modelscope`.<br>3. Default: `huggingface`. |
-| --quantize-linear-action  | Options | Optional | Specifies the quantization scheme for linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `W8A8_DYNAMIC` and `w8a8-dynamic`, or `DISABLED` and `disabled`. |
+| --quantize-linear-action  | Options | Optional | Specifies the quantization scheme for linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`, `HIF8`.<br>3. Default: `W8A8_DYNAMIC`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `W8A8_DYNAMIC` and `w8a8-dynamic`, or `DISABLED` and `disabled`. |
 | --quantize-attention-action | Options | Optional | Specifies the quantization scheme for attention computation.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `INT8`, `FP8`.<br>3. Default: `DISABLED`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `DISABLED` and `disabled`, or `INT8` and `int8`. |
 | --use-cfg                 | Options | Optional | Enables the simulation path related to classifier-free guidance.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`. |
 | --attention-backend       | Attention Options | Optional | Selects the attention backend.<br>1. Type: Str.<br>2. Reference values: `dense`, `block_sparse_attention`.<br>3. Default: `dense`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `block_sparse_attention` and `block-sparse-attention`. |
@@ -705,7 +709,7 @@ The main parameters are as follows:
 | --use-cfg                 | Options | Optional | Enables the video-style classifier-free guidance workload approximation.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`. |
 | --dtype                   | Options | Optional | Specifies the computation data type of the model.<br>1. Type: Str.<br>2. Reference values: `float16`, `float32`, `bfloat16`.<br>3. Default: `float16`. |
 | --remote-source           | Options | Optional | Specifies the remote model source. It participates in exact pair matching.<br>1. Type: Str.<br>2. Reference values: `huggingface`, `modelscope`.<br>3. Default: `huggingface`. |
-| --quantize-linear-action  | Quantization Options | Optional | Specifies the quantization scheme for linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `DISABLED`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `W8A8_DYNAMIC` and `w8a8-dynamic`, or `DISABLED` and `disabled`. |
+| --quantize-linear-action  | Quantization Options | Optional | Specifies the quantization scheme for linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`, `HIF8`.<br>3. Default: `DISABLED`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `W8A8_DYNAMIC` and `w8a8-dynamic`, or `DISABLED` and `disabled`. |
 | --mxfp4-group-size        | Quantization Options | Optional | Specifies the group size for `MXFP4` quantization.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: 32. |
 | --quantize-attention-action | Quantization Options | Optional | Specifies the quantization scheme for attention computation.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `INT8`, `FP8`.<br>3. Default: `DISABLED`.<br>4. Both uppercase and lowercase values and underscore or hyphen spellings are accepted, for example `DISABLED` and `disabled`, or `INT8` and `int8`. |
 | --compile                 | Optimization Options | Optional | Compiles the main transformer before simulation.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`.<br>4. Uses `dynamic=False, fullgraph=True`. When DiT cache is enabled, the cache transformer uses the same strategy. |
