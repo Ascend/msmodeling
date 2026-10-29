@@ -3618,9 +3618,9 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
                 _k3_inject_kda_state(metrics, _k3_kda_state_size_gb(self.model))
                 return metrics
 
-            def _patched_build_pipeline_metrics_k3(self, pipeline_result, *, batch_size, run_time_s):
+            def _patched_build_pipeline_metrics_k3(self, pipeline_result, *, batch_size, run_time_s, **kwargs):
                 metrics = _orig_build_pipeline_metrics_k3(
-                    self, pipeline_result, batch_size=batch_size, run_time_s=run_time_s
+                    self, pipeline_result, batch_size=batch_size, run_time_s=run_time_s, **kwargs
                 )
                 _k3_inject_kda_state(metrics, _k3_kda_state_size_gb(self.model))
                 return metrics

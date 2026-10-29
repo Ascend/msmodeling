@@ -73,6 +73,8 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 Disaggregation mode separates prefill and decode phases into independent optimization runs. This is useful when you need to characterize each phase independently or when planning disaggregated serving deployments.
 
+For disaggregated Prefill, omitting `--max-batched-tokens` leaves batching without a token budget; the concurrency search still follows TTFT and memory constraints. When set, the value limits the tokens in each Prefill microbatch on each DP replica. Requests are grouped using the effective query length before PP scheduling, so candidate concurrency can exceed one group's capacity. Long prompts are split into chunks, and each chunk is grouped under the same budget. `--max-batched-tokens` is not a concurrency cap.
+
 #### Prerequisites
 
 To enable disaggregation mode, you must provide:

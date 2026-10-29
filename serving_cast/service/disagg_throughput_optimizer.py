@@ -112,8 +112,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         ``max_batched_tokens`` therefore must not acquire the base optimizer's
         automatic serving budget: that budget would turn one reported
         concurrency into several Prefill waves and understate the corresponding
-        single-forward peak memory. Explicit budgets retain the existing
-        chunk/wave model through the base implementation. Length-distribution
+        single-forward peak memory. Explicit budgets group requests into
+        budget-sized microbatches for PP scheduling. Length-distribution
         Prefill also retains the base path because it needs an effective token
         budget to construct its representative chunk plan.
 
@@ -554,6 +554,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 seq_len=None,
                 resident_policy="inflight",
                 chunk_shapes=[(c.query_len, c.seq_len) for c in chunk_plan] if len(chunk_plan) > 1 else None,
+                prefill_token_budget=max_batched_tokens,
             )
             # Explicit guards instead of assert: these are runtime
             # preconditions of the steady-state prefill path and must survive

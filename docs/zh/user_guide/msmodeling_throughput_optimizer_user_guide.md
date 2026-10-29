@@ -73,6 +73,8 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 PD 分离将 Prefill 与 Decode 阶段拆分为独立的优化运行，适用于需要分别刻画各阶段性能，或规划 PD 分离服务部署的场景。
 
+PD 分离 Prefill 未设置 `--max-batched-tokens` 时，不设置组 batch 的 token 上限，并继续按 TTFT、显存等约束搜索并发。显式设置时，该值限制每个 DP 副本中单个 Prefill microbatch 的 token 数；请求按有效 query length 分组后进入 PP 调度，候选的总并发可以大于单组容量。超长输入先拆成 chunk，各 chunk 分别按预算分组。`--max-batched-tokens` 本身不是并发上限。
+
 #### 前置条件
 
 启用 PD 分离需提供：

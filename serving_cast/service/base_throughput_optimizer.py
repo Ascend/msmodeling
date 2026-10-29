@@ -885,12 +885,9 @@ class BaseThroughputOptimizer(ABC):
     ) -> str | None:
         """Validate the PP prefill contract.
 
-        Returns ``EARLY_STOP_PREFILL_OOM`` when the *current* batch exceeds the
-        token budget but smaller batches may still be valid — the binary
-        search will shrink its upper bound instead of discarding the entire
-        candidate.  Raises ``UnsupportedPPConfigurationError`` only for
-        candidate-level incompatibilities that no batch size can fix
-        (variable-length input, or prompt too long for even batch=1).
+        The token budget limits each scheduled microbatch, not the candidate's
+        total concurrency. Raises ``UnsupportedPPConfigurationError`` only for
+        candidate-level incompatibilities that no batch size can fix.
 
         Chunked prefill (``len(chunk_plan) > 1``) is supported: each chunk
         becomes a separate microbatch in the pipeline schedule, mirroring
@@ -904,16 +901,14 @@ class BaseThroughputOptimizer(ABC):
                 "distribution; use a fixed input_length or disable PP."
             )
 
-        if len(chunk_plan) > 1:
+        if chunk_plan:
             # Chunked prefill token-budget contract: the pipeline schedule
             # sends one microbatch per stage at a time (1F1B), so the binding
             # per-step constraint is one microbatch's tokens, not the whole
             # wave's batch_size * query_len. get_prefill_chunk_plan caps every
             # chunk's query_len at max_batched_tokens; guard it explicitly so
-            # the contract stays executable if the chunk plan changes. (The
-            # single-chunk branch below keeps its stricter historical
-            # batch_size * query_len gate, matching the non-PP wave model
-            # where a whole wave is one forward.)
+            # the contract stays executable if the chunk plan changes. The
+            # same rule applies to single- and multi-chunk prompts.
             if max_batched_tokens is not None:
                 oversized = [chunk.query_len for chunk in chunk_plan if chunk.query_len > max_batched_tokens]
                 if oversized:
@@ -922,35 +917,11 @@ class BaseThroughputOptimizer(ABC):
                         f"max_batched_tokens {max_batched_tokens}; the chunk plan must split "
                         "prompts to fit the per-microbatch token budget."
                     )
-            return None
-
-        prefill_query_len = chunk_plan[0].query_len if chunk_plan else effective_input_length
-        batch_tokens = optimizer_data.batch_size * prefill_query_len
-        if max_batched_tokens is None:
-            # Unbounded prefill (auto mode, no explicit --max-batched-tokens):
-            # the whole prompt is one forward with no per-wave token budget, so
-            # the batch-budget gate does not apply. PP>1 schedules it as a single
-            # microbatch through the pipeline.
-            return None
-        if batch_tokens > max_batched_tokens:
-            max_batch_by_tokens = max_batched_tokens // prefill_query_len
-            if max_batch_by_tokens < 1:
-                raise UnsupportedPPConfigurationError(
-                    f"PP>1 {phase_label} prompt length {prefill_query_len} exceeds "
-                    f"max_batched_tokens {max_batched_tokens} per DP replica; even "
-                    "batch=1 cannot fit. Increase --max-batched-tokens or disable PP."
-                )
-            logger.info(
-                "PP>1 %s batch_size %d * query_len %d = %d exceeds max_batched_tokens "
-                "%d; shrinking search upper bound to %d.",
-                phase_label,
-                optimizer_data.batch_size,
-                prefill_query_len,
-                batch_tokens,
-                max_batched_tokens,
-                max_batch_by_tokens,
+        elif max_batched_tokens is not None and effective_input_length > max_batched_tokens:
+            raise UnsupportedPPConfigurationError(
+                f"PP>1 {phase_label} query length {effective_input_length} exceeds "
+                f"max_batched_tokens {max_batched_tokens}; split the prompt into chunks."
             )
-            return EARLY_STOP_PREFILL_OOM
         return None
 
     def _pp_microbatch_size(self) -> int:
@@ -1081,6 +1052,7 @@ class BaseThroughputOptimizer(ABC):
         mixed_prefill: _PPWaveEvaluation | None = None,
         publish_schedule: bool = True,
         chunk_shapes: list[tuple[int, int]] | None = None,
+        prefill_token_budget: int | None = None,
     ) -> _PPWaveEvaluation:
         """Profile, schedule, and memory-gate one PP microbatch wave.
 
@@ -1091,10 +1063,9 @@ class BaseThroughputOptimizer(ABC):
         decode, and their overlap in one gate.
 
         When ``chunk_shapes`` is provided, each ``(query_len, seq_len)`` pair
-        becomes a group of microbatches in the pipeline schedule, mirroring
-        vLLM's chunked-prefill + PP 1F1B scheduling.  This is used for
-        chunked prefill where the effective prompt exceeds
-        ``max_batched_tokens`` and is split into multiple chunks.
+        becomes a group of microbatches in the pipeline schedule. An explicit
+        Prefill token budget caps each microbatch by its chunk's query length;
+        it does not cap the number of requests in the candidate.
         """
         microbatch_sizes = split_batch_size(batch_size, self._pp_microbatch_size())
         if chunk_shapes is not None:
@@ -1102,6 +1073,12 @@ class BaseThroughputOptimizer(ABC):
             # own (query_len, seq_len).  The combined sequence is ordered by
             # chunk index then microbatch index within each chunk, so the
             # pipeline schedule models 1F1B chunk pipelining across stages.
+            chunk_microbatch_sizes = [
+                split_batch_size(batch_size, min(self._pp_microbatch_size(), prefill_token_budget // c_query_len))
+                if prefill_token_budget is not None
+                else microbatch_sizes
+                for c_query_len, _ in chunk_shapes
+            ]
             profile_records = tuple(
                 self._profile_pp_microbatch(
                     mb_size,
@@ -1110,10 +1087,14 @@ class BaseThroughputOptimizer(ABC):
                     query_len=c_query_len,
                     seq_len=c_seq_len,
                 )
-                for c_query_len, c_seq_len in chunk_shapes
-                for mb_size in microbatch_sizes
+                for (c_query_len, c_seq_len), sizes in zip(chunk_shapes, chunk_microbatch_sizes)
+                for mb_size in sizes
             )
         else:
+            if prefill_token_budget is not None:
+                microbatch_sizes = split_batch_size(
+                    batch_size, min(self._pp_microbatch_size(), prefill_token_budget // query_len)
+                )
             profile_records = tuple(
                 self._profile_pp_microbatch(
                     microbatch_size,
@@ -1157,7 +1138,7 @@ class BaseThroughputOptimizer(ABC):
         #   available as warmup diagnostics (pp_makespan_ms column).
         prefill_request_ttft_s = None
         if repeated is not None and not is_decode:
-            final_chunk_sizes = microbatch_sizes
+            final_chunk_sizes = chunk_microbatch_sizes[-1] if chunk_shapes is not None else microbatch_sizes
             wave1_final_chunk = repeated.first_wave.microbatch_completion_s[-len(final_chunk_sizes) :]
             prefill_request_ttft_s = sum(
                 size * completion for size, completion in zip(final_chunk_sizes, wave1_final_chunk)

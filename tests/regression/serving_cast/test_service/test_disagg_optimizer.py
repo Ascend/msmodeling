@@ -1718,14 +1718,11 @@ class TestDisaggPipelineParallel(unittest.TestCase):
             strategy._validate_pp_prefill_wave(optimizer_data, oversized_plan)
         self.assertIn("exceeds", str(ctx.exception))
 
-    def test_batch_budget_returns_early_stop_not_exception(self):
-        """Batch exceeding token budget returns early-stop, not UnsupportedPPConfigurationError."""
-        from serving_cast.service.optimizer_summary import EARLY_STOP_PREFILL_OOM
-
-        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+    def test_batch_budget_groups_requests_without_capping_concurrency(self):
+        """The token budget limits each microbatch, while SLO controls concurrency."""
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1, microbatch_size=4)
         profile = _pp_profile((2.0, 2.0), include_transfers=False)
-        # batch_size=4 * input_length=1024 = 4096 > max_batched_tokens=2048
-        # but max_batch_by_tokens = 2048//1024 = 2 >= 1, so early-stop (shrink search)
+        # Four requests exceed the per-group budget, so they form two groups of two.
         optimizer_data = OptimizerData(
             ttft_limits=100000,
             tpot_limits=None,
@@ -1735,10 +1732,89 @@ class TestDisaggPipelineParallel(unittest.TestCase):
             max_batched_tokens=2048,
             serving_cost=0,
         )
-        with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+        calls = []
+
+        def fake_forward(concurrency, *args, **kwargs):
+            calls.append((concurrency, kwargs.get("query_len")))
+            return _PPMetrics(profile)
+
+        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
             summary = strategy.get_inference_info(optimizer_data)
-        self.assertTrue(summary.check_early_stop_flag())
-        self.assertEqual(summary.get_early_stop_reason(), EARLY_STOP_PREFILL_OOM)
+        self.assertFalse(summary.check_early_stop_flag())
+        self.assertEqual(summary.get_summary_df().iloc[0]["concurrency"], 4)
+        self.assertEqual(calls, [(2, 1024)])
+        self.assertEqual(len(getattr(optimizer_data, "pipeline_schedule_estimate").microbatch_completion_s), 2)
+
+    def test_cached_prefix_uses_effective_query_length_for_group_budget(self):
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1, microbatch_size=4)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=3,
+            input_length=100,
+            output_length=8,
+            prefix_cache_hit_rate=0.9,
+            max_batched_tokens=20,
+            serving_cost=0,
+        )
+        calls = []
+
+        def fake_forward(concurrency, *args, **kwargs):
+            calls.append((concurrency, kwargs.get("query_len")))
+            return _PPMetrics(profile)
+
+        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
+            summary = strategy.get_inference_info(optimizer_data)
+        self.assertFalse(summary.check_early_stop_flag())
+        self.assertEqual(calls, [(2, 10), (1, 10)])
+
+    def test_chunked_prefill_groups_each_chunk_under_its_own_token_budget(self):
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1, microbatch_size=4)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=3,
+            input_length=7,
+            output_length=8,
+            max_batched_tokens=5,
+            serving_cost=0,
+        )
+        calls = []
+
+        def fake_forward(concurrency, *args, **kwargs):
+            calls.append((concurrency, kwargs.get("query_len")))
+            return _PPMetrics(profile)
+
+        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
+            summary = strategy.get_inference_info(optimizer_data)
+        self.assertFalse(summary.check_early_stop_flag())
+        self.assertEqual(calls, [(1, 5), (2, 2), (1, 2)])
+        self.assertEqual(len(getattr(optimizer_data, "pipeline_schedule_estimate").microbatch_completion_s), 5)
+
+    def test_pp_prefill_without_budget_uses_configured_microbatch_size(self):
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1, microbatch_size=4)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=4,
+            input_length=1024,
+            output_length=8,
+            max_batched_tokens=None,
+            serving_cost=0,
+        )
+        calls = []
+
+        def fake_forward(concurrency, *args, **kwargs):
+            calls.append(concurrency)
+            return _PPMetrics(profile)
+
+        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
+            summary = strategy.get_inference_info(optimizer_data)
+        self.assertFalse(summary.check_early_stop_flag())
+        self.assertEqual(calls, [4])
 
 
 if __name__ == "__main__":
