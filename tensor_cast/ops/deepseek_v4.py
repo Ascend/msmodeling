@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 import torch
 from torch._subclasses.fake_tensor import is_fake
 
+from ..quantize_utils import require_metadata_tensor, validate_hif8_kv_payload
 from ..utils import register_tensor_cast_op
 
 
@@ -61,6 +62,8 @@ def _(
     rotate: bool,
     seq_lens: Optional[torch.Tensor] = None,
     query_lens: Optional[torch.Tensor] = None,
+    kv_scale: Optional[torch.Tensor] = None,
+    kv_format: Optional[str] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Semantic op for V4 Compressor (Flash/Pro; mirrors `Compressor.forward`).
 
@@ -79,12 +82,29 @@ def _(
     cost model bill RoPE only on `kv[..., -rd:]` (model.py:367) and
     act_quant only on `kv[..., :-rd]` (model.py:372).
 
+    ``kv_format="hif8"`` replaces native KV act_quant with static full-row
+    HIF8 encoding using ``kv_scale``. Default arguments retain the native path.
+
     `rotate` matches reference `Compressor.rotate`: True for indexer compressor
     (Hadamard + fp4 over full d), False for main KV compressor (block act_quant
     over nope d-rd only). See model.py:368-372.
     """
+    if kv_format not in (None, "hif8"):
+        raise ValueError(f"Unsupported V4 KV format: {kv_format}")
+    if kv_format == "hif8":
+        require_metadata_tensor(hidden_states)
+        if kv_scale is None or rotate:
+            raise ValueError("HIF8 compression requires a static scale and the main shared-KV stream")
+        validate_hif8_kv_payload(kv_cache, kv_scale)
+        if kv_cache.shape[-1] != head_dim:
+            raise ValueError("HIF8 compressed cache must store one byte per shared-KV channel")
     batch, seq_len, _ = hidden_states.shape
-    if query_lens is not None and not is_fake(query_lens) and query_lens.numel() > 0:
+    if (
+        query_lens is not None
+        and not is_fake(query_lens)
+        and query_lens.device.type != "meta"
+        and query_lens.numel() > 0
+    ):
         # Packed single-token requests (`query_len == 1`) correspond to decode.
         # Keep the compressed output at one row so the semantic op matches the
         # reference decoder's incremental cache update shape.
@@ -176,6 +196,8 @@ def _(
     kv_dependency: Optional[torch.Tensor] = None,
     kv_quant_dtype: torch.dtype | None = None,
     rope_head_dim: int = 0,
+    kv_scale: Optional[torch.Tensor] = None,
+    kv_format: Optional[str] = None,
 ) -> torch.Tensor:
     """Semantic op for V4 sparse attention with shared KV.
 
@@ -183,7 +205,21 @@ def _(
     callers pass the already-merged window+compress indices. `attn_sink` and
     `softmax_scale` are carried explicitly so the op record matches the
     reference sparse-attention call signature.
+
+    ``kv_format="hif8"`` identifies the logical format independently of the
+    uint8 carrier also used by mixed FP8 rows. ``kv_scale`` is then required.
     """
+    if kv_format not in (None, "hif8"):
+        raise ValueError(f"Unsupported V4 KV format: {kv_format}")
+    if kv_format == "hif8":
+        require_metadata_tensor(q)
+        if kv_scale is None:
+            raise ValueError("HIF8 shared-KV attention requires a static scale")
+        validate_hif8_kv_payload(kv, kv_scale)
+        if q.dtype != torch.bfloat16 or kv.shape[-1] != q.shape[-1] or head_dim != q.shape[-1]:
+            raise ValueError("HIF8 shared-KV attention requires BF16 queries and matching logical head widths")
+        if kv_dependency is not None:
+            validate_hif8_kv_payload(kv_dependency, kv_scale)
     # Quantization describes KV storage only. Mixed FP8 rows contain BF16
     # RoPE; KV is dequantized for attention, without quantizing Q or P.
     del attn_sink, softmax_scale, kv_quant_dtype, rope_head_dim

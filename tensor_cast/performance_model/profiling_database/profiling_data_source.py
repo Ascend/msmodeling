@@ -70,9 +70,8 @@ import yaml
 
 from ... import config
 from ...device import DeviceProfile
-from ..utils import is_hif8_op
 from ...ops.mla import local_mla_phase_token_counts
-from ..op_invoke_info import get_named_args
+from ..op_invoke_info import get_named_args, is_hif8_op_from_info
 from .backend_projector import CANNBackendProjector
 from .data_source import (
     DataSourcePerformanceModel,
@@ -2663,7 +2662,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         # may be relaxed there). No verified HIF8 kernel/scale/layout projection
         # ships with the database yet. Preserve a visible analytic fallback,
         # even if an old mapping accidentally points at an INT8/FP8 kernel.
-        if is_hif8_op(op_invoke_info.func):
+        if is_hif8_op_from_info(op_invoke_info):
             self.last_miss_reason = "hif8_requires_verified_profile"
             return None
         mappings = self._op_mapping.get("operator_mappings", {})

@@ -82,6 +82,6 @@ def bytes_of_elements(nelements: int, dtype: torch.dtype) -> float:
 
 
 def is_hif8_op(func) -> bool:
-    """Dedicated operator targets preserve format identity through FX passes."""
+    """Recognize dedicated HIF8 operator targets by name."""
     name = str(func).removeprefix("torch.ops.")
     return name.startswith("tensor_cast.") and "hif8" in name

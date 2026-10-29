@@ -327,6 +327,11 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         # V4 has no kv_b_proj decomposition tensors to quantize.
         return None
 
+    def quantize_params(self):
+        if self.quant_config is not None and self.quant_config.is_hif8_kv:
+            return  # V4 encodes shared KV, without the legacy kv_b decomposition.
+        super().quantize_params()
+
     @staticmethod
     def _local_linear_out_features(module: torch.nn.Module) -> int:
         # Read the post-shard output width directly off the wrapped projection.
@@ -756,6 +761,8 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                 scale_dtype=torch.float32,
                 out_dtype=torch.float8_e4m3fn,
             )
+        elif self.quant_config is not None and self.quant_config.is_hif8_kv:
+            kv_window_entry = torch.ops.tensor_cast.quantize_hif8(kv_normed, self.quant_config.kv_scale)
         elif self.quant_config is None:
             kv_nope_quant, _ = torch.ops.tensor_cast.dynamic_quantize_symmetric(
                 kv_normed[..., :-rd],
@@ -945,11 +952,17 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         softmax_scale = float(getattr(self._inner, "softmax_scale", getattr(self._inner, "scaling", head_dim**-0.5)))
         attention_op = torch.ops.tensor_cast.sparse_attn_sharedkv
         attention_quant_kwargs = {}
+        hif8_kv = self.quant_config is not None and self.quant_config.is_hif8_kv
+        compressor_quant_kwargs = {}
         if self.quant_config is not None:
             attention_quant_kwargs = {
                 "kv_quant_dtype": self.quant_config.get_quant_dtype(),
                 "rope_head_dim": rd,
             }
+            if hif8_kv:
+                q_states = q_states.to(torch.bfloat16)
+                compressor_quant_kwargs = {"kv_scale": self.quant_config.kv_scale, "kv_format": "hif8"}
+                attention_quant_kwargs.update(compressor_quant_kwargs)
         # 4-6. scatter + compressor + sparse_attn (model.py:518-533).
         slot_mapping = attention_meta.slot_mapping if attention_meta is not None else None
         # V4 compressors consume full sequence lengths; only CSA2 attention
@@ -1011,6 +1024,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                         if compressor_op == torch.ops.tensor_cast.csa2_compressor and csa2_state is not None
                         else ()
                     ),
+                    **compressor_quant_kwargs,
                 )
                 if compressor_op == torch.ops.tensor_cast.csa2_compressor:
                     kv_compress, compressed_kv_cache, tail_kv, tail_scores = compressor_result
@@ -1152,6 +1166,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                         if compressor_op == torch.ops.tensor_cast.csa2_compressor and csa2_state is not None
                         else ()
                     ),
+                    **compressor_quant_kwargs,
                 )
                 if compressor_op == torch.ops.tensor_cast.csa2_compressor:
                     kv_compress, compressed_kv_cache, tail_kv, tail_scores = compressor_result

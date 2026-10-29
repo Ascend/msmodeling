@@ -1559,7 +1559,8 @@ def _exclude_hif8_kv_projection_linears(model):
         qc = quant_config.attention_configs.get(
             getattr(module, "layer_idx", -1), quant_config.attention_configs.get(-1)
         )
-        if qc is not None and qc.is_hif8_kv and hasattr(module, "kv_b_proj"):
+        kv_b_name = module.mla_config.field_names.kv_b_proj
+        if qc is not None and qc.is_hif8_kv and kv_b_name is not None and hasattr(module, "kv_b_proj"):
             projection_ids.add(id(module.kv_b_proj))
     excluded = list(quant_config.modules_to_not_convert or [])
     for name, module in model._inner.named_modules():

@@ -28,6 +28,7 @@ from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.utils import SimFormat
+from tensor_cast.performance_model.op_invoke_info import get_named_args
 
 
 @pytest.mark.parametrize("model_path", ["llama", "qwen3", "qwen3_moe", "deepseek_v3", "deepseek_v32"], indirect=True)
@@ -102,16 +103,68 @@ def test_hif8_kv_combines_with_linear_quantization_and_dcp(model_path, linear, d
 
 
 @pytest.mark.parametrize("model_path", ["deepseek_v4"], indirect=True)
-def test_hif8_kv_rejects_specialized_shared_cache(model_path):
+@pytest.mark.parametrize(
+    "compiled,decode,query_len,context_length,linear,tp",
+    [
+        (False, False, 8, 0, QuantizeLinearAction.DISABLED, 1),
+        (False, True, 1, 127, QuantizeLinearAction.DISABLED, 1),
+        (True, False, 129, 0, QuantizeLinearAction.DISABLED, 1),
+        (True, True, 1, 127, QuantizeLinearAction.DISABLED, 1),
+        (True, True, 1, 127, QuantizeLinearAction.HIF8, 2),
+    ],
+)
+def test_deepseek_v4_hif8_shared_kv(model_path, compiled, decode, query_len, context_length, linear, tp):
+    config_path = model_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config.update(num_hidden_layers=3, compress_ratios=[0, 4, 128])
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    torch.compiler.reset()
     user = UserInputConfig(
         model_id=str(model_path),
         device="ATLAS_350_425T_112G",
         num_queries=1,
-        query_len=8,
+        query_len=query_len,
+        context_length=context_length,
+        decode=decode,
+        do_compile=compiled,
+        world_size=tp,
+        tp_size=tp,
+        quantize_linear_action=linear,
         quantize_attention_action=QuantizeAttentionAction.HIF8,
     )
-    with pytest.raises(ValueError, match="specialized.*cache layout"):
-        ModelRunner(user)
+    events = []
+    runner = ModelRunner(user)
+    scales = [x for name, x in runner.model.named_buffers() if name.endswith("hif8_kv_scale")]
+    assert len(scales) == 3
+    result = runner.run_inference(runtime_observer=lambda runtime: events.extend(runtime.event_list))
+    assert math.isfinite(result.execution_time_s["analytic"]) and result.execution_time_s["analytic"] > 0
+    ops = [event.op_invoke_info for event in events]
+    attention = [info for info in ops if info.func == torch.ops.tensor_cast.sparse_attn_sharedkv.default]
+    assert len(attention) == 3
+    for info in attention:
+        assert get_named_args(info)["kv_format"] == "hif8"
+        assert info.args[0].dtype == torch.bfloat16 and info.args[1].dtype == torch.uint8
+        props = info.get_perf_properties()
+        assert props.compute_ops[torch.bfloat16].mma_ops > 0
+        assert SimFormat.HIF8 not in props.compute_ops and torch.uint8 not in props.compute_ops
+    compressors = [
+        info
+        for info in ops
+        if info.func == torch.ops.tensor_cast.compressor.default and get_named_args(info).get("kv_format") == "hif8"
+    ]
+    assert len(compressors) == 2
+    assert {info.args[2] for info in compressors} == {4, 128}
+    indexer = [info for info in ops if info.func == torch.ops.tensor_cast.quant_lightning_indexer.default]
+    assert indexer and all(info.args[2].dtype == torch.bfloat16 for info in indexer)
+    assert sum(info.func == torch.ops.tensor_cast.quantize_hif8.default for info in ops) == 3
+    assert sum(info.func == torch.ops.tensor_cast.scatter_nd_update_mla.default for info in ops) >= 3
+    user.quantize_attention_action = QuantizeAttentionAction.DISABLED
+    baseline = ModelRunner(user).run_inference()
+    assert result.indexer_cache_size_gb == baseline.indexer_cache_size_gb
+    assert result.kv_cache_size_gb - result.indexer_cache_size_gb == pytest.approx(
+        (baseline.kv_cache_size_gb - baseline.indexer_cache_size_gb) / 2
+    )
+    assert result.model_weight_size_gb == pytest.approx(baseline.model_weight_size_gb + 4 * len(scales) / 1024**3)
 
 
 @pytest.fixture
@@ -259,7 +312,7 @@ def test_weight_memory_saving_does_not_change_kv_or_model_dtype(model_path):
     assert results[1].kv_cache_size_gb == results[0].kv_cache_size_gb
 
 
-@pytest.mark.parametrize("model_path", ["qwen3"], indirect=True)
+@pytest.mark.parametrize("model_path", ["qwen3", "deepseek_v4"], indirect=True)
 @pytest.mark.parametrize("disagg", [False, True])
 def test_throughput_search_hif8(model_path, disagg):
     from tests.helpers.cli_runner import run_module_main
@@ -288,6 +341,8 @@ def test_throughput_search_hif8(model_path, disagg):
     ]
     if disagg:
         args += ["--disagg", "--ttft-limits", "1000"]
+    if model_path.name == "deepseek_v4":
+        args += ["--quantize-attention-action", "HIF8"]
     result = run_module_main("cli.inference.throughput_optimizer", args)
     assert result.returncode == 0, result.stderr
     assert "HIF8" in result.stdout

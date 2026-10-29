@@ -58,8 +58,15 @@ from tensor_cast.layers.mla import (
     _resolve_sparse_topk_limit,
 )
 from tensor_cast.model_config import LinearQuantConfig, MlaConfig
-from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+from tensor_cast.performance_model.op_invoke_info import is_hif8_op_from_info, OpInvokeInfo
 from tensor_cast.quantize_utils import LinearQuantType
+from tensor_cast.device import TEST_DEVICE
+from tensor_cast.utils import SimFormat
+from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
+from tensor_cast.performance_model.utils import is_hif8_op
+from tensor_cast.performance_model.profiling_database.interpolating_data_source import InterpolatingDataSource
+from tensor_cast.performance_model.calibration.signature import build_calibration_signature
+from tensor_cast.performance_model.profiling_database.profiling_data_source import ProfilingDataSource
 
 
 def _v4_perf_props(op):
@@ -1717,6 +1724,130 @@ def test_v4_fp8_storage_keeps_bf16_compute_and_dequantizes_shared_kv(heads):
     # no separate Q/P quantization, and no separate K/V dequantization passes.
     assert packed.compute_ops[torch.float32].gp_ops - plain.compute_ops[torch.float32].gp_ops == 2 * 4 * 448 * 3
     assert packed.memory_read_bytes == 2 * 4 * 576 + 2 * 64 * 4
+
+
+@pytest.mark.parametrize("heads", [4, 16, 32])
+@pytest.mark.parametrize("positional", [False, True])
+def test_v4_hif8_shared_kv_gather_and_compute_cost(heads, positional):
+    q = torch.empty(1, 2, heads, 8, device="meta", dtype=torch.bfloat16)
+    kv = torch.empty(1, 1024, 8, device="meta", dtype=torch.uint8)
+    sink = torch.empty(heads, device="meta", dtype=torch.float32)
+    indices = torch.empty(1, 2, 4, device="meta", dtype=torch.int32)
+    scale = torch.empty((), device="meta", dtype=torch.float32)
+    op = torch.ops.tensor_cast.sparse_attn_sharedkv.default
+    args = (q, kv, sink, indices, 0.1, 8)
+    kwargs = {"kv_dependency": kv, "kv_scale": scale, "kv_format": "hif8"}
+    if positional:
+        args += (kv, None, 0, scale, "hif8")
+        kwargs = {}
+    info = OpInvokeInfo(op, args, kwargs, op(*args, **kwargs))
+    assert is_hif8_op_from_info(info)
+    assert not is_hif8_op(op)
+    native = torch.ops.tensor_cast.sparse_attn_sharedkv.default
+    native_args = (q, kv.to(torch.bfloat16), sink, indices, 0.1, 8)
+    baseline = OpInvokeInfo(native, native_args, {}, native(*native_args)).get_perf_properties()
+    props = info.get_perf_properties()
+    assert props.compute_ops[torch.bfloat16].mma_ops == baseline.compute_ops[torch.bfloat16].mma_ops
+    assert SimFormat.HIF8 not in props.compute_ops and torch.uint8 not in props.compute_ops
+    # Decode a shared row once, without a head multiplier or separate K/V passes.
+    assert props.compute_ops[torch.float32].gp_ops - baseline.compute_ops[torch.float32].gp_ops == 2 * 4 * 8 * 3
+    assert baseline.memory_read_bytes - props.memory_read_bytes == 2 * 4 * 8 - 4
+    assert props.memory_write_bytes == baseline.memory_write_bytes
+    assert props.memory_readwrite_bytes == 0
+    device = copy.copy(TEST_DEVICE)
+    device.mma_ops = {dtype: peak for dtype, peak in device.mma_ops.items() if dtype != SimFormat.HIF8}
+    result = AnalyticPerformanceModel(device).process_op(info)
+    assert result.statistics["compute_dtype"] == "bfloat16"
+    assert result.statistics["kv_layout"] == "deepseek_v4_shared"
+    signature = build_calibration_signature(info, result, device_name=device.name)
+    assert signature.op_family == "attention"
+    assert signature.dtype == "hif8"
+    assert signature.features["kv_cache_dtype"] == "hif8"
+    assert signature.features["topk"] == 4
+    assert signature.features["kv_len"] == 1024
+    source = ProfilingDataSource.__new__(ProfilingDataSource)
+    source._op_mapping = {"operator_mappings": {str(op): {"zero_cost": True}}}
+    assert source.lookup(info) is None
+    assert source.last_miss_reason == "hif8_requires_verified_profile"
+    wrapper = InterpolatingDataSource.__new__(InterpolatingDataSource)
+    wrapper.base = source
+    assert wrapper.lookup(info) is None
+    # FP8 uses the same op and uint8 carrier, but must retain ordinary lookup.
+    fp8_args = (q, kv, sink, indices, 0.1, 8)
+    fp8_kwargs = {"kv_quant_dtype": torch.float8_e4m3fn}
+    fp8_info = OpInvokeInfo(op, fp8_args, fp8_kwargs, op(*fp8_args, **fp8_kwargs))
+    assert not is_hif8_op_from_info(fp8_info)
+    assert fp8_info.cache_key != info.cache_key
+    assert wrapper.lookup(fp8_info) is not None
+    assert source.last_miss_reason == ""
+    fp8_result = AnalyticPerformanceModel(device).process_op(fp8_info)
+    assert "logical_format" not in fp8_result.statistics
+    fp8_signature = build_calibration_signature(fp8_info, fp8_result, device_name=device.name)
+    assert fp8_signature.dtype != "hif8"
+
+
+@pytest.mark.parametrize("ratio", [4, 128])
+@pytest.mark.parametrize("seq_len,query_len", [(8, 8), (129, 129), (127, 1), (128, 1)])
+@pytest.mark.parametrize("positional", [False, True])
+def test_v4_hif8_compressor_charges_only_produced_rows(ratio, seq_len, query_len, positional):
+    hidden = torch.empty(1, query_len, 16, device="meta", dtype=torch.bfloat16)
+    cache = torch.empty(1, 256, 8, device="meta", dtype=torch.uint8)
+    lengths = torch.tensor([seq_len])
+    queries = torch.tensor([query_len])
+    scale = torch.empty((), device="meta", dtype=torch.float32)
+    op = torch.ops.tensor_cast.compressor.default
+    args = (hidden, cache, ratio, 8, 2, False, lengths, queries)
+    kwargs = {"kv_scale": scale, "kv_format": "hif8"}
+    if positional:
+        args += (scale, "hif8")
+        kwargs = {}
+    out = op(*args, **kwargs)
+    info = OpInvokeInfo(op, args, kwargs, out)
+    props = info.get_perf_properties()
+    native = torch.ops.tensor_cast.compressor.default
+    native_args = (hidden, cache.to(torch.bfloat16), ratio, 8, 2, False, lengths, queries)
+    baseline = OpInvokeInfo(native, native_args, {}, native(*native_args)).get_perf_properties()
+    rows = query_len // ratio if seq_len == query_len else int(seq_len % ratio == 0)
+    # Replace native non-RoPE FP8 simulation with full-row static HIF8 encoding.
+    assert props.compute_ops[torch.float32].gp_ops - baseline.compute_ops[torch.float32].gp_ops == rows * (
+        5 * 8 - 3 * (8 - 2)
+    )
+    assert props.compute_ops[torch.float32].mma_ops == baseline.compute_ops[torch.float32].mma_ops
+    assert props.memory_read_bytes == baseline.memory_read_bytes + 4
+    assert baseline.memory_write_bytes - props.memory_write_bytes == rows * 8
+    assert props.memory_readwrite_bytes == baseline.memory_readwrite_bytes
+    assert all(x.dtype == torch.uint8 for x in out)
+    result = AnalyticPerformanceModel(TEST_DEVICE).process_op(info)
+    assert result.statistics["compute_dtype"] == "float32"
+    signature = build_calibration_signature(info, result, device_name=TEST_DEVICE.name)
+    assert signature.features["compute_dtype"] == "float32"
+    assert signature.features["compress_ratio"] == ratio
+    source = ProfilingDataSource.__new__(ProfilingDataSource)
+    assert source.lookup(info) is None
+    assert source.last_miss_reason == "hif8_requires_verified_profile"
+
+
+@pytest.mark.parametrize(
+    "bad_scale", [torch.empty(2, device="meta"), torch.empty((), device="meta", dtype=torch.float16)]
+)
+def test_v4_hif8_shared_ops_validate_scale(bad_scale):
+    q = torch.empty(1, 2, 4, 8, device="meta", dtype=torch.bfloat16)
+    cache = torch.empty(1, 64, 8, device="meta", dtype=torch.uint8)
+    with pytest.raises(ValueError, match="scalar float32"):
+        torch.ops.tensor_cast.sparse_attn_sharedkv(
+            q,
+            cache,
+            torch.empty(4),
+            torch.empty(1, 2, 4, dtype=torch.int32),
+            0.1,
+            8,
+            kv_scale=bad_scale,
+            kv_format="hif8",
+        )
+    with pytest.raises(ValueError, match="scalar float32"):
+        torch.ops.tensor_cast.compressor(
+            q.reshape(1, 2, 32), cache, 4, 8, 2, False, kv_scale=bad_scale, kv_format="hif8"
+        )
 
 
 if __name__ == "__main__":

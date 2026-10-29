@@ -17,9 +17,10 @@ from typing import List, Optional, Tuple
 import torch
 from torch._subclasses.fake_tensor import is_fake
 
-from .. import _accumulate_compute_ops, _rmsnorm_ops
+from .. import _accumulate_compute_ops, _estimate_default, _estimate_hif8_kv, _hif8_quantization_ops, _rmsnorm_ops
 from ..memory_tracker import MemoryTracker
-from ..op_invoke_info import OpInvokeInfo
+from ..op_invoke_info import is_hif8_op_from_info, OpInvokeInfo
+from ..op_estimator_registry import register_op_estimator
 from ..utils import bytes_of_elements
 
 
@@ -97,6 +98,7 @@ def _(
     rope_head_dim = max(int(op_invoke_info.args[4]), 0)
     nope_head_dim = max(head_dim - rope_head_dim, 0)
     rotate = bool(op_invoke_info.args[5])
+    hif8_kv = is_hif8_op_from_info(op_invoke_info)
     seq_lens = op_invoke_info.args[6] if len(op_invoke_info.args) > 6 else None
     query_lens = op_invoke_info.args[7] if len(op_invoke_info.args) > 7 else None
     batch, seq_len, hidden_size = hidden_states.shape
@@ -235,6 +237,11 @@ def _(
             # fast_round_scale (bit ops: log2_ceil + pow2) + clamp + cast + mul.
             # ~5-6 ops/elem (was 3, undercounted).
             gp_ops += rows * head_dim * 5
+        elif hif8_kv:
+            # The normalized/RoPE result is BF16 before HIF8 encoding. Replace
+            # native non-RoPE FP8 act_quant; encode the complete shared-KV row.
+            source = torch.empty((rows, head_dim), dtype=torch.bfloat16, device="meta")
+            gp_ops += _hif8_quantization_ops(source, kv_cache.dtype)
         else:
             gp_ops += rows * nope_head_dim * 3
         properties.memory_write_bytes += batch * total_post_compress_rows * kv_cache.shape[-1] * kv_cache.element_size()
@@ -562,8 +569,11 @@ def _(
     per_query_gp = num_heads + num_heads * v_head_dim
     gp_ops = query_tokens * (num_iters * per_iter_gp + per_query_gp)
 
+    hif8_kv = is_hif8_op_from_info(op_invoke_info)
     kv_quant_dtype = (
-        op_invoke_info.args[7] if len(op_invoke_info.args) > 7 else op_invoke_info.kwargs.get("kv_quant_dtype")
+        torch.uint8
+        if hif8_kv
+        else (op_invoke_info.args[7] if len(op_invoke_info.args) > 7 else op_invoke_info.kwargs.get("kv_quant_dtype"))
     )
     rope_head_dim = (
         op_invoke_info.args[8] if len(op_invoke_info.args) > 8 else op_invoke_info.kwargs.get("rope_head_dim", 0)
@@ -592,3 +602,15 @@ def _(
     properties.memory_read_bytes += query_tokens * sparse_topk * kv_row_bytes
     properties.memory_read_bytes += query_tokens * padded_topk * 4
     return properties
+
+
+@register_op_estimator(torch.ops.tensor_cast.compressor.default, None)
+@register_op_estimator(torch.ops.tensor_cast.sparse_attn_sharedkv.default, None)
+def _estimate_v4_kv(info, device_profile):
+    if not is_hif8_op_from_info(info):
+        return _estimate_default(info, device_profile)
+    result = _estimate_hif8_kv(info, device_profile)
+    result.statistics["kv_layout"] = "deepseek_v4_shared"
+    if info.func == torch.ops.tensor_cast.compressor.default:
+        result.statistics.update(compute_dtype="float32", hif8_mma_source="not_used_fp32_compute")
+    return result

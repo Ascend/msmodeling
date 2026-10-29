@@ -28,8 +28,7 @@ from typing import Any, Mapping, Optional
 import torch
 
 from ..base import PerformanceModel
-from ..op_invoke_info import get_named_args, OpInvokeInfo
-from ..utils import is_hif8_op
+from ..op_invoke_info import get_named_args, is_hif8_op_from_info, OpInvokeInfo
 
 
 def _op_name(op_invoke_info: OpInvokeInfo) -> str:
@@ -391,6 +390,7 @@ def build_calibration_signature(
     op_name = _op_name(op_invoke_info)
     tensors = _tensor_args(op_invoke_info.args)
     first_tensor = tensors[0] if tensors else None
+    hif8 = is_hif8_op_from_info(op_invoke_info)
 
     if op_name in {"aten.mm.default", "aten.bmm.default", "aten.matmul.default"}:
         family = "matmul"
@@ -417,6 +417,19 @@ def build_calibration_signature(
     elif op_name.startswith("tensor_cast.attention"):
         family = "attention"
         features = _attention_features(tensors, op_invoke_info.kwargs)
+    elif op_name == "tensor_cast.sparse_attn_sharedkv.default" and hif8:
+        family = "attention"
+        named = get_named_args(op_invoke_info)
+        query = named["q"]
+        features = {
+            "q_tokens": int(prod(query.shape[:2])),
+            "heads": int(query.shape[2]),
+            "kv_heads": 1,
+            "head_dim": int(query.shape[-1]),
+            "kv_len": int(named["kv"].shape[1]),
+            "topk": int(named["topk_indices"].shape[-1]),
+            "kv_layout": "deepseek_v4_shared",
+        }
     elif op_name in {
         "tensor_cast.all_reduce.default",
         "tensor_cast.all_gather.default",
@@ -429,7 +442,7 @@ def build_calibration_signature(
         family = "other"
         features = {}
 
-    if is_hif8_op(op_invoke_info.func):
+    if hif8:
         named = get_named_args(op_invoke_info)
         features.update(logical_format="hif8", storage_dtype="uint8")
         if family == "matmul":
@@ -440,7 +453,7 @@ def build_calibration_signature(
             features["activation_scale_mode"] = "per_tensor" if xs.ndim < 2 else "per_token"
             features["weight_scale_mode"] = "per_tensor" if ws.ndim == 0 else "per_channel"
             features["output_dtype"] = _dtype_name(op_invoke_info.out)
-        elif "hif8_kv" in op_name:
+        elif "hif8_kv" in op_name or named.get("kv_format") == "hif8":
             features.update(
                 compute_dtype="bfloat16",
                 kv_cache_dtype="hif8",
@@ -456,6 +469,14 @@ def build_calibration_signature(
                     kv_heads=int(key.shape[-2]),
                     heads=int(query.shape[-2] if query.ndim == 4 else query.shape[-1] // head_dim),
                 )
+            elif op_name == "tensor_cast.compressor.default":
+                features.update(
+                    compute_dtype="float32",
+                    quantization="hif8_kv_fp32_compressor",
+                    compress_ratio=named["compress_ratio"],
+                    head_dim=named["head_dim"],
+                    kv_layout="deepseek_v4_shared",
+                )
         else:
             features["quantization_mode"] = "dynamic" if "dynamic" in op_name else "static"
             if "dynamic" in op_name:
@@ -465,6 +486,6 @@ def build_calibration_signature(
         tc_op=op_name,
         op_family=family,
         device=device_name,
-        dtype="hif8" if is_hif8_op(op_invoke_info.func) else _dtype_name(first_tensor),
+        dtype="hif8" if hif8 else _dtype_name(first_tensor),
         features=features,
     )

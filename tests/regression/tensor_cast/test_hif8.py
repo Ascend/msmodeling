@@ -33,7 +33,8 @@ from tensor_cast.model_config import LinearQuantConfig
 from tensor_cast.utils import SimFormat
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.performance_model.calibration.signature import build_calibration_signature
-from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+from tensor_cast.performance_model.op_invoke_info import is_hif8_op_from_info, OpInvokeInfo
+from tensor_cast.performance_model.utils import is_hif8_op
 from tensor_cast.performance_model.profiling_database.data_source import QuerySource
 from tensor_cast.performance_model.profiling_database.profiling_data_source import ProfilingDataSource
 from tensor_cast.performance_model.profiling_database.interpolating_data_source import InterpolatingDataSource
@@ -65,6 +66,26 @@ def test_hif8_identity_is_independent_of_payload_and_fp8():
     assert performance_dtype(torch.float8_e4m3fn) == DTYPE_FP8
     assert TEST_DEVICE.mma_ops[SimFormat.HIF8] > 0
     assert SimFormat.HIF8 not in ATLAS_800.A3_752T_128G_DIE.mma_ops
+    info = _info()
+    assert is_hif8_op(info.func)
+    assert is_hif8_op_from_info(info)
+    payload = torch.empty(3, 16, dtype=torch.uint8, device="meta")
+    plain = OpInvokeInfo(torch.ops.aten.clone.default, (payload,), {}, payload.clone())
+    assert not is_hif8_op_from_info(plain)
+
+
+@pytest.mark.parametrize(
+    "target,kwargs,expected",
+    [
+        ("tensor_cast.hif8_linear.default", None, True),
+        ("tensor_cast.another_kv.default", {"kv_format": "hif8"}, True),
+        ("tensor_cast.another_kv.default", {"kv_format": "fp8"}, False),
+        ("tensor_cast.another_kv.default", None, False),
+    ],
+)
+def test_hif8_call_identity_supports_name_only_profiling_targets(target, kwargs, expected):
+    info = OpInvokeInfo(target, (), kwargs, None)
+    assert is_hif8_op_from_info(info) is expected
 
 
 @pytest.mark.parametrize("shape", [(3, 16), (2, 3, 16), (0, 16)])

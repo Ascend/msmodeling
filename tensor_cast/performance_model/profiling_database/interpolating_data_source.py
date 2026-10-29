@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TYPE_CH
 import pandas as pd
 import torch
 
-from ..utils import is_hif8_op
+from ..op_invoke_info import is_hif8_op_from_info
 from .data_source import DataSourcePerformanceModel, QueryResult, QuerySource, ShapeMatchInfo
 from .interpolation_index import (
     CandidateGroup,
@@ -285,7 +285,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             )
         else:
             result = self.base.lookup(op_invoke_info)
-        if result is None and is_hif8_op(op_invoke_info.func):
+        if result is None and is_hif8_op_from_info(op_invoke_info):
             self._record_miss("hif8_requires_verified_profile")
             return None
         if result is not None and result.source != QuerySource.PARTIAL:

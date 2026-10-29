@@ -25,7 +25,7 @@ from torch.utils._cxx_pytree import tree_map
 from .. import ops  # noqa: F401
 from ..utils import EquivalentKeyManager
 from ..utils import PerfDType
-from .utils import bytes_of_tensor, is_noop_self_copy_op, is_view_op, run_once
+from .utils import bytes_of_tensor, is_hif8_op, is_noop_self_copy_op, is_view_op, run_once
 
 logger = logging.getLogger(__name__)
 InputExcludeSpec = int | str
@@ -225,6 +225,17 @@ def get_named_args(op_invoke_info: "OpInvokeInfo", min_args: int = 0) -> dict[st
         }
     )
     return named
+
+
+def is_hif8_op_from_info(info: OpInvokeInfo) -> bool:
+    """Recognize HIF8 from a dedicated target or explicit logical-format metadata."""
+    if is_hif8_op(info.func):
+        return True
+    # Profiling adapters may provide a name-only target without a Torch schema.
+    # Such calls can still declare their logical format through keyword metadata.
+    if getattr(info.func, "_schema", None) is None:
+        return (info.kwargs or {}).get("kv_format") == "hif8"
+    return get_named_args(info).get("kv_format") == "hif8"
 
 
 class Region:
