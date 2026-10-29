@@ -132,7 +132,7 @@ Agent 模式下，工具不在内部运行 PSO，而是从 `[agent_optimizer].ru
 推荐通过 **`optix-assistant` 寻优 skill** 使用 Agent 模式。该 skill 提供配置预检（config_preflight）、上下文采集（collect_context）、配置参数检查（check_search_space）与最优配置导出（export_best_config）等配套脚本，并对候选生成、失败分析与判优规则遵循统一的行为契约。典型使用流程：
 
 1. 按[环境准备与安装](#4-环境准备与安装)完成安装，并确认部署栈可用；
-2. 通过 `optix-assistant` skill 进入 Agent 模式，按提示选择全自动或交互式执行方式；
+2. 安装并启动 AI Agent 工具，推荐使用 [MindStudioAgent](https://gitcode.com/Ascend/msagent)，或按 [OpenCode 官方文档](https://dev.opencode.ai/v2/docs)安装 OpenCode 并配置模型服务。进入 msmodeling 仓库目录后，在 Agent 对话中输入“请读取本仓库的 `.agents/skills/optix-assistant/SKILL.md`，使用 optix-assistant 进行 Agent 模式寻优”，然后按提示选择全自动或交互式执行方式；
 3. 完成配置预检与上下文采集后，agent 按目标路由读取方法卡；基础配置通过 `config_writer` 登记到 TOML，每轮更新 `context.search_space`，候选 `params` 只写取值。校验后执行实测；每轮进程退出后，将 context.json 复制为 context.round-N.json，再准备下一轮。收敛后按最佳结果所属轮次的 context 归档导出配置，归档缺失或损坏时拒绝导出。
 
 ## 7. 配置文件说明
