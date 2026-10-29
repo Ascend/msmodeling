@@ -148,6 +148,59 @@ class HcStreamMultiTokenPredictorLayer(MultiTokenPredictorLayer):
         return hidden_states
 
 
+class Qwen4ExpMultiTokenPredictorLayer(MultiTokenPredictorLayer):
+    """MTP layer for qwen4_exp flattened hyper-connection streams.
+
+    The qwen4_exp decoder block consumes ``[B, S, hc_count * D]`` flattened
+    stream bundles: the main model expands embeddings with
+    ``inputs_embeds.repeat(1, 1, hc_count)`` and reduces the final bundle with
+    a dedicated ``hyper_connection_mixer`` (a
+    ``Qwen4ExpTextGatedResidual(use_combine=False)``). Each simulated MTP
+    layer owns an equivalent mixer so the block output matches the lm_head /
+    next-iteration ``previous_hidden_states`` shape ``[B, S, D]``.
+    """
+
+    def __init__(self, hf_config, mtp_block: torch.nn.Module):
+        super().__init__(hf_config, mtp_block)
+        from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+            Qwen4ExpTextGatedResidual,
+        )
+
+        self.hc_count = int(hf_config.hc_count)
+        self.hc_mixer = Qwen4ExpTextGatedResidual(hf_config, use_combine=False)
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        position_embeddings: Optional[torch.Tensor] = None,
+        mtp_input_ids: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
+        del mtp_input_ids
+        inputs_embeds = self.emb_norm(inputs_embeds)
+        previous_hidden_states = self.hidden_norm(previous_hidden_states)
+
+        hidden_states = self.linear_proj(torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
+
+        # HC-expand [B, S, D] -> [B, S, hc_count * D], matching the main
+        # model's stream initialization (Qwen4ExpTextModel.forward).
+        hidden_states = hidden_states.repeat(1, 1, self.hc_count)
+
+        hidden_states = self.mtp_block(
+            hidden_states,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+
+        # Reduce the stream bundle back to [B, S, D].
+        return self.hc_mixer(hidden_states)
+
+
 def _resolve_mtp_layer_cls(hf_config, mtp_block):
     """Select the appropriate MTP layer class based on HC (Hyper-Connection) config.
 
@@ -157,6 +210,8 @@ def _resolve_mtp_layer_cls(hf_config, mtp_block):
     Glm5NextTextDecoderLayer with attn_hc/ffn_hc) stream [B,S,Hc,D]
     through the block, so they use HcStreamMultiTokenPredictorLayer:
     same expand at entry, parameter-free mhc_head reduction at exit.
+    qwen4_exp blocks carry flattened HC streams (hc_count > 1) and require
+    Qwen4ExpMultiTokenPredictorLayer for the same bridging.
     V3/V3.2 models use the base MultiTokenPredictorLayer.
     """
     # Remote-code model classes are loaded from a dynamic module, so matching
@@ -185,6 +240,10 @@ def _resolve_mtp_layer_cls(hf_config, mtp_block):
         from .deepseek_v4 import HyperConnectedMultiTokenPredictorLayer
 
         return HyperConnectedMultiTokenPredictorLayer
+
+    qwen4_hc_count = getattr(getattr(mtp_block, "attn_hyper_connection", None), "hc_count", None)
+    if qwen4_hc_count is not None and int(qwen4_hc_count) > 1:
+        return Qwen4ExpMultiTokenPredictorLayer
     return MultiTokenPredictorLayer
 
 

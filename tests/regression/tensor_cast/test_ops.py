@@ -414,6 +414,41 @@ def test_semantic_fusion_ops_preserve_meta_contracts_and_roofline_properties():
     assert properties.memory_read_bytes == 96
     assert properties.memory_write_bytes == 48
 
+    # fused_rope is partial RoPE: only the leading ``rotary_dim`` channels of
+    # each head rotate; the tail channels pass through with no ALU work.
+    fused_key = torch.empty((2, 3, 4), device="meta", dtype=torch.bfloat16)
+    cos_sin = torch.empty((2, 4), device="meta", dtype=torch.float32)
+    (query_out, key_out), properties = _semantic_op_properties(
+        torch.ops.tensor_cast.fused_rope.default,
+        query,
+        fused_key,
+        cos_sin,
+        2,
+        True,
+    )
+    assert query_out.shape == query.shape
+    assert query_out.dtype == query.dtype
+    assert key_out.shape == fused_key.shape
+    assert key_out.dtype == fused_key.dtype
+    # BF16 q/k promoted with FP32 frequencies compute in FP32; rotary_dim=2 of
+    # head_dim=4 rotates 12 elements each for q and k at 3 ops per element.
+    assert torch.bfloat16 not in properties.compute_ops
+    assert properties.compute_ops[torch.float32].gp_ops == 72
+    # Reads: q 48 + k 48 + cos_sin 32; writes: cloned q 48 + cloned k 48.
+    assert properties.memory_read_bytes == 128
+    assert properties.memory_write_bytes == 96
+
+    # rotary_dim <= 0 rotates the full head.
+    _, properties = _semantic_op_properties(
+        torch.ops.tensor_cast.fused_rope.default,
+        query,
+        fused_key,
+        cos_sin,
+        0,
+        True,
+    )
+    assert properties.compute_ops[torch.float32].gp_ops == 144
+
 
 def test_block_sparse_attention_route_plan_and_semantic_ops():
     route_plan = AttentionRoutePlan(backend="block_sparse_attention")

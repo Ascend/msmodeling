@@ -524,3 +524,17 @@ class TestMemoryTracker(unittest.TestCase):
 
         self.assertEqual(props.memory_read_bytes, 40)
         self.assertEqual(props.memory_write_bytes, 40)
+
+    def test_record_op_invocation_accepts_bare_op_and_rejects_unknown_types(self):
+        x = torch.randn(100)
+        y = torch.randn(100)
+        out = x + y
+
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.record_op_invocation(OpInvokeInfo(torch.ops.aten.add.Tensor, (x, y), {}, out))
+
+        self.assertEqual(len(tracker.op_invoke_infos_with_repeat_id), 1)
+        self.assertEqual(tracker.op_invoke_infos_with_repeat_id[0][1], 0)
+
+        with self.assertRaises(ValueError):
+            tracker.record_op_invocation("not-an-op")

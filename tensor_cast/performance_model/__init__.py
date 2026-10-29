@@ -715,6 +715,39 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.fused_rope.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    query = op_invoke_info.args[0]
+    key = op_invoke_info.args[1]
+    cos_sin = op_invoke_info.args[2]
+    if len(op_invoke_info.args) > 3:
+        rotary_dim = op_invoke_info.args[3]
+    else:
+        rotary_dim = op_invoke_info.kwargs.get("rotary_dim", -1)
+    assert isinstance(query, torch.Tensor)
+    assert isinstance(key, torch.Tensor)
+    assert isinstance(cos_sin, torch.Tensor)
+    properties = op_invoke_info.get_memory_access_properties()
+
+    # Partial RoPE: only the leading ``rotary_dim`` channels of each head
+    # rotate — x * cos + rotate(x) * sin, i.e. two multiplies and one add per
+    # rotated element, the same per-element convention as ``apply_rope``. The
+    # remaining channels pass through unmodified and contribute memory traffic
+    # only. ``rotary_dim <= 0`` rotates the full head. ``is_neox_style=False``
+    # merely changes the pair indexing layout (e.g. mrope-style interleaved
+    # frequencies), not the per-element op count.
+    def _rotated_elements(t: torch.Tensor) -> int:
+        head_dim = t.shape[-1]
+        effective = head_dim if rotary_dim is None or int(rotary_dim) <= 0 else min(int(rotary_dim), head_dim)
+        return math.prod(t.shape[:-1]) * effective
+
+    q_compute_dtype = torch.promote_types(query.dtype, cos_sin.dtype)
+    k_compute_dtype = torch.promote_types(key.dtype, cos_sin.dtype)
+    _accumulate_compute_ops(properties, q_compute_dtype, gp_ops=_rotated_elements(query) * 3)
+    _accumulate_compute_ops(properties, k_compute_dtype, gp_ops=_rotated_elements(key) * 3)
+    return properties
+
+
 def _attention_4d_dimensions(query: torch.Tensor, key: torch.Tensor) -> tuple[int, int, int, int, int]:
     assert query.ndim == 4, "sparse attention expects 4D query"
     assert key.ndim == 4, "sparse attention expects 4D key"
@@ -3930,6 +3963,282 @@ def _(
         topk_blocks,
         block_size,
         local_blocks,
+        op_invoke_info.kwargs.get("seq_lens_values"),
+        op_invoke_info.kwargs.get("query_lens_values"),
+        op_invoke_info.kwargs.get("is_decode_values"),
+    )
+
+    properties = op_invoke_info.get_memory_access_properties(
+        exclude_input_ids={0, 1, 2, 3},
+        exclude_output_ids={0},
+    )
+    _accumulate_compute_ops(
+        properties,
+        query.dtype,
+        mma_ops=breakdown["mma_total"],
+        gp_ops=breakdown["gp_total"],
+    )
+    properties.memory_readwrite_bytes += breakdown["bytes_total"]
+    return properties
+
+
+def _qsa_is_prefill_request(
+    query_len: int,
+    request_idx: int,
+    is_decode_values: list[bool] | None,
+) -> bool:
+    if is_decode_values is not None:
+        return not bool(is_decode_values[request_idx])
+    return query_len > 1
+
+
+def _estimate_qsa_prefill_kv_read_pairs(
+    context_len: int,
+    query_len: int,
+    topk_blocks: int,
+    block_size: int,
+    attended_pairs: int,
+):
+    """Prefill KV read pairs for qsa_sparse_attention.
+
+    Mirrors the MiniMax-M3 prefill modeling: the gathered KV read lies between
+    the per-query selected capacity and the semantic attended pairs; use their
+    geometric mean, floored at the selected capacity. Both bounds are clamped
+    to ``attended_pairs``: a short prompt that has not yet filled the sparse
+    budget must not be billed for KV entries that do not exist.
+    """
+    selected_kv_capacity = topk_blocks * block_size
+    estimate = max(selected_kv_capacity, math.ceil(math.sqrt(selected_kv_capacity * attended_pairs)))
+    return min(estimate, attended_pairs)
+
+
+def _estimate_qsa_indexer_breakdown(
+    idx_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_lens: torch.Tensor,
+    topk_blocks: int,
+    compress_ratio: int,
+    seq_lens_values: list[int] | None = None,
+    query_lens_values: list[int] | None = None,
+    is_decode_values: list[bool] | None = None,
+):
+    """Estimate FLOPs and memory bytes for qsa_indexer (Qwen Sparse Attention).
+
+    QSA scores each query token against *compressed* micro-blocks of
+    ``compress_ratio`` tokens, then reduces scores over the indexer heads
+    (MQA) before a head-shared top-k. The cache stores per-token raw keys
+    (official ``update_indexer`` semantics), so the kernel reads all
+    ``B_n * compress_ratio`` raw key vectors and mean-pools them.
+    Variable naming: N = num_indexer_heads, D = indexer_head_dim,
+    c = compress_ratio, B_n = visible compressed blocks.
+    """
+    T = idx_q.shape[0]
+    N = idx_q.shape[1]
+    D = idx_q.shape[2]
+    K = topk_blocks
+    c = compress_ratio
+
+    s = idx_q.element_size()
+
+    Q_b_list = _resolve_attention_lengths(query_lens, query_lens_values, fallback_total=T)
+    L_b_list = _resolve_attention_lengths(seq_lens, seq_lens_values, fallback_total=T)
+    if is_decode_values is not None and len(is_decode_values) != len(Q_b_list):
+        raise ValueError(f"Expected {len(Q_b_list)} attention phase values, got {len(is_decode_values)}")
+
+    # --- MMA ---
+    # Compressed-block score: sum_b(Q_b * N * B_n * D) * 2. Scoring happens on
+    # the B_n pooled block vectors, so the MMA term scales with the block
+    # count, not with L_b tokens (the QSA saving vs a token-granularity
+    # indexer).
+    score_mma = 0
+    head_reduce_gp = 0
+    compress_gp = 0
+    sum_qb_bn = 0
+    bytes_score = bytes_of_tensor(idx_q)
+    for Q_b, L_b in zip(Q_b_list, L_b_list):
+        B_n = math.ceil(L_b / c) if c > 0 else 0
+        score_mma += 2 * Q_b * N * B_n * D
+        # Head-mean reduction over N indexer heads, 1 op per score element
+        # (same reduce convention as the MiniMax-M3 block reduce).
+        head_reduce_gp += Q_b * N * B_n
+        # FP32 mean-pool of c raw key vectors into one block vector.
+        compress_gp += B_n * c * D
+        sum_qb_bn += Q_b * B_n
+        # One logical read of the visible raw K per request (kv_heads=1);
+        # B_n micro-blocks of c tokens each.
+        bytes_score += B_n * c * D * s
+        bytes_score += 4 * Q_b * N * B_n
+
+    # --- GP ---
+    # Head-shared top-k over B_n reduced candidates per query.
+    c_topk = max(int(math.ceil(math.log2(max(K, 2)))), 1)
+    topk_gp = c_topk * sum_qb_bn
+
+    # --- bytes ---
+    bytes_topk = 4 * sum_qb_bn + 4 * T * K
+
+    mma_total = score_mma
+    gp_total = head_reduce_gp + compress_gp + topk_gp
+    bytes_total = bytes_score + bytes_topk
+
+    return {
+        "mma_total": mma_total,
+        "gp_total": gp_total,
+        "bytes_total": bytes_total,
+    }
+
+
+def _estimate_qsa_sparse_attention_breakdown(
+    query: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_lens: torch.Tensor,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    topk_blocks: int,
+    compress_ratio: int,
+    seq_lens_values: list[int] | None = None,
+    query_lens_values: list[int] | None = None,
+    is_decode_values: list[bool] | None = None,
+):
+    """Estimate FLOPs and memory bytes for qsa_sparse_attention.
+
+    Boundary: sparse attention body over the top-k selected micro-blocks
+    (compress_ratio tokens per block). Q/K/V projection, partial RoPE,
+    cache write and o_proj are separate ops.
+    Variable naming: N_q = num query heads, N_kv = num KV heads, D = head_dim,
+    K = topk_blocks, c = compress_ratio.
+    """
+    T = math.prod(query.shape[:-1])
+    N_q = num_q_heads
+    N_kv = num_kv_heads
+    D = head_dim
+    K = topk_blocks
+    B_s = compress_ratio
+    s = query.element_size()
+
+    Q_b_list = _resolve_attention_lengths(query_lens, query_lens_values, fallback_total=T)
+    L_b_list = _resolve_attention_lengths(seq_lens, seq_lens_values, fallback_total=T)
+    if is_decode_values is not None and len(is_decode_values) != len(Q_b_list):
+        raise ValueError(f"Expected {len(Q_b_list)} attention phase values, got {len(is_decode_values)}")
+
+    attn_mma = 0
+    attn_gp = 0
+    qo_bytes = 2 * s * T * N_q * D
+    kv_bytes = 0
+    # QSA block indices are shared across heads (head-reduced top-k in the
+    # indexer), so the topk index tensor has no head axis.
+    topk_bytes = 4 * T * K
+
+    for request_idx, (Q_b, L_b) in enumerate(zip(Q_b_list, L_b_list)):
+        context_len = max(L_b - Q_b, 0)
+        attended_pairs = 0
+        for query_idx in range(Q_b):
+            # Official semantics (Qwen4ExpTextQSAIndexer): only *complete*
+            # micro-blocks compete for the budget; the frontier partial
+            # block's tokens are always attended free of charge.
+            visible_tokens = context_len + query_idx + 1
+            complete_blocks = visible_tokens // B_s if B_s > 0 else 0
+            frontier_tokens = visible_tokens - complete_blocks * B_s
+            selected_blocks = min(complete_blocks, K)
+            attended_tokens = selected_blocks * B_s + frontier_tokens
+            attended_pairs += attended_tokens
+
+        # MMA: QK^T + PV => 4 * N_q * sum_q(attended_tokens_q) * D
+        attn_mma += 4 * N_q * attended_pairs * D
+
+        # GP: softmax ~6 ops per attended score.
+        attn_gp += 6 * N_q * attended_pairs
+
+        # KV read: prefill uses a geometric mean between selected K/V capacity
+        # and semantic attended pairs; decode is capped by selected K/V capacity.
+        if _qsa_is_prefill_request(Q_b, request_idx, is_decode_values):
+            effective_attended_pairs = _estimate_qsa_prefill_kv_read_pairs(
+                context_len,
+                Q_b,
+                K,
+                B_s,
+                attended_pairs,
+            )
+        else:
+            # Decode: selected complete-block capacity plus the always-visible
+            # frontier tokens.
+            effective_attended_pairs = min(K, L_b // B_s if B_s > 0 else 0) * B_s + L_b % B_s
+        kv_read_bytes = 2 * s * effective_attended_pairs * N_kv * D
+        kv_bytes += kv_read_bytes
+
+    mma_total = attn_mma
+    gp_total = attn_gp
+    bytes_total = qo_bytes + kv_bytes + topk_bytes
+
+    return {
+        "mma_total": mma_total,
+        "gp_total": gp_total,
+        "bytes_total": bytes_total,
+    }
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.qsa_indexer.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    idx_q = op_invoke_info.args[0]
+    seq_lens = op_invoke_info.args[2]
+    query_lens = op_invoke_info.args[3]
+    topk_blocks = op_invoke_info.kwargs["topk_blocks"]
+    compress_ratio = op_invoke_info.kwargs["compress_ratio"]
+
+    breakdown = _estimate_qsa_indexer_breakdown(
+        idx_q,
+        seq_lens,
+        query_lens,
+        topk_blocks,
+        compress_ratio,
+        op_invoke_info.kwargs.get("seq_lens_values"),
+        op_invoke_info.kwargs.get("query_lens_values"),
+        op_invoke_info.kwargs.get("is_decode_values"),
+    )
+
+    # Exclude idx_q (args[0]) and idx_k_cache (args[1]): idx_q read and the raw
+    # idx_k_cache reads are counted inside breakdown["bytes_total"] (block
+    # score formula, including the mean-pool compression). The per-token cache
+    # write belongs to the surrounding siso_reshape_and_cache op, not here.
+    properties = op_invoke_info.get_memory_access_properties(
+        exclude_input_ids={0, 1},
+        exclude_output_ids={0},
+    )
+    _accumulate_compute_ops(
+        properties,
+        idx_q.dtype,
+        mma_ops=breakdown["mma_total"],
+        gp_ops=breakdown["gp_total"],
+    )
+    properties.memory_readwrite_bytes += breakdown["bytes_total"]
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.qsa_sparse_attention.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    query = op_invoke_info.args[0]
+    seq_lens = op_invoke_info.args[4]
+    query_lens = op_invoke_info.args[5]
+    num_q_heads = op_invoke_info.kwargs["num_q_heads"]
+    num_kv_heads = op_invoke_info.kwargs["num_kv_heads"]
+    head_dim = op_invoke_info.kwargs["head_dim"]
+    topk_blocks = op_invoke_info.kwargs["topk_blocks"]
+    compress_ratio = op_invoke_info.kwargs["compress_ratio"]
+
+    breakdown = _estimate_qsa_sparse_attention_breakdown(
+        query,
+        seq_lens,
+        query_lens,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+        topk_blocks,
+        compress_ratio,
         op_invoke_info.kwargs.get("seq_lens_values"),
         op_invoke_info.kwargs.get("query_lens_values"),
         op_invoke_info.kwargs.get("is_decode_values"),

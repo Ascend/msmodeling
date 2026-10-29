@@ -420,6 +420,24 @@ def test_kv_cache_excluded_layer_indices_qwen3_5_moe_text():
     assert kv_cache_excluded_layer_indices(model) == {0, 2}
 
 
+def test_kv_cache_excluded_layer_indices_qwen4_exp():
+    """qwen4_exp (Qwen3.8-Flash-Next) is covered by the same exclusion rule.
+
+    The 48-layer hybrid stack [GDN x3, QSA x1] x 12 marks its GDN layers as
+    "linear_attention"; counting their placeholder KV inflates
+    kv_cache_per_token (root cause of device_memory_available_gb == 0).
+    Regression for review feedback: the model_type must be in the exclusion
+    list so these indices stay out of kv_cache_per_token.
+    """
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp")),
+        text_config=SimpleNamespace(
+            layer_types=["linear_attention", "linear_attention", "linear_attention", "qwen_sparse_attention"],
+        ),
+    )
+    assert kv_cache_excluded_layer_indices(model) == {0, 1, 2}
+
+
 def test_kv_cache_excluded_layer_indices_non_qwen3_5_returns_empty():
     """Non-Qwen3.5 models keep the full accounting scope (empty exclusion set)."""
     model = SimpleNamespace(

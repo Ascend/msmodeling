@@ -33,6 +33,8 @@ from . import (  # noqa: F401
     mla,
     mtp,
     quantization,
+    qsa_sparse_attention,
+    qwen4_exp,
     rotary_embedding,
     static_mask,
     minimax_m3_sparse_attention,

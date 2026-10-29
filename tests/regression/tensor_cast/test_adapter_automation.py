@@ -16,8 +16,10 @@
 
 import copy
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -54,6 +56,7 @@ from tensor_cast.adapter.runner import run_simulation_case
 from tensor_cast.adapter.st_case import (
     build_st_case_from_verification,
     build_st_cases_from_verification,
+    write_st_cases,
 )
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
@@ -783,6 +786,28 @@ python -m cli.inference.text_generate MiniMaxAI/MiniMax-M2.7 \
 
         self.assertEqual(case["operators"], [{"name": "slow", "total_time_s": 0.8, "num_calls": 4}])
 
+    def test_verification_case_name_and_st_case_writing_handle_windows_paths(self):
+        """Windows model_id paths use backslash separators; the derived case
+        name and the written ST case file names must contain only the trailing
+        model directory, never path separators.
+        """
+        from tensor_cast.adapter.doctor import default_verification_case_name
+
+        user_input = UserInputConfig(model_id=r"D:\models\My_Qwen4_Exp")
+        case_name = default_verification_case_name(user_input)
+        self.assertEqual(case_name, "my-qwen4-exp-prefill")
+
+        case = {
+            "type": "text",
+            "name": r"models\case with\separators",
+            "user_input": {},
+            "operators": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            written = write_st_cases([case], Path(tmpdir))
+            self.assertEqual(len(written), 1)
+            self.assertEqual(written[0].name, "models-case with-separators.json")
+
     def test_patch_mla_reports_missing_fields_and_strict_failure(self):
         model = SimpleNamespace()
         model._inner = _TinyModel()
@@ -866,6 +891,33 @@ python -m cli.inference.text_generate MiniMaxAI/MiniMax-M2.7 \
                 for item in advise(facts, candidate)
             )
         )
+
+    def test_inspect_excludes_hyper_connection_mixers_from_attention_like(self):
+        """qwen4_exp ``attn_hyper_connection`` carries "attn" in its leaf name
+        but is a residual-stream mixer, not an attention core; the structure
+        scan must not inflate attention key-op expectations with it.
+        """
+        model = SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="hyper_connection_scan_adapter_auto",
+                num_hidden_layers=1,
+                hidden_size=4,
+                num_attention_heads=1,
+            ),
+            unwrap=lambda: SimpleNamespace(),
+        )
+        root = torch.nn.Module()
+        root.linear_attn = _FakeAttention()
+        root.attn_hyper_connection = torch.nn.Module()
+        root.mlp_hyper_connection = torch.nn.Module()
+        model.unwrap = lambda: root
+
+        facts, _ = inspect_model_structure(model)
+
+        attention_paths = [item.path for item in facts.attention_like_modules]
+        self.assertEqual(attention_paths, ["linear_attn"])
+        self.assertNotIn("attn_hyper_connection", attention_paths)
+        self.assertNotIn("mlp_hyper_connection", attention_paths)
 
     def test_questions_flag_low_confidence_candidate_and_structure_gaps(self):
         model = SimpleNamespace(

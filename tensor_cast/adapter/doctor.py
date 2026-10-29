@@ -176,7 +176,7 @@ def run_model_doctor(
 
 
 def default_verification_case_name(user_input: UserInputConfig) -> str:
-    model_name = user_input.model_id.rstrip("/").split("/")[-1].lower().replace("_", "-")
+    model_name = user_input.model_id.rstrip("/\\").replace("\\", "/").split("/")[-1].lower().replace("_", "-")
     phase = "decode" if user_input.decode else "prefill"
     return f"{model_name}-{phase}"
 

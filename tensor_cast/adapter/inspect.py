@@ -377,7 +377,11 @@ def inspect_model_structure(
             class_name = type(module).__name__.lower()
             leaf_name = name.rsplit(".", maxsplit=1)[-1].lower()
             facts = _module_facts(name, module)
-            if "attn" in leaf_name or "attention" in class_name:
+            # Hyper-connection mixers (e.g. qwen4_exp ``attn_hyper_connection``)
+            # carry "attn" in their leaf name but are residual-stream mixers,
+            # not attention cores; exclude them so key-op expectations count
+            # exactly one attention module per decoder layer.
+            if ("attn" in leaf_name or "attention" in class_name) and "hyper_connection" not in leaf_name:
                 attention_like.append(facts)
             if _is_moe_like_module(facts):
                 moe_like.append(facts)

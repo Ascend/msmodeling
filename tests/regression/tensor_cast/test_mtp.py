@@ -26,6 +26,7 @@ from tensor_cast.layers.deepseek_v4 import HyperConnectedMultiTokenPredictorLaye
 from tensor_cast.layers.mtp import (
     HcStreamMultiTokenPredictorLayer,
     MultiTokenPredictorLayer,
+    Qwen4ExpMultiTokenPredictorLayer,
     _build_position_embeddings,
     _find_text_rotary_emb,
     _resolve_mtp_layer_cls,
@@ -140,6 +141,65 @@ class TestResolveMtpLayerCls(unittest.TestCase):
         # The routed layer reports the same mult it routed on.
         layer = HcStreamMultiTokenPredictorLayer(SimpleNamespace(hidden_size=8, rms_norm_eps=1e-5), mtp_block)
         assert layer.hc_mult == 4
+
+    def test_qwen4_hc_count_routes_to_qwen4_exp_layer(self):
+        # qwen4_exp MTP blocks expose the flattened HC stream count on their
+        # attn_hyper_connection mixer; hc_count > 1 requires the dedicated
+        # layer that expands/reduces [B,S,hc*D] bundles.
+        pytest.importorskip("transformers", minversion="5.16")
+        pytest.importorskip("transformers.models.qwen4_exp.modeling_qwen4_exp")
+        mtp_block = SimpleNamespace(attn_hyper_connection=SimpleNamespace(hc_count=4))
+        assert _resolve_mtp_layer_cls(SimpleNamespace(), mtp_block) is Qwen4ExpMultiTokenPredictorLayer
+
+        plain_block = SimpleNamespace(attn_hyper_connection=SimpleNamespace(hc_count=1))
+        assert _resolve_mtp_layer_cls(SimpleNamespace(), plain_block) is MultiTokenPredictorLayer
+
+
+class TestQwen4ExpMultiTokenPredictorLayer(unittest.TestCase):
+    def _make_layer(self, block):
+        pytest.importorskip("transformers", minversion="5.16")
+        pytest.importorskip("transformers.models.qwen4_exp.modeling_qwen4_exp")
+        hf_config = SimpleNamespace(
+            hidden_size=8,
+            rms_norm_eps=1e-5,
+            hc_count=4,
+            hc_lowrank=2,
+        )
+        return Qwen4ExpMultiTokenPredictorLayer(hf_config, block)
+
+    def test_expands_streams_and_reduces_with_hc_mixer(self):
+        class _Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.seen_shape = None
+
+            def forward(self, hidden_states, **kwargs):
+                self.seen_shape = tuple(hidden_states.shape)
+                return hidden_states
+
+        block = _Block()
+        layer = self._make_layer(block)
+        assert layer.hc_count == 4
+
+        hidden_states = torch.randn(2, 3, 8)
+        output = layer(hidden_states, torch.zeros(2, 3, dtype=torch.long), hidden_states)
+
+        # The block consumes the flattened HC stream bundle
+        # [B, S, hc_count * D]; the layer reduces it back to [B, S, D]
+        # with its own hyper_connection_mixer.
+        assert block.seen_shape == (2, 3, 32)
+        assert tuple(output.shape) == (2, 3, 8)
+
+    def test_unwraps_tuple_block_output(self):
+        class _Block(torch.nn.Module):
+            def forward(self, hidden_states, **kwargs):
+                return (hidden_states, None)
+
+        layer = self._make_layer(_Block())
+        hidden_states = torch.randn(1, 2, 8)
+        output = layer(hidden_states, torch.zeros(1, 2, dtype=torch.long), hidden_states)
+
+        assert tuple(output.shape) == (1, 2, 8)
 
 
 class TestRotaryEmbeddingSignature(unittest.TestCase):

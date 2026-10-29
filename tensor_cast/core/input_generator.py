@@ -1058,7 +1058,7 @@ def kv_cache_excluded_layer_indices(model) -> set[int]:
         "model_type",
         None,
     )
-    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen4_exp"):
         layer_types = getattr(getattr(model, "text_config", None), "layer_types", None)
         if not isinstance(layer_types, list):
             return set()

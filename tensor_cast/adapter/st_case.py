@@ -85,7 +85,7 @@ def write_st_cases(
         return [path]
     path.mkdir(parents=True, exist_ok=True)
     for case in cases:
-        case_name = str(case.get("name", "adapter-case")).replace("/", "-")
+        case_name = str(case.get("name", "adapter-case")).replace("\\", "-").replace("/", "-")
         target = path / f"{case_name}.json"
         _write_json(target, case)
         written.append(target)
