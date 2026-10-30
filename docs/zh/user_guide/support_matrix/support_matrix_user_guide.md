@@ -29,6 +29,7 @@
 | 文本模型 | Bailing / MiMo / MiniMax | Bailing MoE、MiMo v2 Flash、MiniMax M2.7、MiniMax M2.5、MiniMax M2、MiniMax M3 |
 | 文本模型 | Step 系列 | Step 5 Preview |
 | 视觉-语言模型 | VL 模型 | DeepSeek-V4.1-Flash、Step 5 Preview、Qwen3-VL、Qwen3-VL MoE、GLM-4V、GLM-4V MoE、InternVL |
+| 视觉-语言模型 | Bailing VL | Ling-3.0-flash-VL（Bailing MoE V3 VL：结构级仿真——单图/多图输入、M-RoPE 契约、视觉塔 27 层 ViT + 无 MLP Merger + 根级 Projector；数值级 M-RoPE 与实测对齐属后续精度阶段；**PP>1 暂不支持**——VL profile 未提供 language_module_path，PP 候选会被跳过，属阶段一范围边界） |
 | 图像生成 / 编辑模型 | Diffusers DiT 图像模型 | FLUX.1-dev、Qwen-Image-Edit |
 | 视频生成模型 | Diffusers DiT 视频生成模型 | Wan、HunyuanVideo、HunyuanVideo1.5 |
 

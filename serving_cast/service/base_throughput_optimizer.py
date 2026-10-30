@@ -57,6 +57,10 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+# Rate-limit the historical scalar image-batch-size fallback warning per
+# batch_size value (search loops resolve every candidate).
+_SCALAR_IMAGE_BATCH_FALLBACK_WARNED: set = set()
+
 DEFAULT_MAX_BATCH_SIZE = 512
 
 
@@ -480,7 +484,22 @@ class BaseThroughputOptimizer(ABC):
         *,
         query_len: int = None,
         seq_len: int = None,
+        image_tokens_included: bool = False,
+        carry_image_input: bool = True,
     ) -> ForwardShapeKey:
+        """Build the forward-shape cache key.
+
+        ``image_tokens_included`` mirrors ``RequestInfo.image_tokens_included``:
+        chunk-plan callers pass True because their ``query_len``/``seq_len``
+        already contain the image token budget (see
+        ``OptimizerData.get_prefill_chunk_plan``).
+
+        ``carry_image_input`` controls whether the key (and therefore the
+        request it describes) carries the image forward inputs. Chunk-plan
+        callers pass it only for the request's first chunk so the vision
+        tower is evaluated exactly once per request; text-only chunks get
+        ``image_*=None`` keys.
+        """
         query_len, seq_len = self._resolve_forward_shape(
             optimizer_data,
             is_decode,
@@ -488,14 +507,16 @@ class BaseThroughputOptimizer(ABC):
             seq_len=seq_len,
         )
 
+        image_batch_size = self._resolve_image_batch_size(optimizer_data) if carry_image_input else None
         return ForwardShapeKey(
             is_decode=is_decode,
             model_concurrency=concurrency,
             query_len=query_len,
             seq_len=seq_len,
-            image_batch_size=self._resolve_image_batch_size(optimizer_data),
-            image_height=optimizer_data.image_height,
-            image_width=optimizer_data.image_width,
+            image_batch_size=image_batch_size,
+            image_height=(optimizer_data.image_height if carry_image_input else None),
+            image_width=(optimizer_data.image_width if carry_image_input else None),
+            image_tokens_included=image_tokens_included,
         )
 
     def get_compile_calibration_probe(
@@ -577,6 +598,8 @@ class BaseThroughputOptimizer(ABC):
             key.is_decode,
             query_len=key.query_len,
             seq_len=key.seq_len,
+            forward_image=(key.image_batch_size, key.image_height, key.image_width),
+            image_tokens_included=key.image_tokens_included,
         )
 
         record = self._build_forward_latency_record(batch_result)
@@ -706,7 +729,22 @@ class BaseThroughputOptimizer(ABC):
         *,
         query_len: int = None,
         seq_len: int = None,
+        forward_image: tuple[int | None, int | None, int | None] | None = None,
+        image_tokens_included: bool = False,
     ) -> ModelRunnerMetrics:
+        """Run one uniform forward and return its metrics.
+
+        ``forward_image`` is an explicit ``(image_batch_size, image_height,
+        image_width)`` override for the request's image inputs. ``None`` (the
+        default) resolves them from ``optimizer_data`` — the historical
+        behavior. Chunk-plan callers pass the first-chunk geometry or an
+        all-``None`` triple for text-only chunks, so the vision tower runs
+        exactly once per request instead of once per chunk.
+
+        ``image_tokens_included`` mirrors ``RequestInfo.image_tokens_included``:
+        chunk-plan callers pass True (their lengths already contain the image
+        token budget) so the input generator does not add it a second time.
+        """
         query_len, seq_len = self._resolve_forward_shape(
             optimizer_data,
             is_decode,
@@ -714,15 +752,23 @@ class BaseThroughputOptimizer(ABC):
             seq_len=seq_len,
         )
 
+        if forward_image is None:
+            image_batch_size = self._resolve_image_batch_size(optimizer_data)
+            image_height = optimizer_data.image_height
+            image_width = optimizer_data.image_width
+        else:
+            image_batch_size, image_height, image_width = forward_image
+
         requests = [
             RequestInfo(
                 query_len=query_len,
                 seq_len=seq_len,
-                image_batch_size=self._resolve_image_batch_size(optimizer_data),
-                image_height=optimizer_data.image_height,
-                image_width=optimizer_data.image_width,
+                image_batch_size=image_batch_size,
+                image_height=image_height,
+                image_width=image_width,
                 concurrency=concurrency,
                 is_decode=is_decode,
+                image_tokens_included=image_tokens_included,
             )
         ]
 
@@ -741,13 +787,79 @@ class BaseThroughputOptimizer(ABC):
 
         return metrics
 
-    @staticmethod
-    def _resolve_image_batch_size(optimizer_data: OptimizerData) -> int | None:
+    def _resolve_image_batch_size(self, optimizer_data: OptimizerData) -> int | None:
+        """Resolve the per-request image count.
+
+        ``image_batch_size`` is the number of images per request and must not
+        be coupled to the concurrency search's ``batch_size`` (review:
+        Hudingyi/zhangzhenyu — the historical fallback silently multiplied
+        the per-request image count with the search concurrency, inflating
+        vision input, H2D bytes, placeholder tokens and latency ~batch_size
+        times). With a length distribution the default is one image per
+        request; the fixed-length path keeps the historical fallback once
+        with a warning. Whether the model actually consumes image inputs is
+        decided by ``_image_tokens_per_request`` / the input generators
+        (stray image parameters on a text model keep the historical
+        "ignored + warning" behaviour there).
+        """
         if optimizer_data.image_height is None:
             return None
         if optimizer_data.image_batch_size is not None:
             return optimizer_data.image_batch_size
+        if optimizer_data.length_distribution is not None:
+            return 1
+        if optimizer_data.batch_size not in _SCALAR_IMAGE_BATCH_FALLBACK_WARNED:
+            logger.warning(
+                "image_batch_size defaults to the search batch_size (%s) on fixed-length "
+                "inputs (historical behavior): each request is simulated with that many "
+                "images. Pass --image-batch-size explicitly to control the per-request "
+                "image count.",
+                optimizer_data.batch_size,
+            )
+            _SCALAR_IMAGE_BATCH_FALLBACK_WARNED.add(optimizer_data.batch_size)
         return optimizer_data.batch_size
+
+    def _image_tokens_per_request(self, optimizer_data: OptimizerData) -> int:
+        """Language-side image token budget per request for the chunk planner.
+
+        The chunk plan must count the multimodal tokens toward each
+        request's prefill length, otherwise the first chunk can exceed
+        ``max_batched_tokens`` once the image tokens are appended by the
+        varlen input generator. Text-only configurations return 0.
+        """
+        image_batch_size = self._resolve_image_batch_size(optimizer_data)
+        if image_batch_size is None or optimizer_data.image_width is None:
+            return 0
+        if not getattr(getattr(self.model_runner, "model", None), "is_vl_model", False):
+            # Non-VL models never contribute an image token budget: stray
+            # image parameters on a text model are configuration noise and
+            # keep the historical "ignored" behaviour in the generators
+            # (PR-1 review round 6 — the fail-closed raise below only
+            # guards VL models whose own budget formula fails).
+            return 0
+        try:
+            from tensor_cast.core.input_generator import resolve_multimodal_token_budget
+
+            return resolve_multimodal_token_budget(
+                self.model_runner.model,
+                image_batch_size,
+                optimizer_data.image_height,
+                optimizer_data.image_width,
+            )
+        except (AttributeError, ValueError) as exc:
+            # Fail closed (review: zhangzhenyu round 6): a fully configured
+            # image geometry whose budget cannot be resolved must not build a
+            # chunk plan that under-counts the image tokens while still
+            # declaring image_tokens_included=True — that silently produces
+            # wrong shapes. Text-only configurations never reach here (no
+            # image geometry resolves to 0 before the try).
+            raise ValueError(
+                "Image token budget resolution failed for a configured image geometry; "
+                "refusing to build a chunk plan that under-counts image tokens "
+                f"(image_batch_size={image_batch_size}, "
+                f"image_height={optimizer_data.image_height}, "
+                f"image_width={optimizer_data.image_width}): {exc}"
+            ) from exc
 
     def _resolve_forward_shape(
         self,
@@ -818,8 +930,23 @@ class BaseThroughputOptimizer(ABC):
                     RequestInfo(
                         query_len=chunk.query_len,
                         seq_len=chunk.seq_len,
+                        # The chunk that consumes the request's image
+                        # placeholders carries the image forward inputs;
+                        # later chunks of the same request are text-only
+                        # (image_*=None), so the image is generated and
+                        # counted exactly once per request.
+                        image_batch_size=(
+                            self._resolve_image_batch_size(optimizer_data) if chunk.is_first_chunk else None
+                        ),
+                        image_height=(optimizer_data.image_height if chunk.is_first_chunk else None),
+                        image_width=(optimizer_data.image_width if chunk.is_first_chunk else None),
                         is_decode=False,
                         num_output_tokens=optimizer_data.output_length,
+                        # Length contract: the chunk plan already folded the
+                        # image token budget into query_len/seq_len (see
+                        # OptimizerData.get_prefill_chunk_plan), so the varlen
+                        # generator must not add num_image_tokens again.
+                        image_tokens_included=True,
                     )
                     for chunk in chunks
                 ]
@@ -848,6 +975,9 @@ class BaseThroughputOptimizer(ABC):
                     RequestInfo(
                         query_len=row["query_len"],
                         seq_len=row["num_input_tokens"],
+                        image_batch_size=self._resolve_image_batch_size(optimizer_data),
+                        image_height=optimizer_data.image_height,
+                        image_width=optimizer_data.image_width,
                         is_decode=False,
                         num_input_tokens=row["num_input_tokens"],
                         num_output_tokens=optimizer_data.output_length,
@@ -944,23 +1074,39 @@ class BaseThroughputOptimizer(ABC):
         *,
         query_len: int = None,
         seq_len: int = None,
+        forward_image: tuple[int | None, int | None, int | None] | None = None,
+        image_tokens_included: bool = False,
     ) -> _PPMicrobatchProfile:
         """Profile one microbatch shape and return its profile plus lookup evidence.
 
-        Caches per (is_decode, query_len, seq_len, microbatch_size). Raises if
-        the run did not produce a pipeline_profile (PP>1 must always produce
-        one — never silently fall back to a mismatched shape).
+        Caches per (is_decode, query_len, seq_len, microbatch_size,
+        forward_image, image_tokens_included) — chunked-prefill microbatches
+        of the same (query_len, seq_len) but different image state (vision
+        tower on the first chunk vs text-only follow-ups) are distinct
+        shapes. Raises if the run did not produce a pipeline_profile (PP>1
+        must always produce one — never silently fall back to a mismatched
+        shape).
 
         ``concurrency`` passed to ``run_inference`` is ``microbatch_size * dp``:
         ``generate_inputs`` divides concurrency by DP to get the per-rank
         batch, so this yields a stage-local batch of exactly ``microbatch_size``
         requests per DP rank (not ``microbatch_size / dp``, which would
         under-size latency, payload, KV cache and peak memory by DP×).
+
+        ``forward_image``/``image_tokens_included`` follow the
+        ``_get_forward_info`` contract for chunk-plan rows.
         """
         resolved_query_len, resolved_seq_len = self._resolve_forward_shape(
             optimizer_data, is_decode, query_len=query_len, seq_len=seq_len
         )
-        cache_key = (is_decode, resolved_query_len, resolved_seq_len, microbatch_size)
+        cache_key = (
+            is_decode,
+            resolved_query_len,
+            resolved_seq_len,
+            microbatch_size,
+            forward_image,
+            image_tokens_included,
+        )
         cached = self._pp_profile_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -972,6 +1118,8 @@ class BaseThroughputOptimizer(ABC):
             is_decode,
             query_len=resolved_query_len,
             seq_len=resolved_seq_len,
+            forward_image=forward_image,
+            image_tokens_included=image_tokens_included,
         )
         profile = getattr(metrics, "pipeline_profile", None)
         if profile is None:
@@ -1051,7 +1199,7 @@ class BaseThroughputOptimizer(ABC):
         resident_policy: str = "full",
         mixed_prefill: _PPWaveEvaluation | None = None,
         publish_schedule: bool = True,
-        chunk_shapes: list[tuple[int, int]] | None = None,
+        chunk_shapes: list[PrefillChunk] | None = None,
         prefill_token_budget: int | None = None,
     ) -> _PPWaveEvaluation:
         """Profile, schedule, and memory-gate one PP microbatch wave.
@@ -1062,10 +1210,17 @@ class BaseThroughputOptimizer(ABC):
         ``mixed_prefill`` is supplied, the mixed P/D estimator covers prefill,
         decode, and their overlap in one gate.
 
-        When ``chunk_shapes`` is provided, each ``(query_len, seq_len)`` pair
-        becomes a group of microbatches in the pipeline schedule. An explicit
-        Prefill token budget caps each microbatch by its chunk's query length;
-        it does not cap the number of requests in the candidate.
+        When ``chunk_shapes`` is provided (a list of ``PrefillChunk``), each
+        chunk becomes a group of microbatches in the pipeline schedule,
+        mirroring vLLM's chunked-prefill + PP 1F1B scheduling. This is used
+        for chunked prefill where the effective prompt exceeds
+        ``max_batched_tokens`` and is split into multiple chunks. Chunk
+        lengths already include the image token budget
+        (``image_tokens_included=True``); only each request's first chunk
+        carries image forward inputs, so the vision tower is evaluated once
+        per request across the chunk pipeline. An explicit
+        ``prefill_token_budget`` caps each microbatch by its chunk's query
+        length; it does not cap the number of requests in the candidate.
         """
         microbatch_sizes = split_batch_size(batch_size, self._pp_microbatch_size())
         if chunk_shapes is not None:
@@ -1074,20 +1229,30 @@ class BaseThroughputOptimizer(ABC):
             # chunk index then microbatch index within each chunk, so the
             # pipeline schedule models 1F1B chunk pipelining across stages.
             chunk_microbatch_sizes = [
-                split_batch_size(batch_size, min(self._pp_microbatch_size(), prefill_token_budget // c_query_len))
+                split_batch_size(batch_size, min(self._pp_microbatch_size(), prefill_token_budget // chunk.query_len))
                 if prefill_token_budget is not None
                 else microbatch_sizes
-                for c_query_len, _ in chunk_shapes
+                for chunk in chunk_shapes
             ]
             profile_records = tuple(
                 self._profile_pp_microbatch(
                     mb_size,
                     optimizer_data,
                     is_decode,
-                    query_len=c_query_len,
-                    seq_len=c_seq_len,
+                    query_len=chunk.query_len,
+                    seq_len=chunk.seq_len,
+                    forward_image=(
+                        (
+                            self._resolve_image_batch_size(optimizer_data),
+                            optimizer_data.image_height,
+                            optimizer_data.image_width,
+                        )
+                        if chunk.is_first_chunk
+                        else (None, None, None)
+                    ),
+                    image_tokens_included=True,
                 )
-                for (c_query_len, c_seq_len), sizes in zip(chunk_shapes, chunk_microbatch_sizes)
+                for chunk, sizes in zip(chunk_shapes, chunk_microbatch_sizes)
                 for mb_size in sizes
             )
         else:

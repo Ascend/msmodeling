@@ -1146,6 +1146,160 @@ class TestBaseBackend(unittest.TestCase):
         self.assertEqual(metrics.device_memory_available_gb, -1.0)
         self.assertEqual(metrics.offload_mode, "prefill")
 
+    def test_image_tokens_per_request_fails_closed_on_budget_resolution_failure(self):
+        # Review (stormchasingg round 4 -> zhangzhenyu round 6): when a
+        # fully configured image geometry cannot resolve its token budget,
+        # the planner must fail closed instead of silently degrading the
+        # chunk plan to text-only while the chunk rows still declare
+        # image_tokens_included=True (which under-counts every image).
+        optimizer_data = OptimizerData(
+            input_length=100,
+            output_length=8,
+            batch_size=1,
+            image_batch_size=1,
+            image_height=224,
+            image_width=224,
+        )
+        self.backend.model_runner = Mock()
+
+        with patch(
+            "tensor_cast.core.input_generator.resolve_multimodal_token_budget",
+            side_effect=ValueError("bad processor budget"),
+        ):
+            with self.assertRaisesRegex(ValueError, "under-counts image tokens"):
+                self.backend._image_tokens_per_request(optimizer_data)
+
+    def test_resolve_image_batch_size_decouples_from_search_batch(self):
+        # Review (Hudingyi/zhangzhenyu round 6): image_batch_size is the
+        # per-request image count and must not follow the concurrency
+        # search's batch_size. The distribution path defaults to one image
+        # per request; the fixed-length path keeps the historical fallback.
+        distribution = LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=100, weight=1.0)])
+        data = OptimizerData(
+            batch_size=2,
+            length_distribution=distribution,
+            image_height=224,
+            image_width=224,
+        )
+        self.assertEqual(self.backend._resolve_image_batch_size(data), 1)
+        # Explicit value always wins on both paths.
+        data.image_batch_size = 3
+        self.assertEqual(self.backend._resolve_image_batch_size(data), 3)
+        # No image geometry at all: no images.
+        data.image_height = None
+        self.assertEqual(self.backend._resolve_image_batch_size(data), None)
+
+    def test_resolve_image_batch_size_scalar_fallback_warns_once_per_batch_size(self):
+        # The fixed-length fallback keeps the historical behavior but warns
+        # once per batch_size value so search loops do not flood the log.
+        data = OptimizerData(
+            input_length=100,
+            output_length=8,
+            batch_size=2,
+            image_height=224,
+            image_width=224,
+        )
+        from serving_cast.service import base_throughput_optimizer as bto
+
+        bto._SCALAR_IMAGE_BATCH_FALLBACK_WARNED.clear()
+        try:
+            with self.assertLogs("serving_cast.service.base_throughput_optimizer", level="WARNING") as captured:
+                self.assertEqual(self.backend._resolve_image_batch_size(data), 2)
+                self.assertEqual(self.backend._resolve_image_batch_size(data), 2)
+            fallback_lines = [line for line in captured.output if "image_batch_size defaults" in line]
+            self.assertEqual(len(fallback_lines), 1)
+        finally:
+            bto._SCALAR_IMAGE_BATCH_FALLBACK_WARNED.clear()
+
+    def test_image_tokens_per_request_ignores_image_params_on_non_vl_models(self):
+        # Stray image parameters on a text model are configuration noise:
+        # the planner budget stays 0 (no raise) and the generators keep the
+        # historical "ignored + warning" behaviour (PR-1 review round 6).
+        runner = Mock()
+        runner.model.is_vl_model = False
+        self.backend.model_runner = runner
+        data = OptimizerData(
+            input_length=100,
+            output_length=8,
+            batch_size=2,
+            image_batch_size=2,
+            image_height=224,
+            image_width=224,
+        )
+        self.assertEqual(self.backend._image_tokens_per_request(data), 0)
+
+    def test_profile_pp_microbatch_forwards_image_contract_and_separates_cache(self):
+        # Review round 3 (zhangzhenyu P1), PP chunk pipeline: chunk
+        # microbatches forward the length contract (image_tokens_included)
+        # and the per-chunk image state to _get_forward_info, and profiles of
+        # the same (query_len, seq_len, microbatch) with different image
+        # state are cached separately — the first chunk (vision tower runs)
+        # and a text-only chunk of equal shape are distinct profiles.
+        optimizer_data = OptimizerData(input_length=10, output_length=3, batch_size=1, max_batched_tokens=512)
+        captured_calls = []
+
+        class DummyPPMetrics:
+            execution_time_s = {"analytic": 0.01}
+            device_memory_available_gb = 2.0
+            breakdowns = {}
+            pipeline_profile = SimpleNamespace(name="dummy-pipeline-profile")
+
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
+            captured_calls.append((query_len, seq_len, forward_image, image_tokens_included))
+            return DummyPPMetrics()
+
+        with patch.object(self.backend, "_get_forward_info", side_effect=fake_forward):
+            self.backend.dp = 1
+            first = self.backend._profile_pp_microbatch(
+                1,
+                optimizer_data,
+                is_decode=False,
+                query_len=512,
+                seq_len=512,
+                forward_image=(1, 224, 224),
+                image_tokens_included=True,
+            )
+            text_only = self.backend._profile_pp_microbatch(
+                1,
+                optimizer_data,
+                is_decode=False,
+                query_len=512,
+                seq_len=512,
+                forward_image=(None, None, None),
+                image_tokens_included=True,
+            )
+            cached_hit = self.backend._profile_pp_microbatch(
+                1,
+                optimizer_data,
+                is_decode=False,
+                query_len=512,
+                seq_len=512,
+                forward_image=(1, 224, 224),
+                image_tokens_included=True,
+            )
+
+        # The contract kwargs are forwarded verbatim.
+        self.assertEqual(
+            captured_calls,
+            [
+                (512, 512, (1, 224, 224), True),
+                (512, 512, (None, None, None), True),
+            ],
+        )
+        # Distinct image states produce distinct cached profiles; a repeat of
+        # the first state is a cache hit (no extra forward).
+        self.assertIsNot(first, text_only)
+        self.assertIs(first, cached_hit)
+
 
 if __name__ == "__main__":
     unittest.main()

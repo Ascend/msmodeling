@@ -29,6 +29,7 @@ This document summarizes the currently supported model types and simulation feat
 | Text models | Bailing/MiMo/MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2.7, MiniMax M2.5, MiniMax M2, MiniMax M3 |
 | Text models | Step | Step 5 Preview |
 | Vision-language models | VL Models | DeepSeek-V4.1-Flash, Step 5 Preview, Qwen3-VL, Qwen3-VL MoE, GLM-4V, GLM-4V MoE, InternVL |
+| Vision-language models | Bailing VL | Ling-3.0-flash-VL (Bailing MoE V3 VL: structure-level simulation with single/multi-image input, the M-RoPE contract, a 27-layer ViT tower with an MLP-free merger and a root-level projector; numeric M-RoPE alignment and measured calibration belong to the later precision phase; **PP>1 is not supported yet** — the VL profile does not expose a language_module_path, so PP candidates are skipped; a phase-1 scope boundary) |
 | Image generation/editing models | Diffusers DiT image models | FLUX.1-dev, Qwen-Image-Edit |
 | Video generation models | Diffusers DiT video models | Wan, HunyuanVideo, HunyuanVideo1.5 |
 

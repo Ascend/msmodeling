@@ -162,7 +162,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             global_batched_token_limit = None
         else:
             chunk_plan = optimizer_data.get_prefill_chunk_plan(
-                (concurrency + self.dp - 1) // self.dp if variable_input_mode else None
+                (concurrency + self.dp - 1) // self.dp if variable_input_mode else None,
+                image_tokens_per_request=self._image_tokens_per_request(optimizer_data),
             )
             global_batched_token_limit = self._get_global_batched_token_limit(optimizer_data)
 
@@ -298,6 +299,12 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                         decode_flag,
                         query_len=chunk.query_len,
                         seq_len=chunk.seq_len,
+                        # Chunk lengths already include the image token
+                        # budget; every request in this wave is on its first
+                        # chunk position, so each wave's forward carries its
+                        # own requests' image inputs exactly once.
+                        image_tokens_included=True,
+                        carry_image_input=chunk.is_first_chunk,
                     )
                     wave_keys.append(wave_key)
                     wave_specs.append(
@@ -553,7 +560,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 query_len=effective_input_length,
                 seq_len=None,
                 resident_policy="inflight",
-                chunk_shapes=[(c.query_len, c.seq_len) for c in chunk_plan] if len(chunk_plan) > 1 else None,
+                chunk_shapes=chunk_plan if len(chunk_plan) > 1 else None,
                 prefill_token_budget=max_batched_tokens,
             )
             # Explicit guards instead of assert: these are runtime

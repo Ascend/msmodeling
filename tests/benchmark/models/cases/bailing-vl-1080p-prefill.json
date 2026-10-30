@@ -1,0 +1,154 @@
+{
+  "type": "text",
+  "name": "bailing-vl-1080p-prefill",
+  "description": "Bailing V3 VL (Ling-3.0-flash-VL) adapter run-through guardrail: single 1080x1920 image, 1 query, qlen=8, prefill, W8A8 dynamic linear quant. model-adapter verify passed with key op counts attention=69 (27 vision + 35 KDA + 7 MLA) and moe_gating=40. Baseline regenerated 2026-10-23 for the official self-contained modeling switch (thin-shell -> official remote code): the vision attention analytic time moved 1.8ms -> 5.5ms per call (op shape/count identical; final calibration belongs to PR-8 P1-11 measured profiling).",
+  "initial_time_s": 1.019355792285521,
+  "baseline_time_s": 1.019355792285521,
+  "initial_tolerance": 0.1,
+  "baseline_tolerance": 0.8,
+  "operator_top_n": 25,
+  "operator_tolerance": 0.1,
+  "user_input": {
+    "image_batch_size": 1,
+    "image_height": 1080,
+    "image_width": 1920,
+    "log_level": "error",
+    "model_id": "inclusionAI/Ling-3.0-flash-VL",
+    "num_queries": 1,
+    "query_len": 8,
+    "device": "TEST_DEVICE",
+    "context_length": 0,
+    "quantize_linear_action": "W8A8_DYNAMIC",
+    "quantize_attention_action": "DISABLED",
+    "num_hidden_layers_override": 0,
+    "decode": false,
+    "num_mtp_tokens": 0
+  },
+  "operators": [
+    {
+      "name": "tensor_cast.static_quant_linear.default",
+      "total_time_s": 0.45509215277903564,
+      "num_calls": 61832
+    },
+    {
+      "name": "tensor_cast.attention.default",
+      "total_time_s": 0.14896274593591335,
+      "num_calls": 27
+    },
+    {
+      "name": "tensor_cast.dynamic_quantize_symmetric.default",
+      "total_time_s": 0.14048915870331435,
+      "num_calls": 61832
+    },
+    {
+      "name": "aten.cat.default",
+      "total_time_s": 0.06493047456160868,
+      "num_calls": 20688
+    },
+    {
+      "name": "aten.mul.Tensor",
+      "total_time_s": 0.06436904024979699,
+      "num_calls": 20848
+    },
+    {
+      "name": "aten.silu.default",
+      "total_time_s": 0.04328732325160691,
+      "num_calls": 20522
+    },
+    {
+      "name": "aten.addmm.default",
+      "total_time_s": 0.027932788918903613,
+      "num_calls": 110
+    },
+    {
+      "name": "aten.add.Tensor",
+      "total_time_s": 0.015920666266264538,
+      "num_calls": 321
+    },
+    {
+      "name": "aten.mm.default",
+      "total_time_s": 0.00825331235135026,
+      "num_calls": 48
+    },
+    {
+      "name": "aten.gelu.default",
+      "total_time_s": 0.007282539310067894,
+      "num_calls": 28
+    },
+    {
+      "name": "tensor_cast.kimi_delta_attention_core.default",
+      "total_time_s": 0.007117081003550059,
+      "num_calls": 35
+    },
+    {
+      "name": "tensor_cast.unpermute_tokens.default",
+      "total_time_s": 0.006449009497575465,
+      "num_calls": 40
+    },
+    {
+      "name": "aten._to_copy.default",
+      "total_time_s": 0.005863405611478793,
+      "num_calls": 259
+    },
+    {
+      "name": "aten.native_layer_norm.default",
+      "total_time_s": 0.00399655826100148,
+      "num_calls": 55
+    },
+    {
+      "name": "aten.sum.dim_IntList",
+      "total_time_s": 0.003750828867375848,
+      "num_calls": 41
+    },
+    {
+      "name": "tensor_cast.init_routing_v2.default",
+      "total_time_s": 0.003664743050547939,
+      "num_calls": 40
+    },
+    {
+      "name": "aten.pow.Tensor_Scalar",
+      "total_time_s": 0.0035508949713905637,
+      "num_calls": 85
+    },
+    {
+      "name": "tensor_cast.multihead_latent_attention.default",
+      "total_time_s": 0.0029559820134090267,
+      "num_calls": 7
+    },
+    {
+      "name": "aten.neg.default",
+      "total_time_s": 0.0019960236893892306,
+      "num_calls": 54
+    },
+    {
+      "name": "aten.mean.dim",
+      "total_time_s": 0.0018611078167443808,
+      "num_calls": 85
+    },
+    {
+      "name": "aten.new_empty.default",
+      "total_time_s": 0.00029258398023247723,
+      "num_calls": 21
+    },
+    {
+      "name": "tensor_cast.moe_gating_top_k_sigmoid.default",
+      "total_time_s": 0.0002466364065992338,
+      "num_calls": 40
+    },
+    {
+      "name": "aten.rsqrt.default",
+      "total_time_s": 0.00017132066209819968,
+      "num_calls": 85
+    },
+    {
+      "name": "aten.embedding.default",
+      "total_time_s": 0.00016664289115497376,
+      "num_calls": 2
+    },
+    {
+      "name": "tensor_cast.apply_rope_single.default",
+      "total_time_s": 0.0001498116570574542,
+      "num_calls": 14
+    }
+  ]
+}

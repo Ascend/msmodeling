@@ -1,0 +1,23 @@
+{
+    "min_pixels": 4096,
+    "max_pixels": 4194304,
+    "patch_size": 16,
+    "temporal_patch_size": 2,
+    "merge_size": 2,
+    "image_mean": [
+        0.48145466,
+        0.4578275,
+        0.40821073
+    ],
+    "image_std": [
+        0.26862954,
+        0.26130258,
+        0.27577711
+    ],
+    "image_token": "<|image_pad|>",
+    "video_token": "<|video_pad|>",
+    "use_interleaved_frame_timestamp": true,
+    "image_processor_type": "BailingMM2ImageProcessor",
+    "processor_class": "BailingMM2Processor",
+    "_msmodeling_note": "auto_map removed with the processor copies (PR review): this vendored config only carries the Bailing MM2 pixel budget for simulation; the full processor lives in the official repo."
+}

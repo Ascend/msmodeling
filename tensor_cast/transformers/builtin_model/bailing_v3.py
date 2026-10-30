@@ -181,6 +181,30 @@ def _replace_bailing_v3_kda_modules(root):
             replace_module(root, name, BailingV3KimiDeltaAttentionTensorCast(module))
 
 
+def _strip_bailing_v3_native_mtp(base_model):
+    """Validate and strip the native MTP tail from a Bailing V3 decoder.
+
+    The official modeling appends ``BailingMoeV3MTPLayer`` layers to the end
+    of ``model.layers`` when ``num_nextn_predict_layers`` > 0 (e.g. the
+    internal SFT RC2 configs ship 1 MTP layer while the open
+    Ling-3.0-flash-VL config ships 0). Structural simulation never runs the
+    MTP forward path, so the tail is checked against the expected class name
+    and removed, keeping the main decoder stack (and the run-through
+    attention call counts) independent of the MTP declaration.
+    """
+    native_mtp_layers = int(getattr(base_model, "num_nextn_predict_layers", 0) or 0)
+    if not native_mtp_layers:
+        return 0
+    layers = list(base_model.layers)
+    mtp_layers = layers[-native_mtp_layers:]
+    mtp_layer_types = [type(layer.unwrap() if hasattr(layer, "unwrap") else layer).__name__ for layer in mtp_layers]
+    if not all(layer_type == "BailingMoeV3MTPLayer" for layer_type in mtp_layer_types):
+        raise ValueError("Bailing V3 native MTP layers do not match the expected model structure")
+    base_model.layers = torch.nn.ModuleList(layers[:-native_mtp_layers])
+    base_model.num_nextn_predict_layers = 0
+    return native_mtp_layers
+
+
 def _collect_bailing_v3_attention_modules(model, wrapper):
     attention_modules = []
     for layer in getattr(model.unwrap(), "layers", ()):
@@ -209,15 +233,7 @@ def _patch_bailing_v3_model(model):
     base_model = model.unwrap()
     base_model._use_flash_attention_2 = True
     base_model._use_sdpa = False
-    native_mtp_layers = int(getattr(base_model, "num_nextn_predict_layers", 0) or 0)
-    if native_mtp_layers:
-        layers = list(base_model.layers)
-        mtp_layers = layers[-native_mtp_layers:]
-        mtp_layer_types = [type(layer.unwrap() if hasattr(layer, "unwrap") else layer).__name__ for layer in mtp_layers]
-        if not all(layer_type == "BailingMoeV3MTPLayer" for layer_type in mtp_layer_types):
-            raise ValueError("Bailing V3 native MTP layers do not match the expected model structure")
-        base_model.layers = torch.nn.ModuleList(layers[:-native_mtp_layers])
-        base_model.num_nextn_predict_layers = 0
+    _strip_bailing_v3_native_mtp(base_model)
 
     _replace_bailing_v3_kda_modules(base_model)
     mtp = getattr(wrapper, "mtp", None)

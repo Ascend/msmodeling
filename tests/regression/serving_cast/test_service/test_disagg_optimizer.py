@@ -156,7 +156,16 @@ class TestDisaggStrategy(unittest.TestCase):
             mtp_acceptance_rate=[],
         )
 
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
             class DummyMetrics:
                 execution_time_s = {"empirical": 0.002}
                 device_memory_available_gb = 1.0
@@ -224,7 +233,16 @@ class TestDisaggStrategy(unittest.TestCase):
         )
         captured_calls = []
 
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
             captured_calls.append((concurrency, is_decode, query_len, seq_len))
             return Mock(
                 execution_time_s={"analytic": 0.001},
@@ -299,7 +317,16 @@ class TestDisaggStrategy(unittest.TestCase):
         )
         captured_calls = []
 
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
             captured_calls.append((concurrency, query_len, seq_len))
 
             class DummyMetrics:
@@ -354,6 +381,72 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["profiling_result"], "hybrid")
         self.assertEqual(row["profiling_misses"], "outside_axis_boundary x3")
 
+    def test_chunked_prefill_counts_image_budget_once_per_request(self):
+        # Review round 3 (zhangzhenyu P1), fixed-length disagg path: the
+        # chunk plan already contains the 51-token image budget, so each
+        # wave's forward query stays at the planned chunk length ([512, 512,
+        # 27] — the old behavior re-added 51 on every chunk, [563, 563, 78]),
+        # every chunk key declares image_tokens_included, and only the first
+        # chunk's wave carries the image forward inputs (the vision tower
+        # runs once per request).
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=1,
+            input_length=1000,
+            output_length=16,
+            max_batched_tokens=512,
+            serving_cost=2,
+            image_batch_size=1,
+            image_height=224,
+            image_width=224,
+        )
+        captured_calls = []
+
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
+            captured_calls.append((concurrency, query_len, seq_len, forward_image, image_tokens_included))
+
+            class DummyMetrics:
+                execution_time_s = {"analytic": 0.001}
+                total_device_memory_gb = 64.0
+                model_weight_size_gb = 20.0
+                kv_cache_size_gb = 4.0
+                model_activation_size_gb = 1.0
+                reserved_memory_gb = 10.0
+                device_memory_available_gb = 1.0
+                breakdowns = {}
+
+            return DummyMetrics()
+
+        with (
+            patch.object(self.strategy, "_image_tokens_per_request", return_value=51),
+            patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward),
+        ):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        # Three chunks, each fitting one wave: query lengths never exceed the
+        # 512 budget and sum to 1051 (text 1000 + the image budget once).
+        self.assertEqual([call[1] for call in captured_calls], [512, 512, 27])
+        self.assertEqual(sum(call[1] for call in captured_calls), 1051)
+        self.assertTrue(all(call[1] <= optimizer_data.max_batched_tokens for call in captured_calls))
+        # All chunk rows declare the length contract.
+        self.assertTrue(all(call[4] for call in captured_calls))
+        # The image forward inputs reach only the first chunk's wave.
+        self.assertEqual(captured_calls[0][3], (1, 224, 224))
+        self.assertEqual(captured_calls[1][3], (None, None, None))
+        self.assertEqual(captured_calls[2][3], (None, None, None))
+        row = result.get_summary_df().iloc[0]
+        self.assertEqual(row["prefill_num_chunks"], 3)
+
     def test_chunked_prefill_ttft_reports_request_weighted_drain_average(self):
         """Multi-wave chunked prefill reports the request-weighted drain average as TTFT.
 
@@ -374,7 +467,16 @@ class TestDisaggStrategy(unittest.TestCase):
         )
         captured_calls = []
 
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
             captured_calls.append((concurrency, query_len, seq_len))
 
             class DummyMetrics:
@@ -426,7 +528,16 @@ class TestDisaggStrategy(unittest.TestCase):
             serving_cost=2,
         )
 
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
             class DummyMetrics:
                 # Same latency profile as the drain-average test: 5ms for
                 # query 4, 3ms for query 2.
@@ -463,7 +574,16 @@ class TestDisaggStrategy(unittest.TestCase):
             serving_cost=2,
         )
 
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
             class DummyMetrics:
                 execution_time_s = {"analytic": 0.001 + 0.001 * (query_len or 0)}
                 device_memory_available_gb = 1.0
@@ -528,7 +648,16 @@ class TestDisaggStrategy(unittest.TestCase):
         )
         captured_calls = []
 
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
             captured_calls.append((concurrency, query_len, seq_len))
 
             class DummyMetrics:
@@ -565,7 +694,16 @@ class TestDisaggStrategy(unittest.TestCase):
         )
         captured_calls = []
 
-        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+        def fake_forward(
+            concurrency,
+            optimizer_data,
+            is_decode,
+            *,
+            query_len=None,
+            seq_len=None,
+            forward_image=None,
+            image_tokens_included=False,
+        ):
             captured_calls.append((concurrency, query_len, seq_len))
             if seq_len == 10:
                 raise AssertionError("chunk after negative memory should not be computed")

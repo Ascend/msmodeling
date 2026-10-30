@@ -303,11 +303,12 @@ def test_varlen_selected_token_indices_for_lmhead(qwen3_32b_lmhead_attention_tra
 @patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
 def test_varlen_qwen3_5_cache_position_starts_at_context(_mock_kv_cache, _mock_sparse_cache):
     model = SimpleNamespace(
+        is_vl_model=False,
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="qwen3_5"),
             mtp_config=None,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        )
+        ),
     )
     requests = [
         RequestInfo(query_len=1, seq_len=2199, is_decode=True, context_length=2198),
@@ -367,11 +368,12 @@ def test_qwen3_5_decode_mtp_cache_position_metadata(_mock_kv_cache, _mock_sparse
 @patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
 def test_varlen_qwen3_5_moe_text_cache_position_starts_at_context(_mock_kv_cache, _mock_sparse_cache):
     model = SimpleNamespace(
+        is_vl_model=False,
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="qwen3_5_moe_text"),
             mtp_config=None,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        )
+        ),
     )
     requests = [
         RequestInfo(query_len=1, seq_len=2199, is_decode=True, context_length=2198),
@@ -538,6 +540,7 @@ def test_generate_inputs_sets_max_total_seq_len(_mock_kv_cache, _mock_sparse_cac
 @patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
 def test_generate_inputs_varlen_sets_max_total_seq_len(_mock_kv_cache, _mock_sparse_cache):
     model = SimpleNamespace(
+        is_vl_model=False,
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="deepseek_v4"),
             mtp_config=None,
@@ -1503,3 +1506,96 @@ def test_v4_main_cache_allocation_mixed_bytes(quantized, expected_bytes, ratio):
     slots = (slots + 15) // 16 * 16
     assert caches[0].numel() * caches[0].element_size() == slots * expected_bytes
     assert per_token == slots * expected_bytes / 4096
+
+
+def _deepseek_v41_vl_model(dp_size=1):
+    """DeepSeek V4.1 VL model double for the planner/generator parity tests.
+
+    The vision config carries only the V4.1-specific fields (downsample_ratio
+    and its own resize rules) — no spatial_merge_size/temporal_patch_size, so
+    the generic Qwen-style budget formula cannot resolve it (PR-1 review
+    round 6, zhangzhenyu).
+    """
+    return SimpleNamespace(
+        is_vl_model=True,
+        model_id="deepseek-ai/DeepSeek-V4.1",
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="deepseek_v41",
+                vision_config=SimpleNamespace(
+                    patch_size=22,
+                    downsample_ratio=2,
+                    in_channels=3,
+                    max_wh_ratio=None,
+                    min_pixels=0,
+                    max_image_tokens=1024,
+                ),
+            ),
+            dtype=torch.bfloat16,
+            mtp_config=None,
+            parallel_config=SimpleNamespace(data_parallel_size=dp_size, decode_context_parallel_size=1),
+        ),
+        text_config=SimpleNamespace(model_type="deepseek_v41_text"),
+    )
+
+
+def test_deepseek_v41_planner_budget_matches_dedicated_generator():
+    # 544x544 with patch=22, ratio=2: vit 25x25, llm 13x13, span = 13*(13+1)+2
+    # = 184 — the reviewer's probe value. The planner budget must reuse the
+    # dedicated V4.1 grid/span formula instead of the generic Qwen-style one
+    # (which cannot resolve the V4.1 vision config at all).
+    from tensor_cast.core.input_generator import (
+        generate_image_inputs,
+        resolve_multimodal_token_budget,
+    )
+
+    model = _deepseek_v41_vl_model()
+    generated = generate_image_inputs(model, 1, 544, 544, concurrency=1)
+    assert generated["num_image_tokens"] == 184
+    assert resolve_multimodal_token_budget(model, 1, 544, 544) == 184
+    assert resolve_multimodal_token_budget(model, 2, 544, 544) == 368
+
+
+@patch("tensor_cast.core.input_generator._get_deepseek_v41_cache_ownership", return_value=None)
+@patch("tensor_cast.core.input_generator._get_deepseek_v41_compressed_cache_info", return_value=({}, {}, 0))
+@patch("tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info", return_value={})
+@patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
+def test_varlen_deepseek_v41_keeps_per_rank_images_and_metadata(_mock_kv, _mock_sparse, _mock_comp, _mock_own):
+    # DP=2 with two per-rank image requests: the dedicated helper used to
+    # divide the already-per-rank concurrency again (1 image instead of 2)
+    # and the varlen path omitted the image_token_types/image_token_mask/
+    # engram_token_mask contract keys that prepare_multimodal_embeddings
+    # requires (PR-1 review round 6, zhangzhenyu).
+    from tensor_cast.core.input_generator import RequestInfo, generate_inputs_varlen
+
+    model = _deepseek_v41_vl_model(dp_size=2)
+    requests = [
+        RequestInfo(
+            query_len=64,
+            seq_len=64,
+            is_decode=False,
+            image_batch_size=1,
+            image_height=544,
+            image_width=544,
+        ),
+        RequestInfo(
+            query_len=64,
+            seq_len=64,
+            is_decode=False,
+            image_batch_size=1,
+            image_height=544,
+            image_width=544,
+        ),
+    ]
+
+    inputs = generate_inputs_varlen(model, requests, 128)
+
+    # Two per-rank requests keep two images (25x25 patches each).
+    assert inputs["pixel_values"].shape[0] == 2
+    assert tuple(inputs["pixel_values"].shape[1:]) == (25 * 25, 3, 22, 22)
+    # V4.1 multimodal contract metadata present with matching shapes.
+    assert inputs["image_token_types"].shape == inputs["input_ids"].shape
+    assert inputs["image_token_mask"].shape == inputs["input_ids"].shape
+    assert inputs["engram_token_mask"].shape == inputs["input_ids"].shape
+    # Each request's query grows by its own 184 image tokens.
+    assert inputs["attention_meta"].query_lens_values == [64 + 184, 64 + 184]

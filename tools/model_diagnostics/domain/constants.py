@@ -16,4 +16,9 @@
 
 """Constants shared by model-diagnostics sources and Theory evaluation."""
 
-VISION_IMAGE_BOUNDARY_TOKEN_COUNT = 2
+# P0-02 single source of truth: the boundary-token constant is owned by
+# tensor_cast.core.vision_geometry and re-exported here so model
+# diagnostics and Theory evaluation stay aligned with input generation.
+from tensor_cast.core.vision_geometry import (  # noqa: E402,F401
+    VISION_IMAGE_BOUNDARY_TOKEN_COUNT,
+)

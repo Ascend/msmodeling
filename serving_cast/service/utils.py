@@ -112,6 +112,12 @@ class PrefillChunk:
     query_len: int
     seq_len: int
     is_last_chunk: bool = False
+    # True on the chunk that carries the request's image placeholders (the
+    # request's first chunk under the PR-1 contract: the chunk planner puts
+    # the whole multimodal token budget into the request length and the
+    # image-bearing chunk is the first one). Only this chunk receives image
+    # forward inputs; later chunks of the same request are text-only.
+    is_first_chunk: bool = False
 
 
 @dataclass
@@ -227,8 +233,32 @@ class OptimizerData:
         effective_length = self.get_effective_input_length()
         return max(0, self.input_length - effective_length)
 
-    def get_prefill_chunk_plan(self, concurrency: Optional[int] = None) -> list[PrefillChunk]:
-        """Split the effective prefill prompt into chunks bounded by max_batched_tokens."""
+    def get_prefill_chunk_plan(
+        self,
+        concurrency: Optional[int] = None,
+        image_tokens_per_request: int = 0,
+    ) -> list[PrefillChunk]:
+        """Split the effective prefill prompt into chunks bounded by max_batched_tokens.
+
+        ``image_tokens_per_request`` adds the language-side image token
+        budget to every request's prefill length, so the chunk boundaries
+        honor ``max_batched_tokens`` for the multimodal request as a whole
+        (the budget models placeholders + boundary tokens; their in-prompt
+        position is a Phase-1 contract that attributes the whole budget to
+        the request's first chunk).
+
+        Length contract (single source of truth for the chunk rows feeding
+        ``RequestInfo.image_tokens_included=True``): ``row["query_len"]`` and
+        ``row["num_input_tokens"]`` from the request distribution are
+        text-only lengths (dataset prompts never contain image
+        placeholders), so the image budget is added exactly once — here, to
+        the query segment. The image tokens belong to the request's query
+        (they are prefilled and enter the KV cache with it), never to the
+        cached prefix: ``cached_prefix_tokens = num_input_tokens -
+        query_len`` stays text-only, and the final chunk's ``seq_len``
+        therefore equals ``num_input_tokens + image_tokens_per_request``.
+        Downstream generators must not add the budget again.
+        """
         if self.length_distribution is not None:
             if concurrency is None:
                 raise ValueError("concurrency is required for variable-length prefill chunk planning.")
@@ -240,11 +270,32 @@ class OptimizerData:
             remaining_token_budget = self.max_batched_tokens
             for row in self.build_concurrency_samples(concurrency):
                 for _ in range(row["samples"]):
-                    request_query_len = row["query_len"]
-                    cached_prefix_tokens = row["num_input_tokens"] - request_query_len
+                    request_query_len = row["query_len"] + image_tokens_per_request
+                    cached_prefix_tokens = row["num_input_tokens"] - row["query_len"]
                     consumed_query_len = 0
+                    is_first_chunk = True
                     while consumed_query_len < request_query_len:
                         if remaining_token_budget == 0:
+                            chunk_index += 1
+                            remaining_token_budget = self.max_batched_tokens
+
+                        if (
+                            is_first_chunk
+                            and image_tokens_per_request
+                            and remaining_token_budget < image_tokens_per_request
+                        ):
+                            # The image-bearing first chunk must hold the full
+                            # placeholder span. When earlier requests of the
+                            # same wave consumed too much budget, move this
+                            # request's first chunk to a fresh wave instead of
+                            # straddling the image budget across chunks
+                            # (review: lutean).
+                            if self.max_batched_tokens < image_tokens_per_request:
+                                raise ValueError(
+                                    f"max_batched_tokens ({self.max_batched_tokens}) cannot hold "
+                                    f"the per-request image token budget ({image_tokens_per_request}); "
+                                    "raise instead of straddling the image placeholders across chunks"
+                                )
                             chunk_index += 1
                             remaining_token_budget = self.max_batched_tokens
 
@@ -260,8 +311,10 @@ class OptimizerData:
                                 query_len=query_len,
                                 seq_len=cached_prefix_tokens + consumed_query_len,
                                 is_last_chunk=consumed_query_len == request_query_len,
+                                is_first_chunk=is_first_chunk,
                             )
                         )
+                        is_first_chunk = False
             return chunks
 
         effective_input_length = self.get_effective_input_length(is_decode=False)
@@ -270,12 +323,21 @@ class OptimizerData:
         if self.max_batched_tokens is None or self.max_batched_tokens <= 0:
             raise ValueError(f"max_batched_tokens must be a positive integer, got {self.max_batched_tokens!r}.")
 
+        effective_input_length += image_tokens_per_request
         chunks = []
         consumed = 0
         index = 0
         cached_prefix_tokens = self.get_prefill_cached_prefix_length() or 0
         while consumed < effective_input_length:
             query_len = min(self.max_batched_tokens, effective_input_length - consumed)
+            if image_tokens_per_request and index == 0 and query_len < image_tokens_per_request:
+                # The image-bearing first chunk must hold the full placeholder
+                # span (review: lutean); see the variable-length branch above.
+                raise ValueError(
+                    f"max_batched_tokens ({self.max_batched_tokens}) cannot hold "
+                    f"the per-request image token budget ({image_tokens_per_request}); "
+                    "raise instead of straddling the image placeholders across chunks"
+                )
             seq_len = cached_prefix_tokens + consumed + query_len
             chunks.append(
                 PrefillChunk(
@@ -283,6 +345,7 @@ class OptimizerData:
                     query_len=query_len,
                     seq_len=seq_len,
                     is_last_chunk=consumed + query_len == effective_input_length,
+                    is_first_chunk=index == 0,
                 )
             )
             consumed += query_len

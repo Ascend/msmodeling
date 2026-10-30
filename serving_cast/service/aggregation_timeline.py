@@ -44,6 +44,12 @@ class RequestShape:
     is_decode: bool
     query_len: int
     seq_len: int
+    # Marked at the source (build_requests): True only on the first prefill
+    # chunk of an image-bearing request. Reading this flag replaces the
+    # first-chunk shape-set reverse lookup, which could mis-classify a
+    # non-first chunk that happens to share (query_len, seq_len) with
+    # another request's first chunk (review: AvadaKedavrua).
+    carries_image: bool = False
 
 
 @dataclass
@@ -78,21 +84,33 @@ class TimelineResult:
         return sum(r.finish_ms for r in self.requests) / len(self.requests)
 
 
-def build_requests(data: OptimizerData, concurrency: int) -> list[TimelineRequest]:
-    """Build fixed chunks once; scheduler admission never resplits them."""
+def build_requests(data: OptimizerData, concurrency: int, image_tokens_per_request: int = 0) -> list[TimelineRequest]:
+    """Build fixed chunks once; scheduler admission never resplits them.
+
+    ``image_tokens_per_request`` follows the PR-1 chunk-plan contract: the
+    multimodal token budget is folded into each request's prefill query
+    exactly once (``image_tokens_included``), so the timeline admission and
+    the actual forward share one token accounting. Before this, the
+    timeline re-split the text-only length and the generators re-added the
+    image tokens on every chunk (review: zhangzhenyu round 7 P1 —
+    aggregation dropped the image-aware plan).
+    """
     if data.length_distribution is None:
         rows = [
             {
                 "samples": concurrency,
                 "num_input_tokens": data.input_length,
-                "query_len": data.get_effective_input_length(),
+                "query_len": data.get_effective_input_length() + image_tokens_per_request,
             }
         ]
     else:
-        rows = data.build_concurrency_samples(concurrency)
+        rows = [
+            dict(row, query_len=row["query_len"] + image_tokens_per_request)
+            for row in data.build_concurrency_samples(concurrency)
+        ]
     requests = []
     for row in rows:
-        prompt = row["num_input_tokens"]
+        prompt = row["num_input_tokens"] + image_tokens_per_request
         query = row["query_len"]
         if query <= 0:
             raise ValueError("Aggregation requests require a positive prefill query length")
@@ -101,8 +119,30 @@ def build_requests(data: OptimizerData, concurrency: int) -> list[TimelineReques
         consumed = 0
         while consumed < query:
             q = min(data.max_batched_tokens, query - consumed)
+            if image_tokens_per_request and not chunks and q < image_tokens_per_request:
+                # The image-bearing first chunk must hold the full placeholder
+                # span: the budget models placeholders + boundary tokens and
+                # the forward writes the whole image span in one chunk.
+                # Straddling it across chunks would desynchronize the
+                # counted length budget from the actual writeback (review:
+                # lutean). Splitting image placeholders across chunks needs
+                # cross-chunk feature reuse and stays out of scope.
+                raise ValueError(
+                    f"max_batched_tokens ({data.max_batched_tokens}) cannot hold the per-request "
+                    f"image token budget ({image_tokens_per_request}); raise instead of "
+                    "straddling the image placeholders across chunks"
+                )
             consumed += q
-            chunks.append(RequestShape(False, q, cached + consumed))
+            # Only the first chunk of an image-bearing request carries the
+            # image forward inputs (the vision tower runs once per request).
+            chunks.append(
+                RequestShape(
+                    False,
+                    q,
+                    cached + consumed,
+                    carries_image=image_tokens_per_request > 0 and not chunks,
+                )
+            )
         requests.extend(TimelineRequest(prompt, chunks.copy()) for _ in range(row["samples"]))
     return requests
 

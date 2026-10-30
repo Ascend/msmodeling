@@ -49,8 +49,24 @@ from .vision_geometry import VISION_IMAGE_BOUNDARY_TOKEN_COUNT
 # Qwen2-VL / Qwen3-VL preprocessor_config.json defaults when no local config is available.
 _QWEN_VL_DEFAULT_MIN_PIXELS = 65536
 _QWEN_VL_DEFAULT_MAX_PIXELS = 16777216
+# BailingMM2ImageProcessor pixel budget contract (Ling-3.0-flash-VL). A local
+# preprocessor_config.json is authoritative when present; these constants are
+# the fail-closed fallback and must never be replaced by the Qwen defaults.
+_BAILING_MM2_DEFAULT_MIN_PIXELS = 4096
+_BAILING_MM2_DEFAULT_MAX_PIXELS = 4194304
+# Bailing V3 VL (Ling-3.0-flash-VL) processor token contract, measured from
+# the real BailingMM2 processor tokenizer (not the Qwen vocabulary).
+_BAILING_MM2_IMAGE_TOKEN_ID = 157157
+_BAILING_MM2_VISION_START_TOKEN_ID = 157158
+_BAILING_MM2_VISION_END_TOKEN_ID = 157159
 _BAILING_V3_KDA_CONV_STATE_COUNT = 3
 _DEFAULT_DRAFT_SLIDING_WINDOW = 2048
+# Review (stormchasingg 2026-10-22): a VL model running text-only varlen
+# batches fires the missing-geometry warning on every forward. ServingCast
+# profiling loops run hundreds to thousands of forwards (e.g. Kimi-K3
+# text-only throughput searches), so the warning is rate-limited to once
+# per model_id instead of flooding the log.
+_VARLEN_TEXT_ONLY_WARNED_MODELS: set[str] = set()
 
 
 def _is_deepseek_v41_config(config) -> bool:
@@ -80,6 +96,14 @@ class RequestInfo:
     image_batch_size: int = None
     image_height: int = None
     image_width: int = None
+    # Length contract between the serving-side chunk planner and the input
+    # generators. ``False`` (default): ``query_len``/``seq_len`` are text-only
+    # lengths and the generator adds ``num_image_tokens`` itself. ``True``:
+    # the caller (the chunk planner) already folded the image token budget
+    # into both lengths, so the generator must NOT add it a second time; the
+    # image inputs are still generated so the vision tower runs exactly once
+    # on the chunk that carries the image placeholders.
+    image_tokens_included: bool = False
     # CSA2 state belongs to the request/workload lifecycle, not the model
     # object.  Keeping it here prevents concurrent ModelRunner invocations from
     # sharing mutable compressor tails and top-k streams.
@@ -163,11 +187,19 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
             concurrency,
         )
         num_image_tokens = image_kwargs.pop("num_image_tokens", 0)
-        seq_len += num_image_tokens
+        # per-image geometry and provenance are input-generation
+        # metadata, not model forward inputs.
+        image_kwargs.pop("per_image", None)
+        image_kwargs.pop("image_resize_source", None)
+        if not request.image_tokens_included:
+            # Length contract: only add the image token budget when the caller
+            # passed text-only lengths (see RequestInfo.image_tokens_included).
+            # The chunk planner passes lengths that already include the budget.
+            seq_len += num_image_tokens
         if is_decode:
             # In the decode phase, the image input is removed, but the image token needs to be added to content_length
             image_kwargs = {}
-        else:
+        elif not request.image_tokens_included:
             query_len += num_image_tokens
     else:
         if request.image_batch_size is not None or request.image_height is not None or request.image_width is not None:
@@ -355,6 +387,18 @@ def resize_image(
             "max_pixels": max_pixels,
         }
 
+    def build_bailing_resize_params():
+        # Bailing MM2 never falls back to the Qwen pixel budget; see
+        # _load_bailing_vl_pixel_limits for the fail-closed contract.
+        min_pixels, max_pixels, _source = _load_bailing_vl_pixel_limits(model_id)
+        return {
+            "height": image_height,
+            "width": image_width,
+            "factor": factor,
+            "min_pixels": min_pixels,
+            "max_pixels": max_pixels,
+        }
+
     def build_glm_resize_params():
         return {
             "height": image_height,
@@ -384,6 +428,10 @@ def resize_image(
         "qwen3_vl_moe": (
             "transformers.models.qwen2_vl.image_processing_qwen2_vl",
             build_qwen_resize_params,
+        ),
+        "bailing_moe_v3_vl": (
+            "transformers.models.qwen2_vl.image_processing_qwen2_vl",
+            build_bailing_resize_params,
         ),
     }
 
@@ -449,6 +497,34 @@ def _load_qwen_vl_pixel_limits(model_id: str) -> tuple[int, int]:
 
 
 @lru_cache(maxsize=128)
+def _load_bailing_vl_pixel_limits(model_id: str) -> tuple[int, int, str]:
+    """Return ``(min_pixels, max_pixels, source)`` for the Bailing MM2 budget.
+
+    The BailingMM2ImageProcessor budget is the authoritative geometry
+    contract for ``bailing_moe_v3_vl``.  Unlike the Qwen path this never
+    falls back to Qwen defaults: when no local preprocessor_config.json
+    carries the budget, the Bailing contract constants are kept and the
+    miss is logged as a warning so simulation results can record which
+    budget was used.
+    """
+    min_pixels, max_pixels = _load_preprocessor_pixel_limits(model_id)
+    if min_pixels is not None and max_pixels is not None:
+        return min_pixels, max_pixels, "processor"
+    logger.warning(
+        "No preprocessor_config.json for model_id=%s; using the Bailing MM2 "
+        "default pixel budget (min=%d, max=%d) instead of the processor values.",
+        model_id,
+        _BAILING_MM2_DEFAULT_MIN_PIXELS,
+        _BAILING_MM2_DEFAULT_MAX_PIXELS,
+    )
+    return (
+        _BAILING_MM2_DEFAULT_MIN_PIXELS,
+        _BAILING_MM2_DEFAULT_MAX_PIXELS,
+        "default",
+    )
+
+
+@lru_cache(maxsize=128)
 def _load_preprocessor_pixel_limits(model_id: str):
     """
     Load image pixel limits from a local HF processor config.
@@ -482,7 +558,98 @@ def _load_preprocessor_pixel_limits(model_id: str):
         return None, None
 
 
-def generate_image_inputs(model, image_batch_size, image_height, image_width, concurrency):
+def resolve_multimodal_token_budget(model, image_batch_size, image_height, image_width) -> int:
+    """Return the per-request language-side token budget of the image inputs.
+
+    This is the pure-geometry half of ``generate_image_inputs`` (resize +
+    patch grid + placeholder contract) so callers that only need the token
+    count (for example the serving-side chunk planner) do not have to build
+    the meta tensors first. Any missing geometry returns 0 (no image input).
+    """
+    if image_batch_size is None or image_height is None or image_width is None:
+        return 0
+    hf_config = model.model_config.hf_config
+    vision_config = hf_config.vision_config
+    model_type = hf_config.model_type
+    if model_type == "deepseek_v41":
+        # Model-specific budget: DeepSeek V4.1's vision config has no
+        # spatial_merge_size/temporal_patch_size (it uses downsample_ratio
+        # and its own resize rules), so the generic Qwen-style formula below
+        # cannot resolve it. Reuse the same grid/span formula as the
+        # dedicated generator so the planner budget and the generator stay
+        # consistent (review: zhangzhenyu round 6).
+        vit_h, vit_w, llm_h, llm_w = _deepseek_v41_image_grid(image_height, image_width, vision_config)
+        image_span_tokens = llm_h * (llm_w + 1) + VISION_IMAGE_BOUNDARY_TOKEN_COUNT
+        return image_batch_size * image_span_tokens
+    if model_type == "step5_vl":
+        # Model-specific budget: Step5's dedicated generator has no
+        # spatial_merge_size/temporal_patch_size fields — it divides the
+        # patch grid by two stride-2 downsamplers ((grid + 3) // 4 per axis)
+        # instead of a 2x2 merge, so the generic Qwen-style formula below
+        # would differ by up to 4x and silently skew the chunk-plan budget
+        # (review: zhenghaojie). Reuse the generator's exact formula so the
+        # planner budget and the generator stay consistent.
+        patch = vision_config.patch_size
+        if not isinstance(patch, int) or patch <= 0:
+            raise ValueError(f"Step5 vision_config.patch_size must be a positive integer, got {patch!r}")
+        if image_height % patch or image_width % patch:
+            # Same pre-check as _generate_step5_image_inputs: the budget and
+            # the generator must both accept or both reject a geometry — a
+            # silent floor division here would still diverge from the
+            # generator's hard raise on the last row/column (review:
+            # AvadaKedavrua).
+            raise ValueError("Step5 image dimensions must be multiples of the vision patch size")
+        grid_h, grid_w = image_height // patch, image_width // patch
+        image_span_tokens = ((grid_h + 3) // 4) * ((grid_w + 3) // 4) + VISION_IMAGE_BOUNDARY_TOKEN_COUNT
+        return image_batch_size * image_span_tokens
+    patch_size = vision_config.patch_size
+    merge_size = vision_config.spatial_merge_size or 2
+    temporal_patch_size = vision_config.temporal_patch_size or 2
+    model_id = getattr(model, "model_id", "")
+    # No explicit _load_bailing_vl_pixel_limits call here: resize_image ->
+    # build_bailing_resize_params already resolves the Bailing pixel budget
+    # (lru_cache keeps the missing-config warning to one log), so calling it
+    # here would only duplicate the lookup.
+    resized_height, resized_width = resize_image(
+        model_id,
+        model_type,
+        image_height,
+        image_width,
+        patch_size=patch_size,
+        merge_size=merge_size,
+        temporal_patch_size=temporal_patch_size,
+    )
+    # For images grid_t is 1. Keep the formula aligned with
+    # generate_image_inputs (grid_t * grid_h * grid_w) so a future video
+    # path (grid_t > 1) cannot silently diverge between the planner budget
+    # and the generator.
+    grid_t = 1
+    grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
+    patch_rows = grid_t * grid_h * grid_w
+    merge_length = merge_size**2
+    return image_batch_size * (patch_rows // merge_length + VISION_IMAGE_BOUNDARY_TOKEN_COUNT)
+
+
+def generate_image_inputs(
+    model,
+    image_batch_size,
+    image_height,
+    image_width,
+    concurrency,
+    concurrency_is_per_rank=False,
+):
+    """Generate the multimodal forward inputs.
+
+    Args:
+        concurrency: the request count the image inputs are generated for.
+            The uniform path passes the *global* concurrency and this helper
+            shrinks it to the per-DP-rank share (the only place the DP
+            division happens). Callers that already hold the per-rank
+            request list (the varlen path) must pass
+            ``concurrency_is_per_rank=True`` to avoid dividing twice.
+        concurrency_is_per_rank: ``concurrency`` is already the per-rank
+            request count; skip the DP division.
+    """
     if image_batch_size is None or image_height is None or image_width is None:
         logger.info("Vision-language model is running without image input; skip the visual encoder.")
         return {}
@@ -495,6 +662,7 @@ def generate_image_inputs(model, image_batch_size, image_height, image_width, co
             image_height,
             image_width,
             concurrency,
+            concurrency_is_per_rank=concurrency_is_per_rank,
         )
     if hf_config.model_type == "step5_vl":
         return _generate_step5_image_inputs(
@@ -508,9 +676,25 @@ def generate_image_inputs(model, image_batch_size, image_height, image_width, co
     merge_size = vision_config.spatial_merge_size or 2
     # Rescales the image
     temporal_patch_size = vision_config.temporal_patch_size or 2
+    model_type = hf_config.model_type
+    model_id = getattr(model, "model_id", "")
+    resize_source = None
+    if model_type == "bailing_moe_v3_vl":
+        # P0-01 provenance: resolve the budget before resize_image so the
+        # missing-config warning fires once (lru_cache) and the source is
+        # recorded even when the resized geometry is reused. The debug line
+        # makes the provenance visible in actual run logs, not only in the
+        # returned metadata (review: Hudingyi).
+        _source = _load_bailing_vl_pixel_limits(model_id)
+        resize_source = _source[2]
+        logger.debug(
+            "Bailing VL pixel budget source=%s (model_id=%s).",
+            resize_source,
+            model_id,
+        )
     resized_height, resized_width = resize_image(
-        getattr(model, "model_id", ""),
-        hf_config.model_type,
+        model_id,
+        model_type,
         image_height,
         image_width,
         patch_size=patch_size,
@@ -521,10 +705,12 @@ def generate_image_inputs(model, image_batch_size, image_height, image_width, co
     # For images, the value of grid_t is 1.
     grid_t = 1
     grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
+    patch_rows = grid_t * grid_h * grid_w
+    merge_length = merge_size**2
     image_grid_thw = torch.tensor([[grid_t, grid_h, grid_w]], dtype=torch.long).expand(image_batch_size, 3)
     channel = vision_config.in_channels or 3
     hidden_dim = channel * temporal_patch_size * patch_size * patch_size
-    tokens = grid_t * grid_h * grid_w
+    tokens = patch_rows
     pixel_values = torch.empty(
         image_batch_size * tokens,
         hidden_dim,
@@ -532,16 +718,67 @@ def generate_image_inputs(model, image_batch_size, image_height, image_width, co
         device="meta",
     )
     # Calculate the token embedded in the text.
-    merge_length = merge_size**2
     num_image_tokens = image_batch_size * (tokens // merge_length + VISION_IMAGE_BOUNDARY_TOKEN_COUNT)
+    # Per-image span with a running text_offset (review: Hudingyi): the i-th
+    # image's placeholder span starts after the spans of images 0..i-1, so
+    # multi-image placeholder localization uses cumulative offsets instead
+    # of a constant 0 that would misplace every image but the first.
+    per_image = []
+    span_offset = 0
+    for _ in range(image_batch_size):
+        placeholder_len = tokens // merge_length + VISION_IMAGE_BOUNDARY_TOKEN_COUNT
+        per_image.append(
+            {
+                "grid_thw": [grid_t, grid_h, grid_w],
+                "patch_rows": patch_rows,
+                "merged_rows": tokens // merge_length,
+                "placeholder_len": placeholder_len,
+                "text_offset": span_offset,
+            }
+        )
+        span_offset += placeholder_len
+    # P0-02 build-time invariant: cross-field consistency of the per-image
+    # span against the projector-facing merged rows, the total
+    # ``num_image_tokens`` budget, and the placeholder layout. The three
+    # quantities are computed on independent paths, so this catches drift
+    # between them (the historical sum-form invariant was near-tautological
+    # because smart_resize aligns the grid; review: Hudingyi).
+    for index, item in enumerate(per_image):
+        if item["placeholder_len"] != item["merged_rows"] + VISION_IMAGE_BOUNDARY_TOKEN_COUNT:
+            raise ValueError(
+                "Bailing VL per-image placeholder invariant violated: placeholder_len="
+                f"{item['placeholder_len']} != merged_rows+{VISION_IMAGE_BOUNDARY_TOKEN_COUNT}="
+                f"{item['merged_rows'] + VISION_IMAGE_BOUNDARY_TOKEN_COUNT} at image {index}"
+            )
+        if item["merged_rows"] != item["patch_rows"] // merge_length:
+            raise ValueError(
+                "Bailing VL per-image geometry invariant violated: merged_rows="
+                f"{item['merged_rows']} != patch_rows//merge_size**2="
+                f"{item['patch_rows'] // merge_length} at image {index}"
+            )
+    if sum(item["placeholder_len"] for item in per_image) != num_image_tokens:
+        raise ValueError(
+            "Bailing VL total placeholder invariant violated: "
+            f"sum(placeholder_len)={sum(item['placeholder_len'] for item in per_image)} "
+            f"!= num_image_tokens={num_image_tokens} "
+            f"(grid={image_grid_thw.tolist()}, merge_size={merge_size}, "
+            f"image_batch_size={image_batch_size})"
+        )
     parallel_config = model.model_config.parallel_config
-    batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
+    if concurrency_is_per_rank:
+        # The caller already shrank the global concurrency to this rank's
+        # request list; dividing again would under-generate the images.
+        batch_size = concurrency
+    else:
+        batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
     pixel_values = pixel_values.repeat(batch_size, 1)
     image_grid_thw = image_grid_thw.repeat(batch_size, 1)
     return {
         "pixel_values": pixel_values,
         "image_grid_thw": image_grid_thw,
         "num_image_tokens": num_image_tokens,
+        "per_image": per_image,
+        "image_resize_source": resize_source,
     }
 
 
@@ -1810,6 +2047,121 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     query_lens = [r.query_len for r in requests]
     seq_lens = [r.seq_len for r in requests]
     is_decode_list = [r.is_decode for r in requests]
+    image_kwargs = {}
+    if model.is_vl_model:
+        # P0-14: varlen requests used to drop the image inputs
+        # silently. Generate the same multimodal inputs as the
+        # uniform path, mirroring its per-request semantics: every
+        # sequence grows by the image tokens, only prefill queries
+        # consume them, and decode-only batches remove the image
+        # input from forward while still accounting for the tokens.
+        #
+        # Chunks of the same request carry the image geometry only on the
+        # chunk that consumes the image placeholders (the serving-side
+        # chunk planner attaches it to the request's first chunk); the
+        # text-only chunks pass ``image_*=None`` and are legal alongside
+        # image-bearing rows.
+        for idx, request in enumerate(requests):
+            # Review (ChenHuiwen round 5): a request carrying partial image
+            # geometry (e.g. image_batch_size set while height/width are
+            # missing) used to slip into the image-bearing list, generate no
+            # image inputs, and silently simulate a text-only request. Fail
+            # fast on any partial configuration instead.
+            geometry = (request.image_batch_size, request.image_height, request.image_width)
+            if any(v is not None for v in geometry) and not all(v is not None for v in geometry):
+                raise ValueError(
+                    "varlen request carries partial image geometry; set all of "
+                    "image_batch_size/image_height/image_width or none of them "
+                    f"(image_batch_size={request.image_batch_size}, "
+                    f"image_height={request.image_height}, "
+                    f"image_width={request.image_width}) at index {idx}"
+                )
+        image_requests = [
+            (idx, request) for idx, request in enumerate(requests) if request.image_batch_size is not None
+        ]
+        if image_requests:
+            first_image = image_requests[0][1]
+            for idx, request in image_requests[1:]:
+                if (
+                    request.image_batch_size != first_image.image_batch_size
+                    or request.image_height != first_image.image_height
+                    or request.image_width != first_image.image_width
+                ):
+                    raise ValueError(
+                        "varlen multimodal batch requires uniform image parameters "
+                        "across image-bearing requests, got "
+                        f"(image_batch_size={first_image.image_batch_size}, image_height={first_image.image_height}, "
+                        f"image_width={first_image.image_width}) and "
+                        f"(image_batch_size={request.image_batch_size}, image_height={request.image_height}, "
+                        f"image_width={request.image_width}) at index {idx}"
+                    )
+            if any(is_decode_list) and not all(is_decode_list):
+                # The packed forward consumes the image kwargs once for
+                # the whole batch; a mixed prefill/decode batch has no
+                # defined placeholder semantics for the decode rows.
+                raise ValueError(
+                    "varlen multimodal batch with mixed prefill/decode requests "
+                    f"is not supported: is_decode_list={is_decode_list}"
+                )
+            image_kwargs = generate_image_inputs(
+                model,
+                first_image.image_batch_size,
+                first_image.image_height,
+                first_image.image_width,
+                len(image_requests),
+                concurrency_is_per_rank=True,
+            )
+            num_image_tokens = image_kwargs.pop("num_image_tokens", 0)
+            # per-image geometry and provenance are input-generation
+            # metadata, not model forward inputs.
+            image_kwargs.pop("per_image", None)
+            image_kwargs.pop("image_resize_source", None)
+            if num_image_tokens:
+                # Only the image-bearing rows grow by their image tokens
+                # (each such row carries the per-request image batch) — unless
+                # the caller already folded the image token budget into the
+                # per-row lengths (chunk-plan rows; see
+                # RequestInfo.image_tokens_included). The flag must be uniform
+                # across the image-bearing rows so one packed forward has a
+                # single length contract.
+                image_row_set = {idx for idx, _ in image_requests}
+                included_flags = {requests[idx].image_tokens_included for idx, _ in image_requests}
+                if len(included_flags) > 1:
+                    raise ValueError(
+                        "varlen multimodal batch must use a uniform image_tokens_included "
+                        "contract across image-bearing requests, got "
+                        f"{sorted(included_flags)}"
+                    )
+                image_tokens_included = included_flags.pop()
+                if not image_tokens_included:
+                    seq_lens = [
+                        sl + (num_image_tokens if idx in image_row_set else 0) for idx, sl in enumerate(seq_lens)
+                    ]
+                if all(is_decode_list):
+                    # In the decode phase the image input is removed, but
+                    # the image tokens still count toward content_length.
+                    image_kwargs = {}
+                elif not image_tokens_included:
+                    query_lens = [
+                        ql + (num_image_tokens if idx in image_row_set else 0) for idx, ql in enumerate(query_lens)
+                    ]
+        else:
+            # Whole batch declares no image geometry (the R3 gate: a VL
+            # model running a text-only varlen batch must not be silent).
+            # Partial configurations never reach here — they are rejected
+            # by the completeness check above — so this branch is either a
+            # genuinely text-only batch or chunked-prefill text-only chunks
+            # (image_*=None by design, they mix with image-bearing rows).
+            # The warning is emitted once per model_id (profiling loops run
+            # many text-only forwards; see _VARLEN_TEXT_ONLY_WARNED_MODELS).
+            model_id = getattr(model, "model_id", "")
+            if model_id not in _VARLEN_TEXT_ONLY_WARNED_MODELS:
+                logger.warning(
+                    "varlen requests missing image geometry; image inputs skipped "
+                    "(text-only batch on a vision-language model, model_id=%s)",
+                    model_id,
+                )
+                _VARLEN_TEXT_ONLY_WARNED_MODELS.add(model_id)
     num_tokens = sum(query_lens)
 
     query_start_loc = [0]
@@ -1852,6 +2204,13 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
 
     input_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
     position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
+    if model.model_config.hf_config.model_type == "deepseek_v41" and "pixel_values" in image_kwargs:
+        # Same contract as the uniform path (prepare_multimodal_embeddings
+        # requires these metadata when pixel_values are present); the varlen
+        # path used to omit them and fail the model's input contract (review:
+        # zhangzhenyu round 6).
+        image_kwargs["image_token_types"] = torch.empty_like(input_ids, dtype=torch.int8)
+        image_kwargs["image_token_mask"] = torch.empty_like(input_ids, dtype=torch.bool)
 
     kv_cache_by_layers, kv_cache_per_token = get_kv_cache_info(
         model,
@@ -1939,6 +2298,11 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
             _seed_deepseek_v41_draft_windows(model, kwargs["csa2_state"], batch_size)
         kwargs["engram_hash_state"] = _get_deepseek_v41_engram_state(model, requests)
         kwargs["engram_token_ids"] = torch.empty_like(input_ids)
+        if "image_token_mask" in image_kwargs:
+            # Mirrors the uniform path: the engram routing needs the image
+            # mask whenever image tokens are present (review: zhangzhenyu
+            # round 6).
+            kwargs["engram_token_mask"] = torch.empty_like(input_ids, dtype=torch.bool)
         kwargs["csa2_cache_ownership"] = _get_deepseek_v41_cache_ownership(model)
         kwargs["compressed_kv_cache_by_source"] = compressed_cache_by_source
         kwargs["compressed_kv_scale_cache_by_source"] = compressed_scale_cache_by_source
@@ -1983,6 +2347,7 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
         )
         kwargs["cache_position"] = cache_position
 
+    kwargs.update(image_kwargs)
     return kwargs
 
 
@@ -2038,13 +2403,25 @@ def _generate_deepseek_v41_image_inputs(
     image_height: int,
     image_width: int,
     concurrency: int,
+    concurrency_is_per_rank: bool = False,
 ) -> dict[str, Any]:
+    """Generate DeepSeek V4.1 image inputs (model-specific layout).
+
+    ``concurrency_is_per_rank`` follows the shared ``generate_image_inputs``
+    contract: when the caller already holds the per-rank request list (the
+    varlen path), the DP division must not run a second time (review:
+    zhangzhenyu round 6 — the varlen path passes per-rank concurrency, so
+    dividing again under-produced the images under DP>1).
+    """
     vision_config = model.model_config.hf_config.vision_config
     vit_h, vit_w, llm_h, llm_w = _deepseek_v41_image_grid(image_height, image_width, vision_config)
     patch = int(vision_config.patch_size)
     channels = int(getattr(vision_config, "in_channels", 3))
     parallel_config = model.model_config.parallel_config
-    batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
+    if concurrency_is_per_rank:
+        batch_size = concurrency
+    else:
+        batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
     num_images = batch_size * int(image_batch_size)
     pixel_values = torch.empty(
         num_images,
@@ -2111,4 +2488,11 @@ def get_inputs_num_bytes(model, requests: list[RequestInfo], block_size: int) ->
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].query_lens)
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].block_table_tensor)
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].slot_mapping)
+    # P0-14: multimodal inputs are host-to-device transfers too.
+    pixel_values = input_kwargs.get("pixel_values")
+    if pixel_values is not None:
+        inputs_num_bytes += bytes_of_tensor(pixel_values)
+    image_grid_thw = input_kwargs.get("image_grid_thw")
+    if image_grid_thw is not None:
+        inputs_num_bytes += bytes_of_tensor(image_grid_thw)
     return inputs_num_bytes

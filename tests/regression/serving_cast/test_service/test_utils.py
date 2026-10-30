@@ -152,7 +152,7 @@ class TestServiceUtils(unittest.TestCase):
         config = OptimizerData(input_length=4096, max_batched_tokens=8192)
         self.assertEqual(
             config.get_prefill_chunk_plan(),
-            [PrefillChunk(index=0, query_len=4096, seq_len=4096, is_last_chunk=True)],
+            [PrefillChunk(index=0, query_len=4096, seq_len=4096, is_last_chunk=True, is_first_chunk=True)],
         )
 
     def test_optimizer_data_prefill_chunk_plan_multiple_chunks(self):
@@ -160,7 +160,7 @@ class TestServiceUtils(unittest.TestCase):
         self.assertEqual(
             config.get_prefill_chunk_plan(),
             [
-                PrefillChunk(index=0, query_len=4096, seq_len=4096),
+                PrefillChunk(index=0, query_len=4096, seq_len=4096, is_first_chunk=True),
                 PrefillChunk(index=1, query_len=4096, seq_len=8192),
                 PrefillChunk(index=2, query_len=1808, seq_len=10000, is_last_chunk=True),
             ],
@@ -172,7 +172,7 @@ class TestServiceUtils(unittest.TestCase):
         self.assertEqual(
             config.get_prefill_chunk_plan(),
             [
-                PrefillChunk(index=0, query_len=3, seq_len=8),
+                PrefillChunk(index=0, query_len=3, seq_len=8, is_first_chunk=True),
                 PrefillChunk(index=1, query_len=2, seq_len=10, is_last_chunk=True),
             ],
         )
@@ -191,11 +191,11 @@ class TestServiceUtils(unittest.TestCase):
         self.assertEqual(
             config.get_prefill_chunk_plan(concurrency=4),
             [
-                PrefillChunk(index=0, query_len=50, seq_len=50, is_last_chunk=True),
-                PrefillChunk(index=0, query_len=50, seq_len=50, is_last_chunk=True),
-                PrefillChunk(index=0, query_len=100, seq_len=100),
+                PrefillChunk(index=0, query_len=50, seq_len=50, is_last_chunk=True, is_first_chunk=True),
+                PrefillChunk(index=0, query_len=50, seq_len=50, is_last_chunk=True, is_first_chunk=True),
+                PrefillChunk(index=0, query_len=100, seq_len=100, is_first_chunk=True),
                 PrefillChunk(index=1, query_len=50, seq_len=150, is_last_chunk=True),
-                PrefillChunk(index=1, query_len=150, seq_len=150, is_last_chunk=True),
+                PrefillChunk(index=1, query_len=150, seq_len=150, is_last_chunk=True, is_first_chunk=True),
             ],
         )
         chunk_plan = config.get_prefill_chunk_plan(concurrency=4)
@@ -211,7 +211,7 @@ class TestServiceUtils(unittest.TestCase):
         self.assertEqual(
             config.get_prefill_chunk_plan(concurrency=1),
             [
-                PrefillChunk(index=0, query_len=50, seq_len=125),
+                PrefillChunk(index=0, query_len=50, seq_len=125, is_first_chunk=True),
                 PrefillChunk(index=1, query_len=25, seq_len=150, is_last_chunk=True),
             ],
         )

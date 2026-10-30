@@ -33,4 +33,11 @@ def test_only_runtime_capture_imports_tensor_cast() -> None:
             if any(name == "tensor_cast" or name.startswith("tensor_cast.") for name in names):
                 importers.add(path.relative_to(package_root).as_posix())
 
-    assert importers == {"sources/runtime_capture.py"}
+    # ``domain/constants.py`` re-exports the shared vision geometry constant
+    # (``VISION_IMAGE_BOUNDARY_TOKEN_COUNT``) from
+    # ``tensor_cast.core.vision_geometry`` — the single-source-of-truth
+    # contract required by the Bailing VL input-geometry work (Issue #532:
+    # the previous local copy could silently diverge from the input
+    # generator's boundary count). It is a deliberate shared-constant
+    # dependency, not an accidental runtime dependency.
+    assert importers == {"sources/runtime_capture.py", "domain/constants.py"}

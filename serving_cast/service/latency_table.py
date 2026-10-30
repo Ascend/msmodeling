@@ -34,6 +34,13 @@ class ForwardShapeKey:
     image_batch_size: int | None = None
     image_height: int | None = None
     image_width: int | None = None
+    # Length contract flag mirrored from RequestInfo: when True the recorded
+    # query_len/seq_len already include the image token budget (chunk-plan
+    # rows) and the input generator must not add it again. Chunked-prefill
+    # keys also vary their image_* fields: only the first chunk of a request
+    # carries image forward inputs, later chunks are text-only — which makes
+    # the key space distinguish "vision tower runs" from "language only".
+    image_tokens_included: bool = False
 
 
 @dataclass(frozen=True)
