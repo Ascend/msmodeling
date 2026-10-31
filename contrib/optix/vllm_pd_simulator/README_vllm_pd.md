@@ -368,7 +368,7 @@ SSH agent 或标准默认密钥完成免密认证；`Host` 别名、`ProxyJump` 
 | `MooncakeLayerwiseConnector` | `load_balance_proxy_layerwise_server_example.py` | 按层传输 KV Cache（默认） |
 | `MooncakeConnectorV1` | `load_balance_proxy_server_example.py` | 整体传输 KV Cache |
 
-此外，`[vllm_pd.env]` 配置公共环境变量，`[vllm_pd.env.prefill]` / `[vllm_pd.env.decode]` 配置角色专属环境变量（覆盖同名公共变量）。
+此外，`[vllm_pd.env]` 配置公共环境变量（P/D/proxy 共享），`[vllm_pd.env.prefill]` / `[vllm_pd.env.decode]` / `[vllm_pd.env.proxy]` 配置角色专属环境变量（覆盖同名公共变量，只影响该角色）；proxy 节点自身还可写 `[vllm_pd.proxy] env = { … }`，优先级高于角色环境变量。
 
 ### 寻优参数 `[[vllm_pd.target_field]]`
 

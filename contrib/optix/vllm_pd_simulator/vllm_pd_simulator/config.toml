@@ -68,9 +68,9 @@ ssh_command_timeout = 30                  # 远端 SSH 短命令超时（秒）
 # remote_tmp_dir = "/tmp"  # ssh mode remote work dir, default /tmp
 
 # ======================== 环境变量 ========================
-# [vllm_pd.env] 公共环境变量（P/D 共享）
-# [vllm_pd.env.prefill] / [vllm_pd.env.decode] 角色专属环境变量
-# 公共变量会合并到 P 和 D，专属变量覆盖同名公共变量
+# [vllm_pd.env] 公共环境变量（P/D/proxy 共享）
+# [vllm_pd.env.prefill] / [vllm_pd.env.decode] / [vllm_pd.env.proxy] 角色专属环境变量
+# 公共变量会合并到 P、D 和 proxy，专属变量覆盖同名公共变量（只影响该角色）
 # ---------------------------------------------------------------------------
 
 [vllm_pd.env]
@@ -91,6 +91,10 @@ HCCL_BUFFSIZE = "256"
 [vllm_pd.env.decode]
 role = "decode"
 HCCL_BUFFSIZE = "1024"
+
+# Proxy 专属环境变量（可选；proxy 是独立进程，公共变量同样会下发到它）
+# [vllm_pd.env.proxy]
+# NO_PROXY = "127.0.0.1,localhost"
 
 # ======================== P-Deployer 组配置 ========================
 # [[vllm_pd.prefill_groups]] Prefill 部署组（至少一组）

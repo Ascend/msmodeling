@@ -170,10 +170,15 @@ class VLLMPDDisaggConfig(BaseModel):
     )
     env_prefill: Dict[str, str] = Field(default_factory=dict, description="P 侧环境变量")
     env_decode: Dict[str, str] = Field(default_factory=dict, description="D 侧环境变量")
+    env_proxy: Dict[str, str] = Field(default_factory=dict, description="Proxy 侧环境变量")
     ascend_base_port: Optional[int] = Field(
         default=None,
         description="实例级 Ascend Direct Transport 基础端口（节点未配置时回落到此值）",
     )
+
+
+_ENV_ROLE_BUCKETS = {"prefill": "env_prefill", "decode": "env_decode", "proxy": "env_proxy"}
+_ENV_BUCKETS = tuple(_ENV_ROLE_BUCKETS.values())
 
 
 def _normalize_proxy_fields(proxy_data: dict):
@@ -252,36 +257,56 @@ def load_pd_config() -> Optional[VLLMPDDisaggConfig]:
             if proxy_data:
                 _resolve_host_ref(proxy_data, hosts_map)
 
-        # Map environment variables to env_prefill/env_decode, supporting two formats:
-        # 1. [[vllm_pd.env]] array format (each entry may carry a role)
+        # Map environment variables to env_prefill/env_decode/env_proxy, supporting two formats:
+        # 1. [[vllm_pd.env]] array format (each entry may carry a role: prefill/decode/proxy)
         # 2. [vllm_pd.env] table format (common variables written directly in the table,
-        #    with prefill/decode as sub-tables)
+        #    with prefill/decode/proxy as sub-tables)
+        # Common variables apply to all three roles; a role-specific table overrides the common one
+        # for that role only. Proxy is a separate process on the proxy node, so it must be rendered
+        # with its own env bucket (before this, config env never reached the proxy script).
         env_data = plugin_data.pop("env", [])
         if isinstance(env_data, list):
-            # Array format
+            # Array format: collect common and role-specific variables first, then apply
+            # common (low) before role-specific (high). Updating the buckets inline made a
+            # role entry lose to a later common entry, so the effective precedence depended
+            # on declaration order instead of the documented "role overrides common".
+            common_env: Dict[str, str] = {}
+            role_env: Dict[str, Dict[str, str]] = {role: {} for role in _ENV_ROLE_BUCKETS}
             for entry in env_data:
-                role = entry.pop("role", "")
-                if role == "prefill":
-                    plugin_data.setdefault("env_prefill", {}).update(entry)
-                elif role == "decode":
-                    plugin_data.setdefault("env_decode", {}).update(entry)
+                item = dict(entry)
+                role = item.pop("role", "")
+                if role in role_env:
+                    role_env[role].update(item)
                 else:
-                    # Common env var without a role, merged into both P and D
-                    plugin_data.setdefault("env_prefill", {}).update(entry)
-                    plugin_data.setdefault("env_decode", {}).update(entry)
+                    if role:
+                        logger.warning(f"[vllm_pd.env] unknown role '{role}', treating its variables as common")
+                    common_env.update(item)
+            for bucket in _ENV_BUCKETS:
+                plugin_data.setdefault(bucket, {}).update(common_env)
+            for role, bucket in _ENV_ROLE_BUCKETS.items():
+                plugin_data.setdefault(bucket, {}).update(role_env[role])
         elif isinstance(env_data, dict):
-            # Table format: common variables directly in the env table, with prefill/decode as sub-tables
-            prefill_env = env_data.pop("prefill", None)
-            decode_env = env_data.pop("decode", None)
-            # The remaining are common variables, merged into both P and D
-            plugin_data.setdefault("env_prefill", {}).update(env_data)
-            plugin_data.setdefault("env_decode", {}).update(env_data)
-            if prefill_env:
-                prefill_env.pop("role", None)
-                plugin_data.setdefault("env_prefill", {}).update(prefill_env)
-            if decode_env:
-                decode_env.pop("role", None)
-                plugin_data.setdefault("env_decode", {}).update(decode_env)
+            # Table format: common variables directly in the env table, with role sub-tables.
+            # A role key that is not a table is kept as a plain common variable instead of
+            # being popped and crashed on (that used to abort the whole config and silently
+            # fall back to the default all-localhost cluster).
+            role_tables: Dict[str, Dict[str, str]] = {}
+            for role in _ENV_ROLE_BUCKETS:
+                sub = env_data.pop(role, None)
+                if isinstance(sub, dict):
+                    sub.pop("role", None)
+                    role_tables[role] = sub
+                elif sub is not None:
+                    logger.warning(
+                        f"[vllm_pd.env] '{role}' is not a table of variables "
+                        f"(got {type(sub).__name__}); treated as a common variable"
+                    )
+                    env_data[role] = sub
+            # The remaining are common variables, merged into P, D and proxy
+            for bucket in _ENV_BUCKETS:
+                plugin_data.setdefault(bucket, {}).update(env_data)
+            for role, bucket in _ENV_ROLE_BUCKETS.items():
+                plugin_data.setdefault(bucket, {}).update(role_tables.get(role, {}))
 
         # Legacy config.toml compatibility: nodes in prefill_groups/decode_groups and
         # proxy may use host/port (node) or host/proxy_port (proxy) field names; map

@@ -122,6 +122,17 @@ class _RemoteProcessPlaceholder:
         return f"_RemoteProcessPlaceholder({self._name!r})"
 
 
+def _proxy_env_map(config, proxy) -> dict:
+    """Proxy 侧最终环境变量：角色 env（`[vllm_pd.env]` 公共 + `[vllm_pd.env.proxy]`）低，节点 env（`[vllm_pd.proxy] env`）高。
+
+    与 P/D 侧的合并顺序一致（角色 env 被节点/组 env 覆盖）。缺了这一步，proxy 脚本里只剩模板写死的
+    LD_LIBRARY_PATH，配置里 `[vllm_pd.env]` / `[vllm_pd.env.proxy]` 配的变量全部不生效。
+    """
+    merged = dict(getattr(config, "env_proxy", None) or {})
+    merged.update(getattr(proxy, "env", None) or {})
+    return merged
+
+
 def _clean_rendered_shell(content: str) -> str:
     """Remove blank lines and lines with only spaces/backslash after rendering."""
     lines = content.splitlines()
@@ -983,7 +994,7 @@ class PdClusterSimulator(SimulatorInterface):
         proxy = self.config.proxy
         scripts_dir = self._get_scripts_dir()
 
-        extra_env = {}
+        extra_env = _proxy_env_map(self.config, proxy)
         env_targets = "\n".join(f"export {k}={shell_quote(v)}" for k, v in extra_env.items())
         run_envs_lines = []
         for env_key, env_val in os.environ.items():
