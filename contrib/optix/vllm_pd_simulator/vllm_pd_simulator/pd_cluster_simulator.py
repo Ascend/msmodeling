@@ -31,6 +31,7 @@ from collections import defaultdict
 from typing import ClassVar, Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
+from invoke.exceptions import CommandTimedOut
 from loguru import logger
 
 from optix.optimizer.interfaces.simulator import SimulatorInterface
@@ -168,6 +169,9 @@ class PdClusterSimulator(SimulatorInterface):
 
         # Auto-detect MoE model: read config.json from the main framework's vllm.command.model path
         self._is_moe = detect_is_moe(self.model_path)
+        # The run templates use the group-level DP RPC port only for MoE. The
+        # coordinator address belongs to the first node, so do not scan this
+        # port in peer containers where an unrelated service may own it.
         if self._is_moe:
             logger.info(f"Detected MoE model at {self.model_path}")
 
@@ -1167,18 +1171,61 @@ class PdClusterSimulator(SimulatorInterface):
             except Exception as e:
                 logger.warning(f"[{key}] upload error: {e}")
 
+    def _cleanup_targets_for_node(self, node) -> tuple[str, str]:
+        """Collect every GPU and runtime port owned by a container."""
+        key = self._container_key(node)
+        gpu_ids: set[int] = set()
+        ports: set[int] = set()
+
+        for candidate in self._all_nodes():
+            if self._container_key(candidate) != key:
+                continue
+            gpu_ids.update(getattr(candidate, "gpu_ids", []) or [])
+            is_proxy = candidate is getattr(self.config, "proxy", None) or getattr(candidate, "role", "") == "proxy"
+            port_attrs = ("service_port",) if is_proxy else ("service_port", "kv_port")
+            for attr in port_attrs:
+                value = getattr(candidate, attr, None)
+                if value:
+                    ports.add(int(value))
+
+        if self._is_moe:
+            for group in self.config.prefill_groups + self.config.decode_groups:
+                coordinator = group.nodes[0] if group.nodes else None
+                if coordinator is None or self._container_key(coordinator) != key:
+                    continue
+                if group.dp_rpc_port:
+                    ports.add(int(group.dp_rpc_port))
+
+        for info in self._node_infos or []:
+            candidate = info.get("_node_config")
+            if candidate is None or self._container_key(candidate) != key:
+                continue
+            label = info.get("label", "")
+            if label.startswith(("P-", "D-")):
+                resources = self._calc_process_resources(
+                    label[0], candidate, info.get("_local_dp_rank", info.get("_dp_rank", 0))
+                )
+                ports.update(int(resources[name]) for name in ("port", "kv_port"))
+            elif info.get("port"):
+                ports.add(int(info["port"]))
+
+        return ",".join(str(gpu) for gpu in sorted(gpu_ids)), ",".join(str(port) for port in sorted(ports))
+
+    def _cleanup_command_args(self, node) -> str:
+        gpu_ids, ports = self._cleanup_targets_for_node(node)
+        args = ""
+        if gpu_ids:
+            args += f" --gpus {gpu_ids}"
+        if ports:
+            args += f" --port {ports}"
+        return args
+
     def _stop_node(self, node, *, label: str = "") -> object:
         """Stop residual processes on a single node via stop_pd_process.sh.
-        Shared by _cleanup_all_nodes (full cleanup) and _kill_all_processes (restart kill).
+        Shared by full cleanup, restart cleanup, and best-effort shutdown.
         """
         executor = self._exec_for_node(node)
-        gpu_ids = ",".join(str(g) for g in getattr(node, "gpu_ids", []))
-        proxy_port = str(getattr(self.config.proxy, "service_port", "")) if getattr(self.config, "proxy", None) else ""
-        extra_args = ""
-        if gpu_ids:
-            extra_args += f" --gpus {gpu_ids}"
-        if proxy_port:
-            extra_args += f" --port {proxy_port}"
+        extra_args = self._cleanup_command_args(node)
         stop_grace = getattr(self.config, "stop_grace_timeout", 30)
         stop_kill = getattr(self.config, "stop_kill_timeout", 10)
         stop_timeout = self._ssh_cmd_timeout + stop_grace + stop_kill
@@ -1193,62 +1240,68 @@ class PdClusterSimulator(SimulatorInterface):
     def _cleanup_all_nodes(self):
         """Stage 2: check for residual processes on all remote servers and force-stop them.
 
-        Only the GPUs and proxy port that this node is about to use are checked, to avoid
-        killing unrelated processes. Deduplication is independent per container.
+        Every GPU and P/D/proxy port assigned to the container is checked. Cleanup is
+        verified before the next case may start, so stale workers cannot cause a false
+        health check or an address conflict in a later case.
         """
         seen: set = set()
+        failures = []
         for node in self._all_nodes():
             key = self._container_key(node)
             if key in seen:
                 continue
             seen.add(key)
+            phase = "initial check"
+            phase_timeout = self._ssh_cmd_timeout
             try:
                 executor = self._exec_for_node(node)
-                gpu_ids = ",".join(str(g) for g in getattr(node, "gpu_ids", []))
-                proxy_port = (
-                    str(getattr(self.config.proxy, "service_port", "")) if getattr(self.config, "proxy", None) else ""
+                extra_args = self._cleanup_command_args(node)
+                check_command = (
+                    f'REMOTE_DIR={shlex.quote(self._remote_dir)} bash '
+                    f'{shlex.quote(self._remote_dir + "/check_pd_process.sh")}{extra_args}'
                 )
-                extra_args = ""
-                if gpu_ids:
-                    extra_args += f" --gpus {gpu_ids}"
-                if proxy_port:
-                    extra_args += f" --port {proxy_port}"
                 check = executor.run(
-                    f'REMOTE_DIR={shlex.quote(self._remote_dir)} bash {shlex.quote(self._remote_dir + "/check_pd_process.sh")}{extra_args}',
+                    check_command,
                     hide=True,
                     warn=True,
                     timeout=self._ssh_cmd_timeout,
                 )
                 if check.stdout.strip():
                     logger.warning(f"[{key}] residual processes:\n{check.stdout.strip()}")
-                # stop（复用 _stop_node helper，返回 stop 结果供返回码检查）
+                phase = "stop"
+                phase_timeout = (
+                    self._ssh_cmd_timeout
+                    + getattr(self.config, "stop_grace_timeout", 30)
+                    + getattr(self.config, "stop_kill_timeout", 10)
+                )
                 stop = self._stop_node(node, label=key)
                 logger.info(f"[{key}] cleanup:\n{stop.stdout.strip()}")
                 if getattr(stop, "failed", False) or getattr(stop, "returncode", 0) != 0:
-                    logger.error(
-                        f"[{key}] stop did NOT fully release ports/processes "
-                        f"(rc={getattr(stop, 'returncode', '?')}); may cause false-ready. "
-                        f"stdout={stop.stdout.strip()[-300:]}"
+                    failures.append(
+                        f"{key}: stop failed (rc={getattr(stop, 'returncode', '?')}): "
+                        f"{(getattr(stop, 'stdout', '') or '')[-300:]}"
                     )
-                # 宿主侧端口释放复核（docker 防御）：docker 场景 stop 在容器内执行，
-                # 容器端口释放后宿主映射端口（docker userland proxy）有亚秒级拆除延迟，
-                # 而 wait_simulate 探活在宿主侧 curl 127.0.0.1:{mapped_port}。补一次宿主侧复核。
-                if proxy_port:
-                    host_check = executor.run(
-                        f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 2 http://127.0.0.1:{proxy_port}/health || true",
-                        container_exec=False,
-                        hide=True,
-                        warn=True,
-                        timeout=10,
+                phase = "verification"
+                phase_timeout = self._ssh_cmd_timeout
+                verify = executor.run(
+                    check_command,
+                    hide=True,
+                    warn=True,
+                    timeout=self._ssh_cmd_timeout,
+                )
+                if getattr(verify, "failed", False) or getattr(verify, "returncode", 0) != 0:
+                    failures.append(
+                        f"{key}: residual processes remain after cleanup: "
+                        f"{(getattr(verify, 'stdout', '') or '')[-500:]}"
                     )
-                    code = (host_check.stdout or "").strip().strip("'")
-                    if code == "200":
-                        logger.error(
-                            f"[{key}] proxy port {proxy_port} still serves 200 after stop "
-                            f"(docker proxy lag or residual process); will likely false-ready"
-                        )
+            except CommandTimedOut as e:
+                timeout = getattr(e, "timeout", phase_timeout)
+                failures.append(f"{key}: {phase} timed out after {timeout}s; cleanup state is unknown")
             except Exception as e:
-                logger.warning(f"[{key}] cleanup failed: {e}")
+                failures.append(f"{key}: {phase} failed: {e}")
+
+        if failures:
+            raise RuntimeError("PD process cleanup failed; refusing to start the next case: " + "; ".join(failures))
 
     def _all_nodes(self):
         """Return the list of all remote node configs (P + D + Proxy)."""
@@ -1305,59 +1358,41 @@ class PdClusterSimulator(SimulatorInterface):
         }
 
     def _cleanup_node(self, node, port: int | None = None, *, label: str = "") -> None:
-        """Single-node cleanup before restart: stop residual processes on this node's
-        GPUs/ports, wait for port release. Only touches this node's resources, does not
-        affect other nodes.
+        """Container cleanup before restart: stop residual processes on this container's
+        GPUs/ports and wait for release without affecting other containers.
 
         Called by _restart_node before relaunching: the old main process has EXITED but
         child workers (VLLM::Worker) may still hold GPU memory / ports. stop_pd_process.sh
-        with --gpus + --port targets only this node's resources.
+        with --gpus + --port targets only resources assigned to the same container.
         """
+        key = self._container_key(node)
+        logger.info(f"[{key}] cleanup before restart")
         try:
+            stop = self._stop_node(node, label=label or key)
+        except CommandTimedOut as e:
+            raise RuntimeError(f"cleanup before restart timed out after {e.timeout}s") from e
+
+        output = (getattr(stop, "stdout", "") or "").strip()
+        logger.info(f"[{key}] cleanup done: {output[-200:]}")
+        if getattr(stop, "failed", False) or getattr(stop, "returncode", 0) != 0:
+            raise RuntimeError(
+                f"cleanup before restart did not release all target resources "
+                f"(rc={getattr(stop, 'returncode', '?')}): {output[-300:]}"
+            )
+
+        proxy_port = str(port) if port else ""
+        if proxy_port and label.startswith("proxy_"):
             executor = self._exec_for_node(node)
-            gpu_ids = ",".join(str(g) for g in getattr(node, "gpu_ids", []))
-            proxy_port = str(port) if port else ""
-            extra_args = ""
-            if gpu_ids:
-                extra_args += f" --gpus {gpu_ids}"
-            if proxy_port:
-                extra_args += f" --port {proxy_port}"
-            stop_grace = getattr(self.config, "stop_grace_timeout", 30)
-            stop_kill = getattr(self.config, "stop_kill_timeout", 10)
-            stop_timeout = self._ssh_cmd_timeout + stop_grace + stop_kill
-            logger.info(f"[{getattr(node, 'ssh_ip', '?')}] cleanup before restart: gpus={gpu_ids} port={proxy_port}")
-            stop = executor.run(
-                f'STOP_GRACE_TIMEOUT={stop_grace} STOP_KILL_TIMEOUT={stop_kill} '
-                f'REMOTE_DIR={shlex.quote(self._remote_dir)} bash {shlex.quote(self._remote_dir + "/stop_pd_process.sh")}{extra_args}',
+            host_check = executor.run(
+                f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 2 http://127.0.0.1:{proxy_port}/health || true",
+                container_exec=False,
                 hide=True,
                 warn=True,
-                timeout=stop_timeout,
+                timeout=10,
             )
-            logger.info(f"[{getattr(node, 'ssh_ip', '?')}] cleanup done: {stop.stdout.strip()[-200:]}")
-            if getattr(stop, "failed", False) or getattr(stop, "returncode", 0) != 0:
-                logger.error(
-                    f"[{getattr(node, 'ssh_ip', '?')}] cleanup did NOT fully release "
-                    f"ports/processes (rc={getattr(stop, 'returncode', '?')}); "
-                    f"restart may hit port conflict. stdout={stop.stdout.strip()[-300:]}"
-                )
-            # docker 场景宿主侧复核：仅 proxy 端口映射到宿主（P/D 的 /health 在容器内，
-            # 宿主侧 curl 不通属正常），与 _cleanup_all_nodes 的宿主侧复核保持一致。
-            if proxy_port and label.startswith("proxy_"):
-                host_check = executor.run(
-                    f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 2 http://127.0.0.1:{proxy_port}/health || true",
-                    container_exec=False,
-                    hide=True,
-                    warn=True,
-                    timeout=10,
-                )
-                code = (host_check.stdout or "").strip().strip("'")
-                if code == "200":
-                    logger.error(
-                        f"[{getattr(node, 'ssh_ip', '?')}] port {proxy_port} still serves "
-                        f"200 after cleanup; restart may fail"
-                    )
-        except Exception as e:  # noqa: BLE001 - cleanup failure must not block restart; warn only
-            logger.warning(f"[{getattr(node, 'ssh_ip', '?')}] cleanup failed: {e}")
+            code = (host_check.stdout or "").strip().strip("'")
+            if code == "200":
+                raise RuntimeError(f"proxy port {proxy_port} still serves HTTP 200 after cleanup")
 
     def _restart_node(self, info: dict, node_infos: list = None) -> Optional[int]:
         label = info["label"]
@@ -1390,7 +1425,11 @@ class PdClusterSimulator(SimulatorInterface):
         # 重试前清场：旧主进程已 EXITED，但子进程（VLLM::Worker）可能仍持有显存/端口；
         # 先对目标节点执行 stop_pd_process.sh（--gpus + --port 精准清场，不误杀其他节点），
         # 等端口释放后再拉新进程，避免 Address already in use / OOM。
-        self._cleanup_node(node, port=info.get("port"), label=info.get("label", ""))
+        try:
+            self._cleanup_node(node, port=info.get("port"), label=info.get("label", ""))
+        except Exception as e:  # noqa: BLE001 - a failed cleanup must abort only this restart attempt
+            logger.error(f"[{label}] cleanup before restart failed; refusing to relaunch: {e}")
+            return None
 
         if label.startswith("P-") or label.startswith("D-"):
             role = label[0]

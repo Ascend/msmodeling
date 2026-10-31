@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+import os
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import importlib
@@ -57,6 +59,18 @@ def _install_heavy_dep_mocks():
         fab = _make_module("fabric")
         fab.Config = MagicMock()
         fab.Connection = MagicMock()
+    if "invoke.exceptions" not in sys.modules:
+        invoke = sys.modules.get("invoke") or _make_module("invoke")
+        invoke_exceptions = _make_module("invoke.exceptions")
+
+        class CommandTimedOut(Exception):
+            def __init__(self, result, timeout):
+                super().__init__(f"Command timed out after {timeout} second(s)")
+                self.result = result
+                self.timeout = timeout
+
+        invoke_exceptions.CommandTimedOut = CommandTimedOut
+        invoke.exceptions = invoke_exceptions
 
 
 _install_heavy_dep_mocks()
@@ -1133,7 +1147,7 @@ class TestPdRemoteDir(unittest.TestCase):
         obj._container_key = lambda n: "key1"
         obj.config.proxy = None
         executor = MagicMock()
-        executor.run.return_value = MagicMock(stdout="")
+        executor.run.return_value = MagicMock(stdout="", failed=False, returncode=0)
         obj._exec_for_node = lambda n: executor
         obj._cleanup_all_nodes()
         self.assertTrue(executor.run.called)
@@ -1142,6 +1156,166 @@ class TestPdRemoteDir(unittest.TestCase):
         )
         self.assertIn("REMOTE_DIR=", cmds)
         self.assertIn(f"{obj._remote_tmp_dir}/vllm_pd_5", cmds)
+
+    def test_cleanup_targets_cover_all_pd_ports_in_same_container(self):
+        obj = _make_pd()
+        prefill = _types.SimpleNamespace(gpu_ids=[0, 1], service_port=8100, kv_port=31000, rpc_port=29000)
+        decode = _types.SimpleNamespace(gpu_ids=[2, 3], service_port=8200, kv_port=32000, rpc_port=29500)
+        proxy = _types.SimpleNamespace(gpu_ids=[], service_port=2001, kv_port=None, rpc_port=None)
+        for node in (prefill, decode, proxy):
+            node.container_key = "shared"
+        obj._all_nodes = lambda: [prefill, decode, proxy]
+        obj._container_key = lambda node: node.container_key
+        obj.config.prefill_groups = [_types.SimpleNamespace(nodes=[prefill], dp_rpc_port=12345)]
+        obj.config.decode_groups = [_types.SimpleNamespace(nodes=[decode], dp_rpc_port=12356)]
+        obj._node_infos = [
+            {"label": "P-I0-R1", "_node_config": prefill, "_dp_rank": 1, "_local_dp_rank": 1},
+            {"label": "D-I0-R0", "_node_config": decode, "_dp_rank": 0, "_local_dp_rank": 0},
+            {"label": "proxy", "_node_config": proxy, "port": 2001},
+        ]
+
+        gpu_ids, ports = obj._cleanup_targets_for_node(prefill)
+
+        self.assertEqual(gpu_ids, "0,1,2,3")
+        self.assertEqual(
+            ports,
+            "2001,8100,8101,8200,12345,12356,31000,31001,32000",
+        )
+
+    def test_cleanup_targets_add_dp_rpc_port_only_to_coordinator_container(self):
+        obj = _make_pd()
+        coordinator = _types.SimpleNamespace(
+            container_key="coordinator", gpu_ids=[0], service_port=8100, kv_port=31000, rpc_port=29500
+        )
+        peer = _types.SimpleNamespace(
+            container_key="peer", gpu_ids=[1], service_port=8200, kv_port=32000, rpc_port=29600
+        )
+        obj._all_nodes = lambda: [coordinator, peer]
+        obj._container_key = lambda node: node.container_key
+        obj.config.prefill_groups = [_types.SimpleNamespace(nodes=[coordinator, peer], dp_rpc_port=12345)]
+        obj.config.decode_groups = []
+        obj._node_infos = []
+
+        _, coordinator_ports = obj._cleanup_targets_for_node(coordinator)
+        _, peer_ports = obj._cleanup_targets_for_node(peer)
+
+        self.assertEqual(coordinator_ports, "8100,12345,31000")
+        self.assertEqual(peer_ports, "8200,32000")
+
+    def test_cleanup_targets_exclude_dp_rpc_port_for_dense_model(self):
+        obj = _make_pd(_is_moe=False)
+        node = _types.SimpleNamespace(
+            container_key="dense", gpu_ids=[0], service_port=8100, kv_port=31000, rpc_port=29500
+        )
+        obj._all_nodes = lambda: [node]
+        obj._container_key = lambda unused: "dense"
+        obj.config.prefill_groups = [_types.SimpleNamespace(nodes=[node], dp_rpc_port=12345)]
+        obj.config.decode_groups = []
+        obj._node_infos = []
+
+        _, ports = obj._cleanup_targets_for_node(node)
+
+        self.assertEqual(ports, "8100,31000")
+
+    def test_cleanup_targets_exclude_unused_proxy_default_ports(self):
+        obj = _make_pd()
+        proxy = _make_node([], role="proxy", service_port=2001)
+        obj.config.proxy = proxy
+        obj._all_nodes = lambda: [proxy]
+        obj._container_key = lambda unused: "proxy-container"
+        obj._node_infos = [{"label": "proxy_test", "_node_config": proxy, "port": 2001}]
+
+        gpu_ids, ports = obj._cleanup_targets_for_node(proxy)
+
+        self.assertEqual(gpu_ids, "")
+        self.assertEqual(ports, "2001")
+
+    def test_cleanup_refuses_next_case_when_processes_remain(self):
+        obj = _make_pd()
+        node = _types.SimpleNamespace(gpu_ids=[0], service_port=8100, kv_port=31000, rpc_port=29000)
+        obj._all_nodes = lambda: [node]
+        obj._container_key = lambda unused: "node-a"
+        obj._node_infos = []
+        executor = MagicMock()
+        executor.run.side_effect = [
+            MagicMock(stdout="  PID=101  CMD=vllm serve", failed=True, returncode=1),
+            MagicMock(stdout="  PID=102  CMD=VLLM::EngineCore", failed=True, returncode=1),
+        ]
+        obj._exec_for_node = lambda unused: executor
+        obj._stop_node = MagicMock(return_value=MagicMock(stdout="stopped", failed=False, returncode=0))
+
+        with self.assertRaisesRegex(RuntimeError, "refusing to start the next case"):
+            obj._cleanup_all_nodes()
+
+        self.assertEqual(executor.run.call_count, 2)
+        obj._stop_node.assert_called_once_with(node, label="node-a")
+
+    def test_cleanup_reports_command_timeout_separately(self):
+        from invoke.exceptions import CommandTimedOut
+
+        obj = _make_pd()
+        node = _types.SimpleNamespace(gpu_ids=[0], service_port=8100, kv_port=31000, rpc_port=29000)
+        obj._all_nodes = lambda: [node]
+        obj._container_key = lambda unused: "node-a"
+        obj._node_infos = []
+        executor = MagicMock()
+        executor.run.side_effect = CommandTimedOut(MagicMock(), timeout=30)
+        obj._exec_for_node = lambda unused: executor
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "node-a: initial check timed out after 30s; cleanup state is unknown",
+        ):
+            obj._cleanup_all_nodes()
+
+
+class TestPdCleanupScripts(unittest.TestCase):
+    def test_check_ignores_npu_smi_pid_outside_container_namespace(self):
+        script = (ROOT / "contrib/optix/vllm_pd_simulator/vllm_pd_simulator/scripts/pd/check_pd_process.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('[ ! -r "/proc/$wpid/cmdline" ]', script)
+        self.assertIn('_is_target "$wpid" || continue', script)
+        self.assertIn('VISIBLE_PIDS=""', script)
+
+    def test_stop_kills_processes_discovered_during_recheck(self):
+        script = (ROOT / "contrib/optix/vllm_pd_simulator/vllm_pd_simulator/scripts/pd/stop_pd_process.sh").read_text(
+            encoding="utf-8"
+        )
+        recheck = script.index('RECHECK_OUTPUT=$(REMOTE_DIR="$REMOTE_DIR"')
+        kill_new = script.index("for pid in $PORT_STILL; do", recheck)
+        sleep = script.index("sleep 1", recheck)
+        self.assertLess(kill_new, sleep)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux process and shell semantics")
+    def test_check_fails_when_non_target_process_owns_port(self):
+        script = ROOT / "contrib/optix/vllm_pd_simulator/vllm_pd_simulator/scripts/pd/check_pd_process.sh"
+        process = subprocess.Popen(["sleep", "30"])
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                fake_netstat = Path(tmp_dir) / "netstat"
+                fake_netstat.write_text(
+                    f"#!/bin/sh\nprintf 'tcp 0 0 0.0.0.0:48126 0.0.0.0:* LISTEN {process.pid}/sleep\\n'\n",
+                    encoding="utf-8",
+                )
+                fake_netstat.chmod(0o755)
+                env = os.environ.copy()
+                env["PATH"] = f"{tmp_dir}:{env['PATH']}"
+
+                result = subprocess.run(
+                    ["bash", str(script), "--port", "48126"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("still listening", result.stderr)
+            self.assertIsNone(process.poll(), "check script must not kill a non-target port owner")
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
 
 
 class TestPdRestartNodeCleanup(unittest.TestCase):
@@ -1195,6 +1369,40 @@ class TestPdRestartNodeCleanup(unittest.TestCase):
         mock_build.assert_called_once()
         mock_calc.assert_called_once()
         self.assertEqual(new_pid, 999)
+
+    def test_cleanup_node_raises_when_stop_fails(self):
+        obj = _make_pd()
+        node = _make_node([0, 1], role="prefill", ssh_ip="10.0.0.1")
+        obj._container_key = lambda unused: "node-a"
+        obj._stop_node = MagicMock(return_value=MagicMock(stdout="target resources remain", failed=True, returncode=1))
+
+        with self.assertRaisesRegex(RuntimeError, "did not release all target resources"):
+            obj._cleanup_node(node, port=18080, label="P-I0-R0")
+
+    def test_restart_aborts_when_cleanup_fails(self):
+        from unittest.mock import patch
+
+        obj = _make_pd()
+        node = _make_node([0, 1], role="prefill", ssh_ip="10.0.0.1")
+        info = {
+            "label": "P-I0-R0-T2-D1-EP2_10.0.0.1_22_none",
+            "pid": 123,
+            "port": 18080,
+            "_node_config": node,
+            "_dp_rank": 0,
+            "log_file": None,
+        }
+
+        with (
+            patch.object(type(obj), "_cleanup_node", side_effect=RuntimeError("port still occupied")),
+            patch.object(type(obj), "_run_remote") as mock_run,
+            patch.object(type(obj), "_build_run_shell") as mock_build,
+        ):
+            new_pid = obj._restart_node(info, node_infos=[])
+
+        self.assertIsNone(new_pid)
+        mock_run.assert_not_called()
+        mock_build.assert_not_called()
 
     def test_restart_proxy_cleans_before_relaunch(self):
         from unittest.mock import MagicMock, patch

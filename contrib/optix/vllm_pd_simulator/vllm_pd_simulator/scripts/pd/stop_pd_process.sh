@@ -87,11 +87,16 @@ if [ -n "$GPUS" ] || [ -n "$PORT" ]; then
     # Step 1: 调用 check_pd_process.sh（同 --mode）收集残留 PID（npu-smi + 端口扫描 + 孤儿补捞都在 check 内完成）
     CHECK_OUTPUT=$(REMOTE_DIR="$REMOTE_DIR" PROCESS_PATTERN="$PROCESS_PATTERN" \
         bash "$CHECK_SCRIPT" --mode "$MODE" --gpus "$GPUS" --port "$PORT" 2>/dev/null)
+    CHECK_RC=$?
 
     # Step 2: 解析 check 输出的 "  PID=<pid>" 行
     TARGET=$(echo "$CHECK_OUTPUT" | _pids_from_check)
 
     if [ -z "$TARGET" ]; then
+        if [ "$CHECK_RC" -ne 0 ]; then
+            echo "[FAIL] specified ports are still occupied, but no matching target PID can be stopped"
+            exit 1
+        fi
         echo "[OK] no process on specified GPUs/ports"
     else
         echo "[STOP] Killing: $TARGET"
@@ -106,9 +111,22 @@ if [ -n "$GPUS" ] || [ -n "$PORT" ]; then
         PORT_STILL=""
         waited=0
         while [ "$waited" -lt "$PORT_WAIT_MAX" ]; do
-            PORT_STILL=$(REMOTE_DIR="$REMOTE_DIR" PROCESS_PATTERN="$PROCESS_PATTERN" \
-                bash "$CHECK_SCRIPT" --mode "$MODE" --gpus "$GPUS" --port "$PORT" 2>/dev/null | _pids_from_check)
-            [ -z "$PORT_STILL" ] && break
+            RECHECK_OUTPUT=$(REMOTE_DIR="$REMOTE_DIR" PROCESS_PATTERN="$PROCESS_PATTERN" \
+                bash "$CHECK_SCRIPT" --mode "$MODE" --gpus "$GPUS" --port "$PORT" 2>/dev/null)
+            RECHECK_RC=$?
+            PORT_STILL=$(echo "$RECHECK_OUTPUT" | _pids_from_check)
+            if [ -z "$PORT_STILL" ]; then
+                [ "$RECHECK_RC" -eq 0 ] && break
+                PORT_STILL="unknown"
+            fi
+            # Killing the API server can orphan EngineCore/worker processes. Kill
+            # every process discovered by each recheck, not only the initial set.
+            if [ "$PORT_STILL" != "unknown" ]; then
+                for pid in $PORT_STILL; do
+                    kill "$pid" 2>/dev/null || true
+                    kill -9 "$pid" 2>/dev/null || true
+                done
+            fi
             sleep 1
             waited=$((waited + 1))
         done

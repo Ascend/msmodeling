@@ -307,6 +307,13 @@ if [ -n "$GPUS" ]; then
         # 过滤诊断行，得到纯 PID 列表
         NPU_SMI_PIDS="$(echo "$NPU_SMI_BOTH" | grep -v '^__NPU_SMI__' | sort -u | tr '\n' ' ' || true)"
         for wpid in $NPU_SMI_PIDS; do
+            # Privileged containers may expose a host PID through npu-smi even when
+            # that PID is outside the container's PID namespace.
+            if [ ! -r "/proc/$wpid/cmdline" ]; then
+                echo "[WARN] npu-smi PID $wpid is not visible in this PID namespace; ignored" >&2
+                continue
+            fi
+            _is_target "$wpid" || continue
             PIDS="$PIDS $wpid $(_ancestor_pids "$wpid")"
         done
     else
@@ -315,10 +322,12 @@ if [ -n "$GPUS" ]; then
 fi
 # 端口扫描：仅扫描显式 --port 指定的端口
 PORT_PIDS=""
+PORT_PID_UNKNOWN=0
 if [ -n "$PORT" ]; then
     PORT_SCAN="$(_port_pids)"
     # 命中监听端口但拿不到 PID（netstat -p 需 root）→ 提示，避免静默漏报
     if echo "$PORT_SCAN" | grep -q '__LISTEN_NO_PID__'; then
+        PORT_PID_UNKNOWN=1
         echo "[WARN] listening socket(s) found but PID info unavailable (netstat -p needs root); PIDs may be missing" >&2
     fi
     # 显式端口命中 → FOUND（与 npu-smi 路径一致：回溯 vllm 祖先，找到 serve/EngineCore）
@@ -334,11 +343,21 @@ if [ -n "$GPUS" ] || [ -n "$PORT" ]; then
         [ "$oppid" = "1" ] && PIDS="$PIDS $opid"
     done
 fi
-PIDS="$(echo "$PIDS" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' ' || true)"
+VISIBLE_PIDS=""
+for pid in $(echo "$PIDS" | tr ' ' '\n' | sort -u | grep -v '^$' || true); do
+    [ -r "/proc/$pid/cmdline" ] || continue
+    _is_target "$pid" || continue
+    VISIBLE_PIDS="$VISIBLE_PIDS $pid"
+done
+PIDS="$(echo "$VISIBLE_PIDS" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' ' || true)"
 
 # 定向路径（--gpus/--port）
 if [ -n "$GPUS" ] || [ -n "$PORT" ]; then
     if [ -z "$PIDS" ]; then
+        if [ -n "$PORT_PIDS" ] || [ "$PORT_PID_UNKNOWN" -eq 1 ]; then
+            echo "[WARN] specified port(s) are still listening but no matching target PID is available" >&2
+            exit 1
+        fi
         echo "[OK] no process on specified GPUs/ports" >&2
         exit 0
     fi
