@@ -24,7 +24,7 @@ import torch
 
 from serving_cast.service.workload_cache import RuntimeWorkload, WorkloadCache, WorkloadReuseModelRunner
 from tensor_cast.core.input_generator import RequestInfo, generate_inputs
-from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo, Region
+from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo, Region, RegionIdentityRegistry
 from tensor_cast.runtime_workload import (
     _MAX_FROZEN_TENSOR_VALUE_ELEMENTS,
     _MAX_FROZEN_TRACE_VALUE_ELEMENTS,
@@ -268,7 +268,7 @@ class TestWorkloadCache(TestCase):
         real_input = torch.empty((2, 4), dtype=torch.float16, device="meta")
         real_output = torch.empty((2, 4), dtype=torch.float16, device="meta")
         op = OpInvokeInfo(torch.ops.aten.add.Tensor, (logical_input, logical_input), {}, logical_output)
-        region = Region(None)
+        region = Region(None, RegionIdentityRegistry())
         region.mark_begin = SimpleNamespace(args=(logical_input,))
         region.mark_end = SimpleNamespace(out=logical_output)
         region.real_input_tensor = real_input
@@ -277,15 +277,31 @@ class TestWorkloadCache(TestCase):
         source = SimpleNamespace(op_info_group=[region], _iter_flat_invocations=lambda: [(op, 1)])
 
         trace = RuntimeWorkloadTrace.from_runtime(source)
-        target = MagicMock()
-        parent_before = Region.equivalent_tensor_id_manager.parent.copy()
-        root_order_before = Region.equivalent_tensor_id_manager.root_order.copy()
+        runtime_registry = RegionIdentityRegistry()
+        target = SimpleNamespace(
+            ensure_identity_registry=MagicMock(return_value=runtime_registry),
+        )
+        replay_alias_counts = []
+        alias_manager = runtime_registry.equivalent_tensor_id_manager
+
+        def replay_flat_op_invoke_infos(invocations):
+            replay_alias_counts.append(len(alias_manager._state()[0]))
+
+        target.replay_flat_op_invoke_infos = MagicMock(side_effect=replay_flat_op_invoke_infos)
+        other_registry = RegionIdentityRegistry()
+        parent_before = other_registry.equivalent_tensor_id_manager.parent.copy()
+        root_order_before = other_registry.equivalent_tensor_id_manager.root_order.copy()
+        trace.replay(target)
         trace.replay(target)
 
         self.assertEqual(len(trace.region_aliases), 1)
+        self.assertEqual(target.ensure_identity_registry.call_count, 2)
         self.assertEqual(target.replay_flat_op_invoke_infos.call_args.args[0][0][1], 1)
-        self.assertEqual(Region.equivalent_tensor_id_manager.parent, parent_before)
-        self.assertEqual(Region.equivalent_tensor_id_manager.root_order, root_order_before)
+        self.assertEqual(len(replay_alias_counts), 2)
+        self.assertTrue(all(replay_alias_counts))
+        self.assertFalse(alias_manager.parent)
+        self.assertEqual(other_registry.equivalent_tensor_id_manager.parent, parent_before)
+        self.assertEqual(other_registry.equivalent_tensor_id_manager.root_order, root_order_before)
 
     def test_cli_does_not_expose_reuse_controls(self):
         from cli.inference import throughput_optimizer

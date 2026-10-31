@@ -37,7 +37,7 @@ from .performance_model.bound_analyzer import (
 from .patch_torch import patch_torch
 from .performance_model.base import CachingPerformanceModel, PerformanceModel
 from .performance_model.memory_tracker import MemoryTracker
-from .performance_model.op_invoke_info import OpInvokeInfo, Region
+from .performance_model.op_invoke_info import OpInvokeInfo, Region, RegionIdentityRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,9 @@ class Runtime(TorchDispatchMode):
         ]
         self.device_profile = device_profile
         self.memory_tracker: Optional[MemoryTracker] = memory_tracker
+        self.region_identity_registry = RegionIdentityRegistry()
+        if self.memory_tracker is not None:
+            self.memory_tracker.bind_region_identity_registry(self.region_identity_registry)
         self.op_invoke_infos: List[OpInvokeInfo] = []
         self.op_info_group: List[Union[OpInvokeInfo, Region]] = []
         self.event_list: List[RuntimeEvent] = []
@@ -172,6 +175,14 @@ class Runtime(TorchDispatchMode):
         self._pending_wait_memory_aliases: List[tuple[torch.Tensor, torch.Tensor]] = []
 
         self.exit_stack = contextlib.ExitStack()
+
+    def ensure_identity_registry(self) -> RegionIdentityRegistry:
+        """Return this Runtime's registry and keep its MemoryTracker bound to it."""
+        if self.region_identity_registry is None:
+            self.region_identity_registry = RegionIdentityRegistry()
+            if self.memory_tracker is not None:
+                self.memory_tracker.bind_region_identity_registry(self.region_identity_registry)
+        return self.region_identity_registry
 
     @classmethod
     def is_infra_mode(cls):
@@ -202,6 +213,7 @@ class Runtime(TorchDispatchMode):
             return func(*args, **kwargs)
 
     def repeat_op_invoke_infos(self):
+        identity_registry = self.ensure_identity_registry()
         region_id_to_op_invoke_infos = {}
         current_id = None
         for op_invoke_info in self.op_invoke_infos:
@@ -209,7 +221,10 @@ class Runtime(TorchDispatchMode):
                 assert current_id is None, f"Already in region {current_id}, we do not support nested regions"
                 current_id = op_invoke_info.args[1]
                 assert current_id not in region_id_to_op_invoke_infos, f"Duplicated region id {current_id} found"
-                region_id_to_op_invoke_infos[current_id] = Region(op_invoke_info)
+                region_id_to_op_invoke_infos[current_id] = Region(
+                    op_invoke_info,
+                    identity_registry=identity_registry,
+                )
             elif op_invoke_info.func == torch.ops.tensor_cast._internal_mark_region_end.default:
                 current_id = op_invoke_info.args[1]
                 assert current_id in region_id_to_op_invoke_infos, (

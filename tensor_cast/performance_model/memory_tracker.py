@@ -23,7 +23,7 @@ import torch
 
 from ..device import DeviceProfile
 from ..performance_model import OpInvokeInfo
-from ..performance_model.op_invoke_info import Region
+from ..performance_model.op_invoke_info import Region, RegionIdentityRegistry
 from .utils import bytes_of_tensor
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,7 @@ class MemoryTracker:
 
     def __init__(self, device_profile: DeviceProfile):
         self.device_profile = device_profile
+        self.region_identity_registry = RegionIdentityRegistry()
         # A list to store invocation details for each operation.
         self.op_invoke_infos_with_repeat_id: List[tuple[OpInvokeInfo, int]] = []
         # A dictionary to store metadata for each tensor encountered.
@@ -182,6 +183,12 @@ class MemoryTracker:
         # Value: AliasPlan if op has alias-bearing outputs; otherwise None.
         self._alias_plan_cache: Dict[Any, Optional[AliasPlan]] = {}
 
+    def bind_region_identity_registry(self, identity_registry: RegionIdentityRegistry) -> None:
+        """Use the owning Runtime's registry to resolve Region tensor aliases."""
+        if identity_registry is None:
+            raise ValueError("identity_registry is required")
+        self.region_identity_registry = identity_registry
+
     def _extract_tensors(self, data: Any) -> List[torch.Tensor]:
         """A helper function to recursively find all torch.Tensor objects
         within a nested data structure (e.g., list, tuple, dict).
@@ -198,7 +205,11 @@ class MemoryTracker:
         return tensors
 
     def _get_real_tensor_id(self, tensor, repeat_id) -> TensorKey:
-        tensor_id, repeat_id = Region.get_tensor_id(tensor, repeat_id)
+        tensor_id, repeat_id = Region.get_tensor_id(
+            tensor,
+            repeat_id,
+            identity_registry=self.region_identity_registry,
+        )
         return TensorKey(tensor_id=tensor_id, repeat_id=repeat_id)
 
     def _schema_arg_names(self, op_invoke_info: OpInvokeInfo) -> List[str]:

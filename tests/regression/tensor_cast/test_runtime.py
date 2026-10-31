@@ -34,7 +34,7 @@ from tensor_cast.performance_model.base import PerformanceModel
 from tensor_cast.performance_model.bound_analyzer import BoundAnalyzer, StatsKey
 from tensor_cast.performance_model.empirical import EmpiricalPerformanceModel
 from tensor_cast.performance_model.memory_tracker import MemoryTracker
-from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo, Region
 from tensor_cast.performance_model.profiling_database.data_source import (
     DataSourcePerformanceModel,
     QueryResult,
@@ -63,7 +63,16 @@ def test_runtime_region_v2_tracks_distinct_real_input_and_output():
     copied_input = torch.empty(1, 12, 16, device="meta")
     copied_output = torch.ops.tensor_cast._internal_copy_region_v2(copied_input, end_output, region_id)
 
-    runtime = Runtime(AnalyticPerformanceModel(TEST_DEVICE), TEST_DEVICE)
+    runtime = Runtime(
+        AnalyticPerformanceModel(TEST_DEVICE),
+        TEST_DEVICE,
+        memory_tracker=MemoryTracker(TEST_DEVICE),
+    )
+    other_runtime = Runtime(
+        AnalyticPerformanceModel(TEST_DEVICE),
+        TEST_DEVICE,
+        memory_tracker=MemoryTracker(TEST_DEVICE),
+    )
     runtime.op_invoke_infos = [
         OpInvokeInfo(
             torch.ops.tensor_cast._internal_mark_region_begin.default,
@@ -86,6 +95,7 @@ def test_runtime_region_v2_tracks_distinct_real_input_and_output():
         ),
     ]
 
+    runtime.region_identity_registry = None
     runtime.repeat_op_invoke_infos()
 
     representative, copied = runtime.op_info_group
@@ -95,6 +105,27 @@ def test_runtime_region_v2_tracks_distinct_real_input_and_output():
     assert copied.real_output_tensor is copied_output
     assert copied.real_input_tensor.shape == (1, 12, 16)
     assert copied.real_output_tensor.shape == (1, 4, 16)
+    assert representative.identity_registry is runtime.region_identity_registry
+    assert copied.identity_registry is runtime.region_identity_registry
+    assert runtime.memory_tracker.region_identity_registry is runtime.region_identity_registry
+    assert other_runtime.region_identity_registry is not runtime.region_identity_registry
+    assert runtime.region_identity_registry.region_id_to_root_region_id
+    assert not other_runtime.region_identity_registry.region_id_to_root_region_id
+    assert runtime.memory_tracker._get_real_tensor_id(
+        representative_input, copied.reference_id
+    ) == runtime.memory_tracker._get_real_tensor_id(copied.real_input_tensor, 0)
+    assert other_runtime.memory_tracker._get_real_tensor_id(
+        representative_input, copied.reference_id
+    ) != other_runtime.memory_tracker._get_real_tensor_id(copied.real_input_tensor, 0)
+
+
+def test_region_identity_registry_is_required():
+    tensor = torch.empty(1, device="meta")
+
+    with pytest.raises(ValueError, match="identity_registry is required"):
+        Region(None, None)
+    with pytest.raises(ValueError, match="identity_registry is required"):
+        Region.get_tensor_id(tensor, 0, identity_registry=None)
 
 
 def test_chrome_trace_preserves_submicrosecond_durations():

@@ -132,10 +132,27 @@ class RuntimeWorkloadTrace:
     def replay(self, runtime) -> None:
         """Rebuild the op inputs and replay them through an existing Runtime."""
         thawer = _ValueThawer(self.tensors)
-        # Runtime records tensor ids while replaying. Scope the aliases to this
-        # operation so transient meta-tensor ids cannot affect a later workload
-        # handled by the same worker process.
-        with Region.equivalent_tensor_id_manager.scoped_aliases():
+        # Keep the thawed tensor aliases scoped to this replay. A Runtime may be
+        # reused, and a later replay can reuse an earlier meta tensor's object id.
+        # Runtime scoping isolates different estimates; this inner scope prevents
+        # stale aliases from leaking between replays on the same Runtime.
+        identity_registry = runtime.ensure_identity_registry()
+        manager = identity_registry.equivalent_tensor_id_manager
+        invocations = []
+        for frozen_op in self.invocations:
+            invocations.append(
+                (
+                    OpInvokeInfo(
+                        _resolve_op(frozen_op.schema_name, frozen_op.overload_name),
+                        thawer.thaw(frozen_op.args),
+                        thawer.thaw(frozen_op.kwargs),
+                        thawer.thaw(frozen_op.out),
+                        cache_key=frozen_op.cache_key,
+                    ),
+                    frozen_op.reference_id,
+                )
+            )
+        with manager.scoped_aliases():
             for alias in self.region_aliases:
                 logical_input = thawer.thaw(alias.logical_input)
                 logical_output = thawer.thaw(alias.logical_output)
@@ -146,26 +163,8 @@ class RuntimeWorkloadTrace:
                     for value in (logical_input, logical_output, real_input, real_output)
                 ):
                     raise WorkloadFreezeError("region alias does not describe tensors")
-                Region.equivalent_tensor_id_manager.add_equivalent_keys(
-                    [(id(real_input), 0), (id(logical_input), alias.reference_id)]
-                )
-                Region.equivalent_tensor_id_manager.add_equivalent_keys(
-                    [(id(real_output), 0), (id(logical_output), alias.reference_id)]
-                )
-            invocations = []
-            for frozen_op in self.invocations:
-                invocations.append(
-                    (
-                        OpInvokeInfo(
-                            _resolve_op(frozen_op.schema_name, frozen_op.overload_name),
-                            thawer.thaw(frozen_op.args),
-                            thawer.thaw(frozen_op.kwargs),
-                            thawer.thaw(frozen_op.out),
-                            cache_key=frozen_op.cache_key,
-                        ),
-                        frozen_op.reference_id,
-                    )
-                )
+                manager.add_equivalent_keys([(id(real_input), 0), (id(logical_input), alias.reference_id)])
+                manager.add_equivalent_keys([(id(real_output), 0), (id(logical_output), alias.reference_id)])
             runtime.replay_flat_op_invoke_infos(invocations)
 
 

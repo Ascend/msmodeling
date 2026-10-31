@@ -238,13 +238,23 @@ def is_hif8_op_from_info(info: OpInvokeInfo) -> bool:
     return get_named_args(info).get("kv_format") == "hif8"
 
 
-class Region:
-    # if A region is a refernce of B region, then B is root region
-    root_region_id_to_reference_count = {}
-    region_id_to_root_region_id = {}
-    equivalent_tensor_id_manager = EquivalentKeyManager()
+class RegionIdentityRegistry:
+    """Identity and alias tables scoped to one Runtime invocation."""
 
-    def __init__(self, mark_begin: Optional[OpInvokeInfo]):
+    def __init__(self):
+        self.root_region_id_to_reference_count = {}
+        self.region_id_to_root_region_id = {}
+        self.equivalent_tensor_id_manager = EquivalentKeyManager()
+
+
+class Region:
+    def __init__(
+        self,
+        mark_begin: Optional[OpInvokeInfo],
+        identity_registry: RegionIdentityRegistry,
+    ):
+        if identity_registry is None:
+            raise ValueError("identity_registry is required")
         # Region contains a sequence of op invocations excluding the region markers
         self.mark_begin = mark_begin
         self.mark_end: Optional[OpInvokeInfo] = None
@@ -252,41 +262,51 @@ class Region:
         self.reference_id = 0
         self.real_input_tensor = None
         self.real_output_tensor = None
+        self.identity_registry = identity_registry
 
     def _add_equivalent_info(self):
-        Region.equivalent_tensor_id_manager.add_equivalent_keys(
+        manager = self.identity_registry.equivalent_tensor_id_manager
+        manager.add_equivalent_keys(
             [
                 (id(self.real_input_tensor), 0),
                 (id(self.input_tensor), self.reference_id),
             ]
         )
-        Region.equivalent_tensor_id_manager.add_equivalent_keys(
+        manager.add_equivalent_keys(
             [
                 (id(self.real_output_tensor), 0),
                 (id(self.output_tensor), self.reference_id),
             ]
         )
 
-    @classmethod
-    def get_tensor_id(cls, tensor, region_reference_id=0):
+    @staticmethod
+    def get_tensor_id(
+        tensor,
+        region_reference_id=0,
+        *,
+        identity_registry: RegionIdentityRegistry,
+    ):
+        if identity_registry is None:
+            raise ValueError("identity_registry is required")
         raw_tensor_id = (id(tensor), region_reference_id)
-        equivalent_tensor_id = cls.equivalent_tensor_id_manager.get_group_root_key((id(tensor), region_reference_id))
+        equivalent_tensor_id = identity_registry.equivalent_tensor_id_manager.get_group_root_key(raw_tensor_id)
         return equivalent_tensor_id if equivalent_tensor_id is not None else raw_tensor_id
 
     def shallow_copy(self, real_input_tensor, real_output_tensor) -> "Region":
-        copied_region = Region(None)
+        copied_region = Region(None, self.identity_registry)
         copied_region.mark_begin = self.mark_begin
         copied_region.mark_end = self.mark_end
         copied_region.op_invoke_infos = self.op_invoke_infos
         copied_region.real_input_tensor = real_input_tensor
         copied_region.real_output_tensor = real_output_tensor
-        root_id = Region.region_id_to_root_region_id.get(id(self), id(self))
+        registry = self.identity_registry
+        root_id = registry.region_id_to_root_region_id.get(id(self), id(self))
 
-        if root_id not in Region.root_region_id_to_reference_count:
-            Region.root_region_id_to_reference_count[root_id] = 0
-        Region.root_region_id_to_reference_count[root_id] += 1
-        copied_region.reference_id = Region.root_region_id_to_reference_count[root_id]
-        Region.region_id_to_root_region_id[id(copied_region)] = root_id
+        if root_id not in registry.root_region_id_to_reference_count:
+            registry.root_region_id_to_reference_count[root_id] = 0
+        registry.root_region_id_to_reference_count[root_id] += 1
+        copied_region.reference_id = registry.root_region_id_to_reference_count[root_id]
+        registry.region_id_to_root_region_id[id(copied_region)] = root_id
         copied_region._add_equivalent_info()
         return copied_region
 
@@ -319,8 +339,8 @@ class Region:
         self.real_input_tensor = self.mark_begin.args[0]
         self.real_output_tensor = self.mark_end.out
 
-        Region.region_id_to_root_region_id[id(self)] = id(self)
-        Region.root_region_id_to_reference_count[id(self)] = 0
+        self.identity_registry.region_id_to_root_region_id[id(self)] = id(self)
+        self.identity_registry.root_region_id_to_reference_count[id(self)] = 0
         self._add_equivalent_info()
 
     @property
