@@ -1023,7 +1023,11 @@ class TestThroughputOptimizerNightly(TestCase):
             "--batch-range",
             "1",
             "4",
-            "--max-batched-tokens=100",
+            # One 1080x1920 image costs 2042 image tokens per request; the
+            # first prefill chunk must hold the full placeholder span (issue
+            # #586). 2048 still yields two chunks ([2048, 14]) for the
+            # chunked-prefill + compile coverage this case guards.
+            "--max-batched-tokens=2048",
         ]
 
         result = self._run_throughput_optimizer(args)

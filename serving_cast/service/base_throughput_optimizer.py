@@ -57,9 +57,9 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
-# Rate-limit the historical scalar image-batch-size fallback warning per
-# batch_size value (search loops resolve every candidate).
-_SCALAR_IMAGE_BATCH_FALLBACK_WARNED: set = set()
+# Warn once globally when image_batch_size falls back to the default: search
+# loops resolve every candidate and would otherwise flood the log.
+_IMAGE_BATCH_DEFAULT_WARNED = False
 
 DEFAULT_MAX_BATCH_SIZE = 512
 
@@ -792,32 +792,33 @@ class BaseThroughputOptimizer(ABC):
 
         ``image_batch_size`` is the number of images per request and must not
         be coupled to the concurrency search's ``batch_size`` (review:
-        Hudingyi/zhangzhenyu — the historical fallback silently multiplied
-        the per-request image count with the search concurrency, inflating
-        vision input, H2D bytes, placeholder tokens and latency ~batch_size
-        times). With a length distribution the default is one image per
-        request; the fixed-length path keeps the historical fallback once
-        with a warning. Whether the model actually consumes image inputs is
-        decided by ``_image_tokens_per_request`` / the input generators
-        (stray image parameters on a text model keep the historical
-        "ignored + warning" behaviour there).
+        Hudingyi/zhangzhenyu — the historical fixed-length fallback silently
+        multiplied the per-request image count with the search concurrency,
+        inflating vision input, H2D bytes, placeholder tokens and latency
+        ~batch_size times). Both the length-distribution and the fixed-length
+        paths default to one image per request (issue #586: the surviving
+        fixed-length fallback also broke the fail-fast image-budget guard once
+        the chunk planner started rejecting undersized ``max_batched_tokens``).
+        Pass --image-batch-size explicitly to control the per-request image
+        count. Without an explicit value the fallback warns once per process.
+        Whether the model actually consumes image inputs is decided by
+        ``_image_tokens_per_request`` / the input generators (stray image
+        parameters on a text model keep the historical "ignored + warning"
+        behaviour there).
         """
+        global _IMAGE_BATCH_DEFAULT_WARNED
         if optimizer_data.image_height is None:
             return None
         if optimizer_data.image_batch_size is not None:
             return optimizer_data.image_batch_size
-        if optimizer_data.length_distribution is not None:
-            return 1
-        if optimizer_data.batch_size not in _SCALAR_IMAGE_BATCH_FALLBACK_WARNED:
+        if not _IMAGE_BATCH_DEFAULT_WARNED:
             logger.warning(
-                "image_batch_size defaults to the search batch_size (%s) on fixed-length "
-                "inputs (historical behavior): each request is simulated with that many "
-                "images. Pass --image-batch-size explicitly to control the per-request "
-                "image count.",
-                optimizer_data.batch_size,
+                "image_batch_size defaults to 1 image per request; pass "
+                "--image-batch-size explicitly to control the per-request "
+                "image count."
             )
-            _SCALAR_IMAGE_BATCH_FALLBACK_WARNED.add(optimizer_data.batch_size)
-        return optimizer_data.batch_size
+            _IMAGE_BATCH_DEFAULT_WARNED = True
+        return 1
 
     def _image_tokens_per_request(self, optimizer_data: OptimizerData) -> int:
         """Language-side image token budget per request for the chunk planner.

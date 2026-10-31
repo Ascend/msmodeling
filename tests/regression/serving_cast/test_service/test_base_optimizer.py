@@ -717,7 +717,9 @@ class TestBaseBackend(unittest.TestCase):
         self.assertEqual(record.profiling_miss_reasons, {"shape_not_found": 2})
         request = fake_runner.requests[0]
         self.assertEqual((request.query_len, request.seq_len, request.concurrency), (6, 12, 5))
-        self.assertEqual((request.image_batch_size, request.image_height, request.image_width), (2, 224, 336))
+        # Issue #586: image_batch_size defaults to 1 per request (not the
+        # search batch_size=2) on fixed-length inputs.
+        self.assertEqual((request.image_batch_size, request.image_height, request.image_width), (1, 224, 336))
 
     def test_select_latency_s_prefers_empirical_over_analytic(self):
         self.assertEqual(
@@ -848,7 +850,9 @@ class TestBaseBackend(unittest.TestCase):
         requests = self.backend.model_runner.run_inference.call_args.args[0]
         self.assertEqual(requests[0].image_batch_size, 1)
 
-    def test_get_forward_info_falls_back_to_batch_size_for_image_batch_size(self):
+    def test_get_forward_info_defaults_image_batch_size_to_one(self):
+        # Issue #586: the fixed-length path no longer falls back to the search
+        # batch_size; both paths default to one image per request.
         self.backend.model_runner = Mock()
         optimizer_data = OptimizerData(
             input_length=32,
@@ -862,7 +866,7 @@ class TestBaseBackend(unittest.TestCase):
         self.backend._get_forward_info(8, optimizer_data, is_decode=False)
 
         requests = self.backend.model_runner.run_inference.call_args.args[0]
-        self.assertEqual(requests[0].image_batch_size, 8)
+        self.assertEqual(requests[0].image_batch_size, 1)
 
     def test_exponential_search_acc_search_clamps_right_boundary_on_early_stop(self):
         optimizer_data = OptimizerData(
@@ -1172,8 +1176,9 @@ class TestBaseBackend(unittest.TestCase):
     def test_resolve_image_batch_size_decouples_from_search_batch(self):
         # Review (Hudingyi/zhangzhenyu round 6): image_batch_size is the
         # per-request image count and must not follow the concurrency
-        # search's batch_size. The distribution path defaults to one image
-        # per request; the fixed-length path keeps the historical fallback.
+        # search's batch_size. Both the distribution and the fixed-length
+        # paths default to one image per request (issue #586: the surviving
+        # fixed-length fallback broke the fail-fast image-budget guard).
         distribution = LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=100, weight=1.0)])
         data = OptimizerData(
             batch_size=2,
@@ -1189,9 +1194,9 @@ class TestBaseBackend(unittest.TestCase):
         data.image_height = None
         self.assertEqual(self.backend._resolve_image_batch_size(data), None)
 
-    def test_resolve_image_batch_size_scalar_fallback_warns_once_per_batch_size(self):
-        # The fixed-length fallback keeps the historical behavior but warns
-        # once per batch_size value so search loops do not flood the log.
+    def test_resolve_image_batch_size_scalar_fallback_warns_once(self):
+        # The fixed-length path defaults to one image per request and warns
+        # once globally so search loops do not flood the log.
         data = OptimizerData(
             input_length=100,
             output_length=8,
@@ -1201,15 +1206,15 @@ class TestBaseBackend(unittest.TestCase):
         )
         from serving_cast.service import base_throughput_optimizer as bto
 
-        bto._SCALAR_IMAGE_BATCH_FALLBACK_WARNED.clear()
+        bto._IMAGE_BATCH_DEFAULT_WARNED = False
         try:
             with self.assertLogs("serving_cast.service.base_throughput_optimizer", level="WARNING") as captured:
-                self.assertEqual(self.backend._resolve_image_batch_size(data), 2)
-                self.assertEqual(self.backend._resolve_image_batch_size(data), 2)
+                self.assertEqual(self.backend._resolve_image_batch_size(data), 1)
+                self.assertEqual(self.backend._resolve_image_batch_size(data), 1)
             fallback_lines = [line for line in captured.output if "image_batch_size defaults" in line]
             self.assertEqual(len(fallback_lines), 1)
         finally:
-            bto._SCALAR_IMAGE_BATCH_FALLBACK_WARNED.clear()
+            bto._IMAGE_BATCH_DEFAULT_WARNED = False
 
     def test_image_tokens_per_request_ignores_image_params_on_non_vl_models(self):
         # Stray image parameters on a text model are configuration noise:

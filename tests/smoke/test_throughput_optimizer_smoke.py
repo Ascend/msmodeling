@@ -180,7 +180,7 @@ class TestThroughputOptimizerSmoke(TestCase):
             "--batch-range",
             "1",
             "1",
-            "--max-batched-tokens=16",
+            "--max-batched-tokens=80",
         ]
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
