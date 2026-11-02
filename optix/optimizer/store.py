@@ -15,14 +15,18 @@
 # -------------------------------------------------------------------------
 import csv
 import json
+import os
 from dataclasses import asdict, is_dataclass
+from itertools import chain
 from pathlib import Path
+from shutil import copymode
+from tempfile import NamedTemporaryFile
 from typing import Any, Optional
 
 import numpy as np
 from loguru import logger
 
-from ..common import CSV_COLUMN_HEADERS, read_csv_s
+from ..common import CSV_COLUMN_HEADERS, CSV_HEADER_FIELDS, read_csv_s
 from ..config.base_config import RUN_TIME
 from ..config.config import (
     DataStorageConfig,
@@ -140,26 +144,69 @@ class DataStorage:
     ):
         logger.info("Save result with DataStorage. File path: {!r}", self.save_file.resolve())
 
-        _column = []
-        _value = []
-        for k, v in performance_index.model_dump().items():
-            _column.append(k)
-            _value.append(v)
-        for _p in params:
-            _column.append(_p.name)
-            _value.append(_p.value)
-        for k, v in kwargs.items():
-            _column.append(k)
-            _value.append(v)
-        if self.save_file.exists():
-            with open_file(self.save_file, "a+") as f:
-                data_writer = csv.writer(f)
-                data_writer.writerow([self._safe_sanitize_csv_value(_v) for _v in _value])
-        else:
-            with open_file(self.save_file, "w") as f:
-                data_writer = csv.writer(f)
-                data_writer.writerow([CSV_COLUMN_HEADERS.get(column, column) for column in _column])
-                data_writer.writerow([self._safe_sanitize_csv_value(_v) for _v in _value])
+        row = {}
+        values = chain(
+            performance_index.model_dump().items(),
+            ((field.name, field.value) for field in params),
+            kwargs.items(),
+        )
+        for name, value in values:
+            column = CSV_HEADER_FIELDS.get(name, name)
+            if column in row:
+                raise ValueError(
+                    f"Colliding CSV column {column!r} in {str(self.save_file.resolve())!r}: "
+                    "metrics, parameters and metadata must have distinct names"
+                )
+            row[column] = value
+        with open_file(self.save_file, "a+", newline="") as file:
+            file.seek(0)
+            reader = csv.reader(file)
+            header = next(reader, None)
+            columns = [CSV_HEADER_FIELDS.get(column, column) for column in header] if header else list(row)
+            if len(columns) != len(set(columns)):
+                raise ValueError(f"Ambiguous CSV header in {str(self.save_file.resolve())!r}: {header}")
+            new_columns = [column for column in row if column not in columns]
+            if new_columns:
+                old_rows = list(reader)
+            else:
+                # Append mode preserves prior rows; make the read-to-write transition explicit.
+                file.seek(0, os.SEEK_END)
+                writer = csv.writer(file)
+                if not header:
+                    writer.writerow([CSV_COLUMN_HEADERS.get(column, column) for column in columns])
+                writer.writerow([self._safe_sanitize_csv_value(row.get(column)) for column in columns])
+                return
+        self._extend_csv_header(header, old_rows, new_columns, row)
+
+    def _extend_csv_header(self, header, old_rows, new_columns, row):
+        """Extend a serial writer's schema without exposing a partly rewritten CSV."""
+        for line, old_row in enumerate(old_rows, start=2):
+            if len(old_row) != len(header):
+                raise ValueError(
+                    f"Cannot extend CSV {str(self.save_file.resolve())!r}: row {line} has "
+                    f"{len(old_row)} columns, expected {len(header)}"
+                )
+        columns = [CSV_HEADER_FIELDS.get(column, column) for column in header] + new_columns
+        temporary = None
+        try:
+            with NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="", dir=self.save_file.parent, delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                writer = csv.writer(stream)
+                writer.writerow([*header, *(CSV_COLUMN_HEADERS.get(column, column) for column in new_columns)])
+                padding = [""] * len(new_columns)
+                for old_row in old_rows:
+                    writer.writerow([*old_row, *padding])
+                writer.writerow([self._safe_sanitize_csv_value(row.get(column)) for column in columns])
+                stream.flush()
+                os.fsync(stream.fileno())
+            copymode(self.save_file, temporary)
+            temporary.replace(self.save_file)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        logger.info("Extended CSV header in {} with columns {}", self.save_file.resolve(), new_columns)
 
     @staticmethod
     def _to_bool(value: Any, default: bool = False) -> bool:

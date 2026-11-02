@@ -236,6 +236,8 @@ summary 中的 `pd_ratio=1/3` 表示理论比例；`instances.prefill=1`、`inst
 
 使用当前环境的 PD 部署方案，配置 P/D 实例、KV cache 传输和 Proxy。OptiX 搜索结果提供参数与数量，完整集群仍由部署工具启动。
 
+**KV cache 传输说明：** 第 3 步的示例通过 PD 混部的单实例分别模拟 P、D 阶段，不涉及 P/D 实例间的 KV cache 传输，因此搜索模板未包含相关传输参数。手动拉起完整 PD 服务时，需要根据当前 vLLM-Ascend 版本和 PD 部署方案，在 P、D 各实例的启动命令中补充 KV cache 传输相关参数，并与 Proxy 的路由配置配套使用。
+
 | 部署项 | 怎么填写 |
 |---|---|
 | P/D 实例数 | 按 summary 的 `instances.prefill`、`instances.decode` |

@@ -114,6 +114,7 @@ class PSOOptimizer(PerformanceTuner):
         self.history_cost, self.history_pos = None, None
         self.default_fitness = None
         self.default_run_param = None
+        self._measured_params_by_result = {}
         self.default_res = None
         self.sample_data = None
         self.fine_tune = fine_tune
@@ -375,6 +376,15 @@ class PSOOptimizer(PerformanceTuner):
             d += 1
         return d
 
+    def _remember_measured_params(self, result, measured_fields=None):
+        """Keep each recorded result paired with its actual, named parameter values."""
+        if measured_fields is None:
+            measured_fields = getattr(self.scheduler, "simulate_run_info", None)
+        if isinstance(measured_fields, (list, tuple)) and measured_fields:
+            self._measured_params_by_result[id(result)] = {
+                field.name: deepcopy(field.value) for field in measured_fields
+            }
+
     def _run_and_record_fine_tune_params(
         self,
         params,
@@ -409,6 +419,8 @@ class PSOOptimizer(PerformanceTuner):
             fitness = inf
             self.scheduler.save_result(fitness=fitness, stop_service=stop_service)
             return None, None, False
+        if not params_recorded:
+            self._remember_measured_params(result)
         self.scheduler.save_result(fitness=fitness, stop_service=stop_service)
         if not params_recorded:
             record_params.append(params)
@@ -572,6 +584,7 @@ class PSOOptimizer(PerformanceTuner):
                 _fitness = inf
                 self.scheduler.save_result(fitness=_fitness, stop_service=self.manage_simulator_lifecycle)
                 continue
+            self._remember_measured_params(_res)
             self.scheduler.save_result(
                 fitness=_fitness,
                 stop_service=self.manage_simulator_lifecycle
@@ -601,13 +614,18 @@ class PSOOptimizer(PerformanceTuner):
             return performance_index.throughput
         return performance_index.generate_speed
 
+    @staticmethod
+    def _latency_for_comparison(value: float | None) -> float:
+        """Rank missing latencies as infinity without changing measured results."""
+        return inf if value is None else value
+
     def best_pd_disaggregation_params(self, fitnese_list, params_list, performance_index_list):
         _tpot_threshold = self.fine_tune.tpot_upper_bound
         if _tpot_threshold == 0:
             return fitnese_list[0], params_list[0], performance_index_list[0]
-        _tpot_lt_slo_index = [
-            i for i, p in enumerate(performance_index_list) if p.time_per_output_token <= _tpot_threshold
-        ]
+        # Use comparison-only defaults so missing measurements remain None in results.
+        _tpot_values = [self._latency_for_comparison(p.time_per_output_token) for p in performance_index_list]
+        _tpot_lt_slo_index = [i for i, tpot in enumerate(_tpot_values) if tpot <= _tpot_threshold]
         if _tpot_lt_slo_index:
             _best_index = max(
                 _tpot_lt_slo_index,
@@ -618,7 +636,7 @@ class PSOOptimizer(PerformanceTuner):
                 params_list[_best_index],
                 performance_index_list[_best_index],
             )
-        _tpot_diff = [(p.time_per_output_token - _tpot_threshold) / _tpot_threshold for p in performance_index_list]
+        _tpot_diff = [(tpot - _tpot_threshold) / _tpot_threshold for tpot in _tpot_values]
         _best_index = _tpot_diff.index(min(_tpot_diff))
         return (
             fitnese_list[_best_index],
@@ -646,10 +664,6 @@ class PSOOptimizer(PerformanceTuner):
         for _p in performance_index_list:
             if _p.generate_speed is None:
                 _p.generate_speed = 0
-            if _p.time_to_first_token is None:
-                _p.time_to_first_token = inf
-            if _p.time_per_output_token is None:
-                _p.time_per_output_token = inf
 
         if getattr(self.fine_tune, "fine_tune_mode", None) == FINE_TUNE_MODE_PD_DISAGGREGATION:
             return self.best_pd_disaggregation_params(fitnese_list, params_list, performance_index_list)
@@ -666,7 +680,10 @@ class PSOOptimizer(PerformanceTuner):
             _ttft_threshold = self.fine_tune.ttft_upper_bound
             if _ttft_threshold == 0:
                 return fitnese_list[0], params_list[0], performance_index_list[0]
-            _ttft_diff = [(p.time_to_first_token - _ttft_threshold) / _ttft_threshold for p in performance_index_list]
+            _ttft_diff = [
+                (self._latency_for_comparison(p.time_to_first_token) - _ttft_threshold) / _ttft_threshold
+                for p in performance_index_list
+            ]
             _ttft_lt_slo_index = [i for i, v in enumerate(_ttft_diff) if v < 0]
             if _ttft_lt_slo_index:
                 _best_index = self.get_max_generate_speed_index(performance_index_list, _ttft_lt_slo_index)
@@ -681,7 +698,10 @@ class PSOOptimizer(PerformanceTuner):
             _tpot_threshold = self.fine_tune.tpot_upper_bound
             if _tpot_threshold == 0:
                 return fitnese_list[0], params_list[0], performance_index_list[0]
-            _tpot_diff = [(p.time_per_output_token - _tpot_threshold) / _tpot_threshold for p in performance_index_list]
+            _tpot_diff = [
+                (self._latency_for_comparison(p.time_per_output_token) - _tpot_threshold) / _tpot_threshold
+                for p in performance_index_list
+            ]
             _tpot_lt_slo_index = [i for i, v in enumerate(_tpot_diff) if v < 0]
             if _tpot_lt_slo_index:
                 _best_index = self.get_max_generate_speed_index(performance_index_list, _tpot_lt_slo_index)
@@ -703,8 +723,8 @@ class PSOOptimizer(PerformanceTuner):
                 return fitnese_list[0], params_list[0], performance_index_list[0]
             _performance_diff = [
                 (
-                    (p.time_per_output_token - _tpot_threshold) / _tpot_threshold,
-                    (p.time_to_first_token - _ttft_threshold) / _ttft_threshold,
+                    (self._latency_for_comparison(p.time_per_output_token) - _tpot_threshold) / _tpot_threshold,
+                    (self._latency_for_comparison(p.time_to_first_token) - _ttft_threshold) / _ttft_threshold,
                 )
                 for p in performance_index_list
             ]
@@ -807,7 +827,18 @@ class PSOOptimizer(PerformanceTuner):
         baseline_target_field = tuple(deepcopy(self.target_field))
         self.default_run_param = field_to_param(baseline_target_field)
         try:
-            return self._run_complete_evaluation(self.default_run_param, baseline_target_field)
+            if self.manage_simulator_lifecycle:
+                result = self._run_complete_evaluation(self.default_run_param, baseline_target_field)
+            else:
+                result = self.scheduler.run_benchmark_only(
+                    self.default_run_param, baseline_target_field, monitor_service=False
+                )
+            measured_fields = getattr(self.scheduler, "simulate_run_info", None)
+            if not isinstance(measured_fields, (list, tuple)) or not measured_fields:
+                measured_fields = map_param_with_value(self.default_run_param, baseline_target_field)
+            # Preserve measured values independently of later search bounds and enum choices.
+            self._remember_measured_params(result, measured_fields)
+            return result
         finally:
             self._restore_search_data_field(search_target_field, simulator_names, benchmark_names)
 
@@ -837,15 +868,7 @@ class PSOOptimizer(PerformanceTuner):
                         )
                     elif _field.config_position == "env":
                         _field.value = os.getenv(_field.name, _field.value)
-                if self.manage_simulator_lifecycle:
-                    self.default_res = self._run_baseline_preserving_search_space()
-                else:
-                    self.default_run_param = field_to_param(self.target_field)
-                    self.default_res = self.scheduler.run_benchmark_only(
-                        self.default_run_param,
-                        self.target_field,
-                        monitor_service=False,
-                    )
+                self.default_res = self._run_baseline_preserving_search_space()
                 self._raise_if_baseline_failed()
                 if self.default_res.generate_speed:
                     self.gen_speed_target = 10 * self.default_res.generate_speed
@@ -868,15 +891,7 @@ class PSOOptimizer(PerformanceTuner):
                             else:
                                 _field.value = _field.max
             else:
-                if self.manage_simulator_lifecycle:
-                    self.default_res = self._run_baseline_preserving_search_space()
-                else:
-                    self.default_run_param = field_to_param(self.target_field)
-                    self.default_res = self.scheduler.run_benchmark_only(
-                        self.default_run_param,
-                        self.target_field,
-                        monitor_service=False,
-                    )
+                self.default_res = self._run_baseline_preserving_search_space()
                 self._raise_if_baseline_failed()
                 self.default_fitness = self.minimum_algorithm(self.default_res)
                 self.scheduler.save_result(
@@ -888,7 +903,7 @@ class PSOOptimizer(PerformanceTuner):
             if (
                 self.default_res.generate_speed is None
                 or self.default_res.time_to_first_token is None
-                or self.default_res.time_per_output_token is None
+                or (self.tpot_penalty != 0 and self.default_res.time_per_output_token is None)
             ):
                 logger.warning(
                     "Failed to obtain benchmark metric data. metric {}. "
@@ -896,13 +911,16 @@ class PSOOptimizer(PerformanceTuner):
                     self.default_res,
                 )
 
-            self.target_field = [
-                *self.scheduler.simulator.data_field,
-                *self.scheduler.benchmark.data_field,
-            ]
+            field_order = {field.name: index for index, field in enumerate(self.target_field)}
+            # Keep baseline and candidate vectors in the same field order.
+            self.target_field = sorted(
+                [*self.scheduler.simulator.data_field, *self.scheduler.benchmark.data_field],
+                key=lambda field: field_order.get(field.name, len(field_order)),
+            )
             logger.success("Baseline established")
 
     def run_plugin(self):
+        self._measured_params_by_result.clear()
         self.prepare_plugin()
         if self.skip_pso:
             logger.info("skip_pso is enabled; refining the baseline result without running PSO.")
@@ -937,7 +955,11 @@ class PSOOptimizer(PerformanceTuner):
         )
         if best_param is None or best_fitness is None or best_performance_index is None:
             raise NoFeasibleSolutionError()
-        _position = {_field.name: _field.value for _field in map_param_with_value(best_param, self.target_field)}
+        measured_params = self._measured_params_by_result.get(id(best_performance_index))
+        if measured_params is not None:
+            _position = deepcopy(measured_params)
+        else:
+            _position = {_field.name: _field.value for _field in map_param_with_value(best_param, self.target_field)}
         logger.success(
             "Optimization complete: fitness={} ttft={} tpot={} throughput={} params={}",
             best_fitness,

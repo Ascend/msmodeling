@@ -21,7 +21,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from enum import Enum
 from inspect import isfunction  # pylint: disable=no-name-in-module
-from math import isclose, isinf, isnan
+from math import isclose, isfinite, isinf, isnan
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
@@ -1049,7 +1049,11 @@ class DeployConfig(BaseModel):
 
 
 class PdDisaggPhaseConfig(BaseModel):
-    """Configuration shared by one PD disaggregation tuning phase."""
+    """Configuration shared by one PD disaggregation tuning phase.
+
+    Range fields require a positive integer dtype_param (not a string, float or
+    bool) and finite min/max bounds that can be converted to integers.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1077,6 +1081,29 @@ class PdDisaggPhaseConfig(BaseModel):
         if not value or any(char.isspace() for char in value):
             raise ValueError("plugin and field names must be non-empty tokens")
         return value
+
+    @field_validator("target_field")
+    @classmethod
+    def validate_range_fields(cls, fields: list[OptimizerConfigField]) -> list[OptimizerConfigField]:
+        for field in fields:
+            if field.dtype != "range":
+                continue
+            if type(field.dtype_param) is not int or field.dtype_param <= 0:
+                raise ValueError(
+                    f"Invalid range step for field {field.name!r}: "
+                    f"dtype_param must be a positive integer, got {field.dtype_param!r}"
+                )
+            if not isfinite(field.min) or not isfinite(field.max):
+                raise ValueError(
+                    f"Invalid range bounds for field {field.name!r}: min and max must be finite numbers "
+                    f"convertible to integers, got min={field.min!r}, max={field.max!r}"
+                )
+        return fields
+
+    @model_validator(mode="after")
+    def normalize_target_fields(self):
+        range_to_enum(self.target_field)
+        return self
 
 
 def _default_prefill_phase() -> PdDisaggPhaseConfig:

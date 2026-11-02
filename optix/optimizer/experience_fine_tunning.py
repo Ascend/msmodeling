@@ -18,6 +18,7 @@ from math import floor, isclose, isinf, isnan
 from typing import Optional, Tuple
 
 import numpy as np
+from loguru import logger
 
 from ..config.config import (
     default_support_field,
@@ -231,7 +232,10 @@ class FineTune:
                 f"REQUESTRATE range [{request_rate_field.min}, {request_rate_field.max}]."
             )
         if performance_index.time_per_output_token is None:
-            raise ValueError("Missing performance data for TPOT.")
+            if self.tpot_penalty != 0:
+                raise ValueError("Missing performance data for TPOT.")
+            logger.debug("TPOT missing but tpot_penalty=0; skipping TPOT-driven concurrency tuning.")
+            return False
 
         current_concurrency = float(concurrency_field.value)
         if current_concurrency <= 0:
@@ -357,18 +361,20 @@ class FineTune:
         tpot_flag = self.tpot_penalty != 0 and self.tpot_slo == 0
         if ttft_flag or tpot_flag:
             raise ValueError("Penalty is set but SLO is zero.")
-        if performance_index.time_per_output_token is None:
+        if self.tpot_penalty != 0 and performance_index.time_per_output_token is None:
             raise ValueError("Missing performance data for TPOT.")
         if self.ttft_penalty != 0 and performance_index.time_to_first_token is None:
             raise ValueError("Missing performance data for TTFT.")
+        if performance_index.time_per_output_token is None:
+            logger.debug("TPOT missing but tpot_penalty=0; continuing with TTFT-driven fine-tune.")
 
     def direction_of_field_update(self, performance_index: PerformanceIndex):
         actual_tpot = performance_index.time_per_output_token
         actual_ttft = performance_index.time_to_first_token
         self.ttft_over_slo = False
         self.ttft_under_lower_bound = False
-        self.tpot_over_slo = actual_tpot > self.tpot_upper_bound
-        self.tpot_under_lower_bound = actual_tpot < self.tpot_lower_bound
+        self.tpot_over_slo = actual_tpot is not None and actual_tpot > self.tpot_upper_bound
+        self.tpot_under_lower_bound = actual_tpot is not None and actual_tpot < self.tpot_lower_bound
         # Also constrain ttft
         if self.ttft_penalty != 0:
             self.ttft_over_slo = actual_ttft > self.ttft_upper_bound

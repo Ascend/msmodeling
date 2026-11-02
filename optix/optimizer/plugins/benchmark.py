@@ -140,7 +140,7 @@ class AisBench(BenchmarkInterface):
         if not del_log:
             backup(self.run_log, self.bak_path, self.__class__.__name__)
 
-    def get_performance_metric(self, metric_name: str, algorithm: str = "average"):
+    def get_performance_metric(self, metric_name: str, algorithm: str = "average", *, required: bool = True):
         output_path = Path(self.config.output_path)
         result_files = glob.glob(f"{output_path}/*/performances/*/*.csv")
         if len(result_files) != 1:
@@ -166,7 +166,9 @@ class AisBench(BenchmarkInterface):
             if not _res:
                 continue
             return parse_result(_res)
-        raise ValueError(f"Not Found value.  metric_name {metric_name}, algorithm: {algorithm}")
+        if required:
+            raise ValueError(f"Not Found value.  metric_name {metric_name}, algorithm: {algorithm}")
+        return None
 
     def get_best_concurrency(self):
         output_path = Path(self.config.output_path)
@@ -202,7 +204,11 @@ class AisBench(BenchmarkInterface):
         performance_index.time_per_output_token = self.get_performance_metric(
             self.config.performance_config.time_per_output_token.metric,
             self.config.performance_config.time_per_output_token.algorithm,
+            # Single-token Prefill results omit TPOT when it cannot be measured.
+            required=get_settings().tpot_penalty != 0,
         )
+        if performance_index.time_per_output_token is None:
+            logger.debug("TPOT missing but tpot_penalty=0; accepting AISBench result without TPOT.")
         csv_files = _require_unique_csv(output_path)
         csv_path = Path(csv_files[0])
         json_file = csv_path.with_suffix(".json")

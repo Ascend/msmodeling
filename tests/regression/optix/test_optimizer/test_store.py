@@ -50,14 +50,16 @@ class TestDataStorage(unittest.TestCase):
             OptimizerConfigField(name="param2", value=2),
         )
         kwargs = {"key1": "value1", "key2": "value2"}
+        header = [*PerformanceIndex.model_fields, "param2", "param1", "key2", "key1"]
+        mock_csv.reader.return_value = iter([header])
 
         storage.save(performance_index, params, **kwargs)
 
-        mock_open_file.assert_called_once_with(storage.save_file, "a+")
+        mock_open_file.assert_called_once_with(storage.save_file, "a+", newline="")
         mock_csv.writer.assert_called_once_with(mock_file)
         mock_writer.writerow.assert_called_once()
         written_row = mock_writer.writerow.call_args[0][0]
-        assert len(written_row) > 0
+        assert written_row[-4:] == [2, 1, "value2", "value1"]
         assert mock_sanitize_csv_value.call_count == len(written_row)
 
     def test_save_strips_leading_double_dash_before_sanitize(self):
