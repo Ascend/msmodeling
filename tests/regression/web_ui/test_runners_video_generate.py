@@ -202,14 +202,16 @@ class TestRunOneVideoCase:
                     "device": "TEST_DEVICE",
                     "num-devices": 2,
                     "quantize-linear-action": "W8A8_DYNAMIC",
+                    "quantize-attention-action": "FP8",
                     "ulysses-size": 4,
                 }
             )
-        # Assert ALL 5 config fields the production code populates.
+        # Assert ALL 6 config fields the production code populates.
         assert rec["config"]["device"] == "TEST_DEVICE"
         assert rec["config"]["model_id"] == "Wan-AI/Wan2.1-T2V-1.3B"
         assert rec["config"]["world_size"] == 2
         assert rec["config"]["quantize_linear_action"] == "W8A8_DYNAMIC"
+        assert rec["config"]["quantize_attention_action"] == "FP8"
         assert rec["config"]["ulysses_size"] == 4
         assert rec["summary"]["execution_time_s"] == {"default": 3.0}
         assert rec["tables"]["execution_time_s"] == {"default": 3.0}
@@ -238,6 +240,67 @@ class TestRunOneVideoCase:
             from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 
             assert kwargs["quantize_linear_action"] == QuantizeLinearAction.W8A8_DYNAMIC
+
+    def test_attention_and_quantize_attention_fields_coerced(self):
+        """attention-* / quantize-attention-action form values reach the runner typed."""
+        rt = _runtime()
+        with self._patch_runner(rt) as mock_cls:
+            mock_cls.return_value.run_inference.return_value = rt
+            _run_one_video_case(
+                {
+                    "model-id": "m",
+                    "device": "TEST_DEVICE",
+                    "attention-backend": "dense",
+                    "attention-block-size": "256",
+                    "attention-sparsity": "0.3",
+                    "quantize-attention-action": "FP8",
+                }
+            )
+            kwargs = mock_cls.call_args.kwargs
+            from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
+            from tensor_cast.model_config import AttentionBackend
+
+            assert kwargs["attention_backend"] == AttentionBackend.dense
+            assert kwargs["attention_block_size"] == 256
+            assert kwargs["attention_sparsity"] == 0.3
+            assert kwargs["quantize_attention_action"] == QuantizeAttentionAction.FP8
+
+    def test_invalid_attention_and_quantize_attention_fall_back(self):
+        """Unrecognized attention-backend / quantize-attention-action fall back to defaults."""
+        rt = _runtime()
+        with self._patch_runner(rt) as mock_cls:
+            mock_cls.return_value.run_inference.return_value = rt
+            _run_one_video_case(
+                {
+                    "model-id": "m",
+                    "device": "TEST_DEVICE",
+                    "attention-backend": "not-a-backend",
+                    "attention-block-size": "",
+                    "attention-sparsity": "",
+                    "quantize-attention-action": "not-a-quant",
+                }
+            )
+            kwargs = mock_cls.call_args.kwargs
+            from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
+            from tensor_cast.model_config import AttentionBackend
+
+            assert kwargs["attention_backend"] == AttentionBackend.dense
+            assert kwargs["attention_block_size"] == 128
+            assert kwargs["attention_sparsity"] == 0.0
+            assert kwargs["quantize_attention_action"] == QuantizeAttentionAction.DISABLED
+
+    def test_quantize_attention_action_is_multi_case_field(self):
+        """quantize-attention-action is multi-select: the frontend preset system
+        writes it as an ARRAY (ARRAY_COMPATIBLE_FIELDS in useModelFeatures.ts,
+        e.g. ['FP8'] for the W8A8C8 preset). Registering it as a multi-case
+        field makes run_cases expand arrays into per-case scalars before
+        _run_one_video_case coerces the enum — a single-select field would
+        render blank and submit the raw array.
+        """
+        from runners.video_generate import _VIDEO_MULTI_FIELDS
+
+        assert "quantize-attention-action" in _VIDEO_MULTI_FIELDS
+        assert "quantize-linear-action" in _VIDEO_MULTI_FIELDS
 
     def test_chrome_trace_exported_and_failure_swallowed(self):
         """chrome_trace set -> export_chrome_trace called; its failure swallowed."""
@@ -424,12 +487,17 @@ class TestVideoGenerateRunnerClass:
         """Constructor applies defaults for optional params."""
         from runners._video_generate_runner import VideoGenerateRunner
 
-        from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
+        from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
+        from tensor_cast.model_config import AttentionBackend
 
         runner = VideoGenerateRunner(device="TEST_DEVICE", model_id="m")
         assert runner.dtype == "float16"
         assert runner.quantize_linear_action == QuantizeLinearAction.W8A8_DYNAMIC
+        assert runner.quantize_attention_action == QuantizeAttentionAction.DISABLED
         assert runner.mxfp4_group_size == 32
+        assert runner.attention_backend == AttentionBackend.dense
+        assert runner.attention_block_size == 128
+        assert runner.attention_sparsity == 0.0
         assert runner.world_size == 1
         assert runner.ulysses_size == 1
 
@@ -467,7 +535,11 @@ class TestVideoGenerateRunnerClass:
             sample_step=50,
             dtype="float16",
             quantize_linear_action=runner.quantize_linear_action,
+            quantize_attention_action=runner.quantize_attention_action,
             mxfp4_group_size=32,
+            attention_backend=runner.attention_backend,
+            attention_block_size=runner.attention_block_size,
+            attention_sparsity=runner.attention_sparsity,
             world_size=1,
             ulysses_size=1,
             use_cfg=True,

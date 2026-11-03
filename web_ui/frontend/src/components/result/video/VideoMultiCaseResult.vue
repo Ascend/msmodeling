@@ -21,7 +21,8 @@
  * Video multi-case comparison view (Phase D2).
  *
  * Shown when a video_generate job's result envelope has `multi_case: true`
- * (device / quantize_linear_action / ulysses_size had multiple values).
+ * (device / quantize_linear_action / quantize_attention_action / ulysses_size
+ * had multiple values).
  * Sections: case summary table + op comparison table (toggle total/avg) +
  * op detail table + drill-down reusing VideoGenerateResult.
  */
@@ -69,6 +70,7 @@ const summaryRows = computed(() =>
     idx: i,
     device: c.config?.device,
     quant: c.config?.quantize_linear_action,
+    attn_quant: c.config?.quantize_attention_action,
     ulysses: c.config?.ulysses_size,
     exec_time: execTotal(c),
     error: c.summary?.error || '',
@@ -122,6 +124,7 @@ function selectRow(row: any) {
         <el-table-column label="#" width="48" type="index" />
         <el-table-column label="device" prop="device" min-width="150" show-overflow-tooltip />
         <el-table-column label="quant" prop="quant" min-width="120" show-overflow-tooltip />
+        <el-table-column label="attn quant" prop="attn_quant" min-width="110" show-overflow-tooltip />
         <el-table-column label="ulysses" prop="ulysses" width="80" />
         <el-table-column label="exec time(s)" width="130">
           <template #default="{ row }">{{ row.exec_time === null ? '-' : fmt(row.exec_time) }}</template>

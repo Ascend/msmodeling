@@ -89,7 +89,8 @@ _VIDEO_MULTI_FIELDS = {fid: parser for fid, parser in _VIDEO_MULTI_FIELDS_WITH_P
 
 def _run_one_video_case(params: dict[str, Any]) -> dict[str, Any]:
     """Run a single (already concrete) video-gen case; return its record dict."""
-    from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
+    from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
+    from tensor_cast.model_config import AttentionBackend
     from runners._video_generate_runner import VideoGenerateRunner
     from services.enum_utils import coerce_enum
 
@@ -100,6 +101,18 @@ def _run_one_video_case(params: dict[str, Any]) -> dict[str, Any]:
     except ValueError:
         quant_enum = QuantizeLinearAction.W8A8_DYNAMIC
 
+    quant_attn_action = params.get("quantize-attention-action", "DISABLED")
+    try:
+        quant_attn_enum = coerce_enum(QuantizeAttentionAction, quant_attn_action)
+    except ValueError:
+        quant_attn_enum = QuantizeAttentionAction.DISABLED
+
+    attn_backend = params.get("attention-backend", "dense")
+    try:
+        attn_backend_enum = coerce_enum(AttentionBackend, attn_backend)
+    except ValueError:
+        attn_backend_enum = AttentionBackend.dense
+
     # Resolve a relative model_id: prefer tests/assets/model_config/<id>,
     # then repo root, then fall back to remote id.
     model_id = resolve_model_id_path(params.get("model-id"))
@@ -109,7 +122,11 @@ def _run_one_video_case(params: dict[str, Any]) -> dict[str, Any]:
         model_id=model_id,
         dtype=params.get("dtype", "float16"),
         quantize_linear_action=quant_enum,
+        quantize_attention_action=quant_attn_enum,
         mxfp4_group_size=int(params.get("mxfp4-group-size", 32) or 32),
+        attention_backend=attn_backend_enum,
+        attention_block_size=int(params.get("attention-block-size", 128) or 128),
+        attention_sparsity=float(params.get("attention-sparsity", 0.0) or 0.0),
         world_size=int(params.get("num-devices", 1) or 1),
         ulysses_size=int(params.get("ulysses-size", 1) or 1),
     )
@@ -167,6 +184,7 @@ def _run_one_video_case(params: dict[str, Any]) -> dict[str, Any]:
             "model_id": params.get("model-id"),
             "world_size": params.get("num-devices", 1),
             "quantize_linear_action": params.get("quantize-linear-action"),
+            "quantize_attention_action": params.get("quantize-attention-action"),
             "ulysses_size": params.get("ulysses-size", 1),
         },
         "summary": {"execution_time_s": envelope.get("execution_time_s")},
@@ -184,9 +202,9 @@ def execute(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Worker-side entry (runs in the ``runners._worker`` subprocess).
 
-    Multi-case (Phase D2): device / quantize_linear_action / ulysses_size may
-    carry multiple values; their cartesian product is run sequentially (see
-    ``runners._multicase.run_cases``). Case-level dedup: cases whose hash is in
+    Multi-case (Phase D2): device / quantize_linear_action /
+    quantize_attention_action / ulysses_size may carry multiple values; their
+    cartesian product is run sequentially (see ``runners._multicase.run_cases``). Case-level dedup: cases whose hash is in
     ``cached_hashes`` are skipped (in the returned ``skipped`` list).
     """
     from cli.logo import print_logo

@@ -45,7 +45,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
+from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
+from tensor_cast.model_config import DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE, AttentionBackend
 
 
 class VideoGenerateRunner:
@@ -61,7 +62,11 @@ class VideoGenerateRunner:
         model_id: str,
         dtype: str = "float16",
         quantize_linear_action: QuantizeLinearAction = QuantizeLinearAction.W8A8_DYNAMIC,
+        quantize_attention_action: QuantizeAttentionAction = QuantizeAttentionAction.DISABLED,
         mxfp4_group_size: int = 32,
+        attention_backend: AttentionBackend = AttentionBackend.dense,
+        attention_block_size: int = DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE,
+        attention_sparsity: float = 0.0,
         world_size: int = 1,
         ulysses_size: int = 1,
     ):
@@ -69,7 +74,11 @@ class VideoGenerateRunner:
         self.model_id = model_id
         self.dtype = dtype
         self.quantize_linear_action = quantize_linear_action
+        self.quantize_attention_action = quantize_attention_action
         self.mxfp4_group_size = mxfp4_group_size
+        self.attention_backend = attention_backend
+        self.attention_block_size = attention_block_size
+        self.attention_sparsity = attention_sparsity
         self.world_size = world_size
         self.ulysses_size = ulysses_size
 
@@ -118,7 +127,11 @@ class VideoGenerateRunner:
                 sample_step=sample_step,
                 dtype=self.dtype,
                 quantize_linear_action=self.quantize_linear_action,
+                quantize_attention_action=self.quantize_attention_action,
                 mxfp4_group_size=self.mxfp4_group_size,
+                attention_backend=self.attention_backend,
+                attention_block_size=self.attention_block_size,
+                attention_sparsity=self.attention_sparsity,
                 world_size=self.world_size,
                 ulysses_size=self.ulysses_size,
                 use_cfg=use_cfg,

@@ -206,11 +206,9 @@ def run_inference(
         block_size=attention_block_size,
         sparsity=attention_sparsity,
     )
-    if (
-        route_plan.backend == AttentionBackend.block_sparse_attention
-        and quantize_attention_action != QuantizeAttentionAction.DISABLED
-    ):
-        raise ValueError("block_sparse_attention does not support attention quantization in the first version.")
+    # The block_sparse_attention × attention-quantization constraint is enforced
+    # by SPEC.validators (CLI parse time + web UI per case); direct Python
+    # callers are covered by the engine-level guard in use_custom_sdpa below.
 
     if device not in DeviceProfile.all_device_profiles:
         raise ValueError(f"Device '{device}' not recognized.")

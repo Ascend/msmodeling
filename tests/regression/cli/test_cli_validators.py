@@ -374,6 +374,59 @@ class TestValidatorContract:
             )
 
 
+# ── video_generate: block_sparse_attention × attention quantization ────
+
+
+class TestBlockSparseAttentionRejectsQuantization:
+    """block_sparse_attention backend rejects non-DISABLED attention quantization
+    (registry single source of truth; the engine-level guard in
+    tensor_cast/diffusers/diffusers_attention.py:use_custom_sdpa backstops
+    direct Python callers).
+    """
+
+    @staticmethod
+    def _fn(params):
+        from cli.registry.validators import block_sparse_attention_rejects_attention_quantization
+
+        return block_sparse_attention_rejects_attention_quantization(params)
+
+    def test_block_sparse_with_fp8_rejected(self):
+        msg = self._fn({"attention-backend": "block_sparse_attention", "quantize-attention-action": "FP8"})
+        assert msg is not None and "DISABLED" in msg
+
+    def test_block_sparse_with_disabled_passes(self):
+        assert (
+            self._fn({"attention-backend": "block_sparse_attention", "quantize-attention-action": "DISABLED"}) is None
+        )
+
+    def test_dense_with_quantization_passes(self):
+        assert self._fn({"attention-backend": "dense", "quantize-attention-action": "HIF8"}) is None
+
+    def test_kebab_spelling_normalized(self):
+        msg = self._fn({"attention-backend": "block-sparse-attention", "quantize-attention-action": "INT8"})
+        assert msg is not None
+
+    def test_enum_members_accepted(self):
+        from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
+        from tensor_cast.model_config import AttentionBackend
+
+        msg = self._fn(
+            {
+                "attention-backend": AttentionBackend.block_sparse_attention,
+                "quantize-attention-action": QuantizeAttentionAction.FP8,
+            }
+        )
+        assert msg is not None
+
+    def test_missing_values_pass(self):
+        assert self._fn({}) is None
+        assert self._fn({"attention-backend": None, "quantize-attention-action": None}) is None
+
+    def test_spec_wires_validator(self):
+        spec = get_spec("video_generate")
+        assert "blockSparseAttentionRejectsAttentionQuantization" in [v.name for v in spec.validators]
+
+
 # ── Capacity planning: derived --num-devices ─────────────────────────
 
 

@@ -237,12 +237,17 @@ class TestGetValidatorUI:
         assert set(validator_ui) == {
             "cfgParallelRequiresUseCfg",
             "numDevicesMatchesUlyssesSize",
+            "blockSparseAttentionRejectsAttentionQuantization",
         }
         assert validator_ui["cfgParallelRequiresUseCfg"]["fields"] == ["cfg-parallel", "use-cfg"]
         assert validator_ui["numDevicesMatchesUlyssesSize"]["fields"] == [
             "num-devices",
             "ulysses-size",
             "cfg-parallel",
+        ]
+        assert validator_ui["blockSparseAttentionRejectsAttentionQuantization"]["fields"] == [
+            "attention-backend",
+            "quantize-attention-action",
         ]
 
     def test_get_validator_ui_unknown_module_raises(self):

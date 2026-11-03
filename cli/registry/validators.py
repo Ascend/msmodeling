@@ -484,6 +484,38 @@ def num_devices_matches_ulysses_size(params: dict[str, Any]) -> str | None:
     return None
 
 
+def block_sparse_attention_rejects_attention_quantization(params: dict[str, Any]) -> str | None:
+    """attention-backend=block_sparse_attention requires quantize-attention-action=DISABLED.
+
+    Single source of truth for this constraint (block sparse attention does
+    not support attention quantization in the first version). Enforced at CLI
+    parse time and per-case in the web UI via SPEC.validators; direct Python
+    callers of run_inference are covered by the engine-level guard in
+    tensor_cast/diffusers/diffusers_attention.py:use_custom_sdpa.
+
+    Args:
+        params: Dict keyed by kebab-case param names.
+
+    Returns:
+        None if valid, error message string if invalid.
+    """
+    backend = params.get("attention-backend")
+    quant = params.get("quantize-attention-action")
+    if backend is None or quant is None:
+        return None
+    # Values arrive as plain strings (web form), StrEnum members (CLI path),
+    # or kebab-case spellings — normalize before comparing.
+    backend_norm = str(backend).lower().replace("-", "_")
+    quant_norm = str(quant).upper().replace("-", "_")
+    if backend_norm == "block_sparse_attention" and quant_norm != "DISABLED":
+        return (
+            "attention-backend=block_sparse_attention does not support attention "
+            f"quantization in the first version (got quantize-attention-action={quant}); "
+            "set quantize-attention-action to DISABLED"
+        )
+    return None
+
+
 # ── Unified speculative decoding G2/G3 validators ──────────────────────
 # wants_provided=True: distinguish "explicitly passed default" from "not passed"
 

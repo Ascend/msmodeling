@@ -31,7 +31,7 @@ from cli.registry.modules import get_spec
 from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
-VERSION = "2.6.11"
+VERSION = "2.6.14"
 
 TITLE = I18nText("视频生成", "Video Generate")
 RUNNER = "VideoGenerateRunner"
@@ -84,6 +84,13 @@ VALIDATOR_UI = {
         "message": I18nText(
             "num-devices 必须等于 ulysses-size，启用 cfg-parallel 时须等于 2 × ulysses-size",
             "num-devices must equal ulysses-size, or 2 × ulysses-size with cfg-parallel",
+        ),
+    },
+    "blockSparseAttentionRejectsAttentionQuantization": {
+        "fields": ["attention-backend", "quantize-attention-action"],
+        "message": I18nText(
+            "block_sparse_attention 后端暂不支持注意力量化，请将注意力量化设为 DISABLED",
+            "block_sparse_attention does not support attention quantization yet; set attention quantization to DISABLED",
         ),
     },
 }
@@ -284,15 +291,19 @@ UI: dict[str, UIFieldProps] = {
     ),
     "attention-backend": UIFieldProps(
         label=I18nText("注意力后端", "Attention Backend"),
-        tooltip=I18nText("注意力计算后端。", "Attention computation backend."),
+        tooltip=I18nText(
+            "注意力计算后端（block_sparse_attention 暂不支持注意力量化）。",
+            "Attention computation backend (block_sparse_attention does not support attention quantization yet).",
+        ),
         option_source={
             "type": "inline",
             "values": [
-                {"value": "default", "label": "Default"},
+                {"value": "dense", "label": "Dense"},
                 {"value": "block_sparse_attention", "label": "Block Sparse Attention"},
             ],
         },
-        hidden=True,
+        default="dense",
+        group={"zh": "注意力", "en": "Attention Options"},
         control="select",
     ),
     "attention-block-size": UIFieldProps(
@@ -301,7 +312,9 @@ UI: dict[str, UIFieldProps] = {
             "Block sparse attention 的块大小。",
             "Block size for block sparse attention.",
         ),
-        hidden=True,
+        default=128,
+        group={"zh": "注意力", "en": "Attention Options"},
+        control="number",
     ),
     "attention-sparsity": UIFieldProps(
         label=I18nText("注意力稀疏度", "Attention Sparsity"),
@@ -309,13 +322,35 @@ UI: dict[str, UIFieldProps] = {
             "Block sparse attention 的稀疏度(0-1)。",
             "Sparsity for block sparse attention (0-1).",
         ),
-        hidden=True,
+        default=0.0,
+        group={"zh": "注意力", "en": "Attention Options"},
+        control="number",
     ),
     "remote-source": UIFieldProps(hidden=True),
     "compile": UIFieldProps(hidden=True),
     "compile-allow-graph-break": UIFieldProps(hidden=True),
     "prefix-cache-hit-rate": UIFieldProps(hidden=True),
-    "quantize-attention-action": UIFieldProps(hidden=True),
+    "quantize-attention-action": UIFieldProps(
+        label=I18nText("注意力量化", "Attention Quantization"),
+        tooltip=I18nText(
+            "注意力 KV Cache 的量化策略（可多选；每个取值单独仿真，结果区生成多用例对比。HIF8 使用 HIF8 存储 + BF16 注意力计算，仅仿真；block_sparse_attention 后端暂不支持）。",
+            "Quantization for attention KV cache (multi-select; each value runs independently and yields a multi-case comparison. HIF8 uses HIF8 storage with BF16 attention compute, simulation only; not supported with the block_sparse_attention backend).",
+        ),
+        option_source={
+            "type": "inline",
+            "values": [
+                {"value": "DISABLED", "label": "DISABLED"},
+                {"value": "INT8", "label": "INT8"},
+                {"value": "FP8", "label": "FP8"},
+                {"value": "HIF8", "label": "HIF8"},
+            ],
+        },
+        multi_values=True,
+        data_type="string[]",
+        default=["DISABLED"],
+        group={"zh": "量化", "en": "Quantization"},
+        control="multi-select",
+    ),
     "use-cfg": UIFieldProps(
         label=I18nText("启用 CFG", "Enable CFG"),
         tooltip=I18nText("启用 Classifier-Free Guidance。", "Enable Classifier-Free Guidance."),

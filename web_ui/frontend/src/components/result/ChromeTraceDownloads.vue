@@ -83,6 +83,9 @@ const formatConfig = (config: Record<string, any> | undefined | null): string =>
   if (config.quantize_linear_action && config.quantize_linear_action !== 'W8A8_DYNAMIC') {
     parts.push(config.quantize_linear_action)
   }
+  if (config.quantize_attention_action && config.quantize_attention_action !== 'DISABLED') {
+    parts.push(`attn=${config.quantize_attention_action}`)
+  }
 
   return parts.join(' · ') || t({ zh: '默认配置', en: 'Default' })
 }

@@ -234,6 +234,10 @@ SPEC = ModuleSpec(
     validators=[
         ValidatorRef(name="cfgParallelRequiresUseCfg", fn=V.cfg_parallel_requires_use_cfg),
         ValidatorRef(name="numDevicesMatchesUlyssesSize", fn=V.num_devices_matches_ulysses_size),
+        ValidatorRef(
+            name="blockSparseAttentionRejectsAttentionQuantization",
+            fn=V.block_sparse_attention_rejects_attention_quantization,
+        ),
     ],
     fields=[
         # General (baseline order: device first, then model_id positional)
