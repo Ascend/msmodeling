@@ -9,6 +9,7 @@ This reference summarizes high-value parameters for `python -m cli.inference.tex
   are not security-guaranteed by msmodeling.
 - `--device`: target device profile; default is `TEST_DEVICE`, but real planning should specify a concrete profile.
 - `--num-devices`: total device/process count; default is `1`.
+- `--reserved-memory-gb`: device memory in GB reserved for system usage; must be non-negative; default is `0.0`.
 - `--num-queries`: number of parallel inference queries in one batch; required.
 - `--query-length`: new input sequence length in tokens; required.
 - `--context-length`: existing context length in tokens; default is `0`.
@@ -17,9 +18,11 @@ This reference summarizes high-value parameters for `python -m cli.inference.tex
 ## Optimization And Quantization
 
 - `--compile`: enables compiled path simulation; the skill adds it by default for realistic compiled-path validation, shows the assumption, and lets the user disable it before execution.
+- `--fusion-plugin`: path to a fusion plugin `.py` file; requires `--compile` and may be repeated; default is `None`.
 - `--compile-allow-graph-break`: allows graph breaks during compile for dynamic models.
 - `--compilation-config`: enables specific compilation features dynamically. Options: `enable_multistream`, `enable_sequence_parallel`, `enable_matmul_allreduce`, `enable_dispatch_ffn_combine`. Multiple values can be passed, e.g. `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`. When omitted, all compilation features remain disabled.
 - `--quantize-linear-action`: default is `W8A8_DYNAMIC`.
+- `--quantize-non-expert-linear-action`: overrides matching non-expert and shared-expert linear layers; routed experts keep `--quantize-linear-action`; default is `DISABLED` (no override).
 - `--quantize-attention-action`: default is `DISABLED`.
 - `--quantize-lmhead`: off by default because LM head quantization can affect accuracy. Takes effect only when
   `--quantize-linear-action` is not `DISABLED`; uses the same action and removes the default LM head exclusion,
@@ -29,6 +32,8 @@ This reference summarizes high-value parameters for `python -m cli.inference.tex
 ## Parallelism
 
 - `--tp-size`: tensor parallel size for the whole model; default is `1`.
+- `--pp-size`: pipeline parallel size; `tp-size * dp-size * pp-size` must equal `num-devices`; default is `1`.
+- `--dcp-size`: decode context parallel size; reuses TP devices and must divide `--tp-size`; GQA with DCP > 1 requires `num_key_value_heads >= tp-size / dcp-size`; default is `1`.
 - `--dp-size`: data parallel size for the whole model; optional.
 - `--ep-size`: expert parallel size; default is `1`.
 - `--o-proj-tp-size`, `--o-proj-dp-size`: attention output projection overrides.
@@ -49,6 +54,7 @@ This reference summarizes high-value parameters for `python -m cli.inference.tex
 
 ## Multimodal
 
+- `--vision-tp-size`: vision tensor parallel size; `vision-tp-size * pp-size` must divide `num-devices`; default is `1`.
 - `--image-batch-size`: batch size for image processing.
 - `--image-height`: input image height.
 - `--image-width`: input image width.
@@ -61,11 +67,14 @@ After the candidate command is generated, always present `--chrome-trace`, `--gr
 
 - `--performance-model analytic`: default roofline-style model.
 - `--performance-model profiling`: empirical model backed by profiling CSV data.
+- `--performance-model`: may be repeated (argparse `append`) to compare `analytic`, `calibrated`, and `profiling` models, e.g. `--performance-model analytic --performance-model profiling`; `calibrated` requires `--analytic-calibration-profile`; default is `analytic`.
 - `--profiling-database`: required for profiling mode.
+- `--disable-profiling-interpolation`: disables the extra interpolation wrapper in profiling mode; base interpolation remains enabled; default is `False`.
 - `--export-empirical-metrics`: developer export path; requires profiling mode.
 - `--chrome-trace`: writes a Chrome trace file.
 - `--graph-log-url`: dumps compiled graphs when compile is enabled.
 - `--dump-input-shapes`: groups table averages by input shapes.
+- `--dump-op-bound-results`: dumps per-operator memory, communication, MMA, and GP bound ratios; default is `False`.
 - `--num-hidden-layers-override`: debug-only hidden layer override.
 - `--remote-source`: `huggingface` by default; use `modelscope` when requested.
 - `--log-level`: defaults to `error`; use `info` or `debug` for troubleshooting.
