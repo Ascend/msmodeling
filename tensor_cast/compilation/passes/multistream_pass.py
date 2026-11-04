@@ -35,6 +35,7 @@ from ...device import DeviceProfile
 from ...performance_model.analytic import AnalyticPerformanceModel
 from ...performance_model.op_invoke_info import OpInvokeInfo
 from ..pass_base import TensorCastGraphModulePass
+from .control_flow import collect_transparent
 from ..topo_sort import stable_topo_sort
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,12 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         torch.ops.tensor_cast._internal_mark_region_end.default,
         torch.ops.tensor_cast._internal_copy_region.default,
         torch.ops.tensor_cast._internal_copy_region_v2.default,
+        # Shared-expert lane control ops (see SharedExpertLanePass). They are
+        # transparent for this scheduler: never scheduled, and dataflow is resolved
+        # through them.
+        torch.ops.tensor_cast._internal_mark_lane_begin.default,
+        torch.ops.tensor_cast._internal_mark_lane_end.default,
+        torch.ops.tensor_cast._internal_spill.default,
     }
     RESOURCE_COMPUTE = "compute"
     RESOURCE_COMM = "comm"
@@ -129,6 +136,11 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         self._ranks: Dict[fx.Node, float] = {}
         self._schedule: Dict[fx.Node, _ScheduledNode] = {}
         self._cost_cache: Dict[tuple[fx.Node, int], float] = {}
+        # Cache of nodes owned by the shared-expert lane, keyed by graph identity:
+        # one pass instance may be reused across GraphModules (torch.compile caches
+        # the pass object), so a bare attribute would leak nodes between graphs.
+        self._lane_nodes_cache: Optional[tuple[int, set]] = None
+        self._program_order: Optional[tuple[int, Dict[fx.Node, int]]] = None
 
     def _resolve_device_profile(self) -> Optional[DeviceProfile]:
         if not self._device_name:
@@ -307,7 +319,42 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
 
         return map_arg(arg, _map_fx_arg_value)
 
+    def _lane_region_nodes(self, graph: fx.Graph) -> set:
+        """Nodes owned by ``SharedExpertLanePass`` (between lane markers)."""
+        graph_key = id(graph)
+        cached = self._lane_nodes_cache
+        if cached is not None and cached[0] == graph_key:
+            return cached[1]
+        owned = set()
+        depth = 0
+        for node in graph.nodes:
+            if node.target == torch.ops.tensor_cast._internal_mark_lane_begin.default:
+                depth += 1
+                owned.add(node)
+                continue
+            if node.target == torch.ops.tensor_cast._internal_mark_lane_end.default:
+                depth = max(0, depth - 1)
+                owned.add(node)
+                continue
+            if depth > 0:
+                owned.add(node)
+        self._lane_nodes_cache = (graph_key, owned)
+        return owned
+
+    def _node_program_order(self, graph: fx.Graph) -> Dict[fx.Node, int]:
+        """Program position of every node in ``graph`` (built once per call)."""
+        graph_key = id(graph)
+        cached = self._program_order
+        if cached is not None and cached[0] == graph_key:
+            return cached[1]
+        order = {node: index for index, node in enumerate(graph.nodes)}
+        self._program_order = (graph_key, order)
+        return order
+
     def _is_schedulable_node(self, node: fx.Node) -> bool:
+        if node in self._lane_region_nodes(node.graph):
+            # The shared-expert lane owns this node's stream and dependencies.
+            return False
         return (
             node.op == "call_function"
             and self._is_analytic_compatible_target(node.target)
@@ -315,6 +362,18 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             and not self._target_has_unsafe_schema(node.target)
             and self._is_single_tensor_value(self._node_value(node))
         )
+
+    def _dataflow_inputs(self, node: fx.Node) -> List[fx.Node]:
+        """Schedulable producers of ``node``, resolved through internal control ops."""
+        return collect_transparent([node], forward=False, program_order=self._node_program_order(node.graph))
+
+    def _dataflow_users(self, node: fx.Node) -> List[fx.Node]:
+        """Consumers of ``node``, resolved through internal control ops.
+
+        Sorted by program order so rank and ticket ordering stay deterministic
+        regardless of ``fx.Node.users`` insertion order.
+        """
+        return collect_transparent([node], forward=True, program_order=self._node_program_order(node.graph))
 
     def _node_policy(self, node: fx.Node) -> _NodePolicy:
         if node.target in self.COMM_ONLY_TARGETS:
@@ -415,7 +474,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             self_cost = min(self._estimate_node_cost_s(node, stream_id) for stream_id in self._allowed_streams(node))
             max_succ_rank = 0.0
             node_order = original_order[node]
-            for user in node.users.keys():
+            for user in self._dataflow_users(node):
                 if user in schedulable and original_order[user] > node_order:
                     max_succ_rank = max(
                         max_succ_rank,
@@ -435,7 +494,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         for resource in self._node_policy(node).required_resources:
             t_resource = max(t_resource, resource_ready_s.get(resource, 0.0))
         t_deps = 0.0
-        for parent in node.all_input_nodes:
+        for parent in self._dataflow_inputs(node):
             if parent not in self._schedule:
                 continue
             parent_sched = self._schedule[parent]
@@ -518,7 +577,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         dep_tokens: List[fx.Node] = []
         # Same-stream ops are already ordered by the stream/event queue. Only
         # cross-stream producer tokens need explicit waits in the FX graph.
-        for parent in node.all_input_nodes:
+        for parent in self._dataflow_inputs(node):
             parent_sched = self._schedule.get(parent)
             if parent_sched is None or parent_sched.stream_id == stream_id:
                 continue
@@ -581,6 +640,9 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             node_to_token[node] = token_node
 
     def __call__(self, gm: fx.GraphModule) -> fx.GraphModule:
+        # A reused pass instance must not see the previous graph's lane nodes/order.
+        self._lane_nodes_cache = None
+        self._program_order = None
         nodes_in_order = list(gm.graph.nodes)
         schedulable_nodes = [n for n in nodes_in_order if self._is_schedulable_node(n)]
         if not schedulable_nodes:

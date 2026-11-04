@@ -16,7 +16,7 @@
 
 import torch
 
-from .. import ops  # noqa: F401
+from .. import config, ops  # noqa: F401
 from .utils import ModelWrapperBase
 
 
@@ -145,3 +145,23 @@ class CopyLayerWrapper(torch.nn.Module):
             outputs = hidden_states
 
         return outputs
+
+
+def lane_marking_enabled(role: str) -> bool:
+    """Whether the shared-expert lane markers should be emitted for ``role``."""
+    cfg = config.compilation.multistream_overlap_shared_expert
+    return bool(cfg.enable) and cfg.role == role
+
+
+def mark_lane_begin(x: torch.Tensor, role: str) -> torch.Tensor:
+    """Open a multistream lane region around ``x`` when the feature is enabled."""
+    if not lane_marking_enabled(role):
+        return x
+    return torch.ops.tensor_cast._internal_mark_lane_begin(x, role)
+
+
+def mark_lane_end(x: torch.Tensor, role: str) -> torch.Tensor:
+    """Close a multistream lane region around ``x`` when the feature is enabled."""
+    if not lane_marking_enabled(role):
+        return x
+    return torch.ops.tensor_cast._internal_mark_lane_end(x, role)

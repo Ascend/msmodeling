@@ -44,6 +44,7 @@ COMPILATION_CONFIG_OPTIONS: list[str] = [
     "enable_matmul_allreduce",
     "enable_dispatch_ffn_combine",
     "enable_mlapo",
+    "multistream_overlap_shared_expert",
 ]
 
 
@@ -55,6 +56,7 @@ _COMPILATION_CONFIG_MAP: dict[str, str] = {
     "enable_matmul_allreduce": "compilation.fusion_patterns.enable_matmul_allreduce",
     "enable_dispatch_ffn_combine": "compilation.fusion_patterns.enable_dispatch_ffn_combine",
     "enable_mlapo": "compilation.fusion_patterns.enable_mlapo",
+    "multistream_overlap_shared_expert": "compilation.multistream_overlap_shared_expert.enable",
 }
 
 

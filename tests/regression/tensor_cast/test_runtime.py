@@ -342,7 +342,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
 
         actual_execution_time = self._execute_attention_and_get_base_data((q, k, v, None, None, None, None, None))
 
-        assert_close(self, actual_execution_time, 6.49e-6)
+        _assert_close(actual_execution_time, 6.49e-6)
 
     def test_attention_llm_eager(self):
         B, S, num_kv_heads, head_dim = 2, 256, 8, 64
@@ -363,7 +363,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             (q, k, v, None, block_table, None, request_total_seq_lens, query_lens)
         )
 
-        assert_close(self, actual_execution_time, 5.99e-6)
+        _assert_close(actual_execution_time, 5.99e-6)
 
     def test_linear_attn_chunk_rule_includes_scratch_memory_and_extra_static(self):
         batch_size, seq_len, num_heads, head_dim = 1, 65, 4, 16
@@ -836,7 +836,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         self.assertEqual(breakdown["head_reduce_gp"], 36)
         self.assertEqual(breakdown["head_k_scale_mul_gp"], 0)
         self.assertEqual(breakdown["topk_gp"], 18)
-        assert_close(self, breakdown["historical_effective_read_bytes"], 252 / 0.15)
+        _assert_close(breakdown["historical_effective_read_bytes"], 252 / 0.15)
         self.assertEqual(breakdown["append_cache_write_bytes"], 84)
         self.assertEqual(breakdown["append_scale_write_bytes"], 0)
         self.assertNotIn("cache_rw_bytes", breakdown)
@@ -851,7 +851,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
 
         prefill_query_units = (query_len + 3) // 4
         expected_prefill_read_bytes = prefill_query_units * seq_len * 7 * 2 / 0.90
-        assert_close(self, prefill["historical_effective_read_bytes"], expected_prefill_read_bytes)
+        _assert_close(prefill["historical_effective_read_bytes"], expected_prefill_read_bytes)
         self.assertLess(prefill["historical_effective_read_bytes"], decode["historical_effective_read_bytes"])
 
     def test_dsa_indexer_one_token_decode_uses_explicit_phase(self):
@@ -860,7 +860,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         decode = self._dsa_indexer_breakdown_for_requests([1], [seq_len], [True])
         legacy = self._dsa_indexer_breakdown_for_requests([1], [seq_len], None)
 
-        assert_close(self, decode["historical_effective_read_bytes"], legacy["historical_effective_read_bytes"])
+        _assert_close(decode["historical_effective_read_bytes"], legacy["historical_effective_read_bytes"])
 
     def test_dsa_indexer_mixed_phase_accounts_each_request(self):
         mixed = self._dsa_indexer_breakdown_for_requests([5, 1], [40965, 8193], [False, True])
@@ -954,7 +954,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             fp8_mode=True,
         )
 
-        assert_close(self, breakdown["historical_effective_read_bytes"], 540 / 0.15)
+        _assert_close(breakdown["historical_effective_read_bytes"], 540 / 0.15)
         self.assertEqual(breakdown["append_cache_write_bytes"], 84)
         self.assertEqual(breakdown["append_scale_write_bytes"], 24)
         self.assertNotIn("cache_rw_bytes", breakdown)
@@ -990,7 +990,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         self.assertEqual(breakdown["head_reduce_gp"], 36)
         self.assertEqual(breakdown["head_k_scale_mul_gp"], 18)
         self.assertEqual(breakdown["topk_gp"], 18)
-        assert_close(self, breakdown["historical_effective_read_bytes"], 198 / 0.15)
+        _assert_close(breakdown["historical_effective_read_bytes"], 198 / 0.15)
         self.assertEqual(breakdown["append_cache_write_bytes"], 42)
         self.assertEqual(breakdown["append_scale_write_bytes"], 24)
         self.assertNotIn("cache_rw_bytes", breakdown)
@@ -1035,7 +1035,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             )
         )
 
-        assert_close(self, actual_execution_time, 2.3537e-3)
+        _assert_close(actual_execution_time, 2.3537e-3)
 
     def test_mlapo_quant(self):
         num_tokens = 8192
@@ -1092,7 +1092,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             )
         )
 
-        assert_close(self, actual_execution_time, 1.2502e-3)
+        _assert_close(actual_execution_time, 1.2502e-3)
 
     def test_moe_gating_top_k_softmax(
         self,
@@ -1116,7 +1116,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         self.assertEqual(len(runtime.event_list), 1)
         analytic_result = runtime.event_list[0].perf_results.get("analytic")
         actual_execution_time = analytic_result.execution_time_s
-        assert_close(self, actual_execution_time, 2.0e-6)
+        _assert_close(actual_execution_time, 2.0e-6)
 
     def test_mla_eager_prefill_without_context(self):
         B, S, num_heads, q_head_dim = 2, 3500, 8, 192
@@ -1161,7 +1161,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         # Add the projected KV read at the independent attention-kernel boundary.
         projected_kv_bytes = total_tokens * num_heads * (qk_nope_head_dim + v_head_dim) * 2
         bandwidth = TEST_DEVICE.memory_bandwidth_bytes_ps * TEST_DEVICE.memory_efficiency
-        assert_close(self, actual_execution_time, 4.728510737228394e-05 + projected_kv_bytes / bandwidth)
+        _assert_close(actual_execution_time, 4.728510737228394e-05 + projected_kv_bytes / bandwidth)
 
     def test_mla_eager_prefill_with_context(self):
         B, S, num_heads, q_head_dim = 2, 7008, 8, 192
@@ -1206,7 +1206,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         # Add the projected KV read at the independent attention-kernel boundary.
         projected_kv_bytes = total_tokens * num_heads * (qk_nope_head_dim + v_head_dim) * 2
         bandwidth = TEST_DEVICE.memory_bandwidth_bytes_ps * TEST_DEVICE.memory_efficiency
-        assert_close(self, actual_execution_time, 4.728510737228394e-05 + projected_kv_bytes / bandwidth)
+        _assert_close(actual_execution_time, 4.728510737228394e-05 + projected_kv_bytes / bandwidth)
 
     def test_mla_eager_decode(self):
         B, S, num_heads, q_head_dim = 16, 7008, 8, 192
@@ -1251,7 +1251,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         # Replace original Q reads with absorbed Q reads and latent output writes.
         extra_bytes = total_tokens * num_heads * (kv_lora_rank + qk_rope_head_dim + kv_lora_rank - q_head_dim) * 2
         bandwidth = TEST_DEVICE.memory_bandwidth_bytes_ps * TEST_DEVICE.memory_efficiency
-        assert_close(self, actual_execution_time, 6.2113847732543945e-06 + extra_bytes / bandwidth)
+        _assert_close(actual_execution_time, 6.2113847732543945e-06 + extra_bytes / bandwidth)
 
     def _run_test_model(self, model_id, do_compile):
         num_tokens = 100
@@ -1733,7 +1733,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         # Serial sum is 10s, but critical path is 7s:
         # max(relu=3s on stream0, sigmoid=5s on stream1) + tanh=2s (depends on sigmoid).
         total_time_s = runtime.total_execution_time_s()[perf_model.name]
-        assert_close(self, total_time_s, 7.0)
+        _assert_close(total_time_s, 7.0)
         tracked_events = [event for event in runtime.event_list if event.op_invoke_info.func in durations_s]
         self.assertEqual(len(tracked_events), 3)
         self.assertEqual([event.stream_id for event in tracked_events], [0, 1, 0])
@@ -2182,3 +2182,351 @@ class PerfAnalysisNightlyTestCase(PerfAnalysisTestMixin, unittest.TestCase):
     )
     def test_deepseek(self, model_id):
         PerfAnalysisTestCase._run_test_deepseek(self, model_id, True)
+
+
+def _assert_close(value1, value2, rtol=0.01):
+    assert abs(value1 - value2) / max(value1, 1e-12) <= rtol, f"{value1} vs. {value2}"
+
+
+def _fixed_duration_model(durations_s):
+    perf_model = Mock(spec=PerformanceModel)
+    perf_model.name = "fixed"
+    perf_model.device_profile = TEST_DEVICE
+    perf_model.get_classifiers.return_value = []
+    perf_model.process_op.side_effect = lambda op: PerformanceModel.Result(
+        execution_time_s=durations_s.get(op.func, 0.0)
+    )
+    return perf_model
+
+
+def test_shared_expert_lane_markers_are_transparent():
+    """Markers must not create events, change the binding stream, or be counted."""
+    durations_s = {torch.ops.aten.relu.default: 2.0}
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        c0 = torch.ops.tensor_cast._internal_wait_and_bind.default(x, 0, [])
+        marked = torch.ops.tensor_cast._internal_mark_lane_begin.default(c0, "shared_expert")
+        out = torch.ops.aten.relu.default(marked)
+        marked_out = torch.ops.tensor_cast._internal_mark_lane_end.default(out, "shared_expert")
+        _ = torch.ops.tensor_cast._internal_record.default(marked_out, 0)
+
+    assert [event.op_invoke_info.func for event in runtime.event_list] == [torch.ops.aten.relu.default]
+    assert runtime.event_list[0].stream_id == 0
+    assert "internal_mark_lane" not in runtime.table_averages()
+
+
+def test_shared_expert_lane_stage_runs_on_its_stream():
+    durations_s = {torch.ops.aten.relu.default: 3.0, torch.ops.aten.sigmoid.default: 5.0}
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def func(t):
+        routed = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        routed = torch.ops.aten.relu.default(routed)
+        _ = torch.ops.tensor_cast._internal_record.default(routed, 0)
+
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [])
+        lane = torch.ops.aten.sigmoid.default(lane)
+        _ = torch.ops.tensor_cast._internal_record.default(lane, 2, "shared_expert:gate_up:anchor")
+        return routed, lane
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        func(x)
+
+    assert [event.stream_id for event in runtime.event_list] == [0, 2]
+    _assert_close(runtime.total_execution_time_s()[perf_model.name], 5.0)
+
+
+def test_shared_expert_spill_absorbs_stage_residual():
+    """Stream 0 waits from the moment it goes idle until the stage finishes."""
+    durations_s = {torch.ops.aten.relu.default: 3.0, torch.ops.aten.sigmoid.default: 5.0}
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def func(t):
+        routed = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        routed = torch.ops.aten.relu.default(routed)  # 3s on stream 0
+        anchor = torch.ops.tensor_cast._internal_record.default(routed, 0)
+
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [anchor])
+        lane = torch.ops.aten.sigmoid.default(lane)  # 5s on stream 2 (3..8s)
+        _ = torch.ops.tensor_cast._internal_record.default(lane, 2, "tag")
+
+        spill_wait = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        spill = torch.ops.tensor_cast._internal_spill.default(spill_wait, "shared_expert:gate_up", "tag")
+        _ = torch.ops.tensor_cast._internal_record.default(spill, 0)
+        return routed, lane, spill
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        func(x)
+
+    events = [event for event in runtime.get_trace_events() if event.get("ph") == "X"]
+    spills = [event for event in events if event["name"] == "shared_expert.spill[gate_up]"]
+    assert len(spills) == 1
+    # stream 0 goes idle at 3s, the stage finishes at 8s -> the wait is the 5s residual.
+    _assert_close(spills[0]["ts"], 3e6)
+    _assert_close(spills[0]["dur"], 5e6)
+    _assert_close(runtime.total_execution_time_s()[perf_model.name], 8.0)
+
+
+def test_shared_expert_spill_hidden_when_stage_fits():
+    durations_s = {torch.ops.aten.relu.default: 5.0, torch.ops.aten.sigmoid.default: 1.0}
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def func(t):
+        c0 = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [])
+        lane = torch.ops.aten.sigmoid.default(lane)  # 0..1s on stream 2
+        _ = torch.ops.tensor_cast._internal_record.default(lane, 2, "tag")
+        routed = torch.ops.aten.relu.default(c0)  # 5s on stream 0
+        spill_wait = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        spill = torch.ops.tensor_cast._internal_spill.default(spill_wait, "shared_expert:prep", "tag")
+        _ = torch.ops.tensor_cast._internal_record.default(spill, 0)
+        return routed, lane, spill
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        func(x)
+
+    events = [event for event in runtime.get_trace_events() if event.get("ph") == "X"]
+    assert not [event for event in events if event["name"].startswith("shared_expert.spill")]
+    assert "internal_spill" not in runtime.table_averages()
+    _assert_close(runtime.total_execution_time_s()[perf_model.name], 5.0)
+
+
+def test_shared_expert_spill_resolves_a_forward_referenced_stage_token():
+    """The real lowering order: the spill runs before the stage record it waits on."""
+    durations_s = {torch.ops.aten.relu.default: 3.0, torch.ops.aten.sigmoid.default: 5.0}
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def func(t):
+        routed = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        routed = torch.ops.aten.relu.default(routed)  # 0..3s on stream 0
+        anchor = torch.ops.tensor_cast._internal_record.default(routed, 0)
+
+        # The spill sits at the window boundary, *before* the stage publishes its tag.
+        spill_wait = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        spill = torch.ops.tensor_cast._internal_spill.default(spill_wait, "shared_expert:gate_up", "stage-tag")
+        _ = torch.ops.tensor_cast._internal_record.default(spill, 0)
+
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [anchor])
+        lane = torch.ops.aten.sigmoid.default(lane)  # 3..8s on stream 2
+        _ = torch.ops.tensor_cast._internal_record.default(lane, 2, "stage-tag")
+        return routed, lane, spill
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        func(x)
+
+    events = [event for event in runtime.get_trace_events() if event.get("ph") == "X"]
+    spill_blocks = [event for event in events if event["name"] == "shared_expert.spill[gate_up]"]
+    assert len(spill_blocks) == 1
+    # Stream 0 goes idle at 3s and the stage ends at 8s, so the wait is 5s.
+    _assert_close(spill_blocks[0]["ts"], 3e6)
+    _assert_close(spill_blocks[0]["dur"], 5e6)
+    _assert_close(runtime.total_execution_time_s()[perf_model.name], 8.0)
+
+    metrics = runtime.lane_metrics["gate_up"]
+    _assert_close(metrics["delay"], 5.0)
+    assert metrics["overrun"] == max(0.0, metrics["t_stage"])
+
+
+def test_shared_expert_spills_propagate_across_rounds():
+    """Two forward-referenced spills: the later one depends on the earlier residual."""
+    durations_s = {
+        torch.ops.aten.relu.default: 3.0,
+        torch.ops.aten.sigmoid.default: 5.0,
+        torch.ops.aten.tanh.default: 2.0,
+    }
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def func(t):
+        routed = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        routed = torch.ops.aten.relu.default(routed)  # 0..3s
+        anchor1 = torch.ops.tensor_cast._internal_record.default(routed, 0)
+
+        spill1_wait = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        spill1 = torch.ops.tensor_cast._internal_spill.default(spill1_wait, "shared_expert:gate_up", "tag1")
+        spill1_done = torch.ops.tensor_cast._internal_record.default(spill1, 0)
+        # The second stage starts once stream 0 got past spill1, so its residual can only
+        # be resolved after the first one is known.
+        anchor2 = torch.ops.tensor_cast._internal_record.default(spill1_done, 0)
+        spill2_wait = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        spill2 = torch.ops.tensor_cast._internal_spill.default(spill2_wait, "shared_expert:down", "tag2")
+        _ = torch.ops.tensor_cast._internal_record.default(spill2, 0)
+
+        lane1 = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [anchor1])
+        lane1 = torch.ops.aten.sigmoid.default(lane1)  # 3..8s on stream 2
+        _ = torch.ops.tensor_cast._internal_record.default(lane1, 2, "tag1")
+
+        lane2 = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [anchor2])
+        lane2 = torch.ops.aten.tanh.default(lane2)  # max(8s, anchor2) .. +2s
+        _ = torch.ops.tensor_cast._internal_record.default(lane2, 2, "tag2")
+        return routed, lane1, lane2
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        func(x)
+
+    events = [event for event in runtime.get_trace_events() if event.get("ph") == "X"]
+    spills = {event["name"]: event for event in events if event["name"].startswith("shared_expert.spill")}
+    assert set(spills) == {"shared_expert.spill[gate_up]", "shared_expert.spill[down]"}
+    # First residual: stream 0 idle at 3s, stage 1 ends at 8s -> 5s.
+    _assert_close(spills["shared_expert.spill[gate_up]"]["ts"], 3e6)
+    _assert_close(spills["shared_expert.spill[gate_up]"]["dur"], 5e6)
+    # The second spill only starts after the first one, so its residual (stage 2 ends at
+    # 10s) can only be resolved in a later round than the first.
+    _assert_close(spills["shared_expert.spill[down]"]["ts"], 8e6)
+    _assert_close(spills["shared_expert.spill[down]"]["dur"], 2e6)
+    assert runtime.lane_metrics["gate_up"]["delay"] > 0
+    assert runtime.lane_metrics["down"]["delay"] > 0
+    _assert_close(runtime.total_execution_time_s()[perf_model.name], 10.0)
+
+
+def test_shared_expert_lane_name_in_trace():
+    durations_s = {torch.ops.aten.sigmoid.default: 1.0}
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(x, 2, [])
+        lane = torch.ops.tensor_cast._internal_mark_lane_begin.default(lane, "shared_expert")
+        lane = torch.ops.aten.sigmoid.default(lane)
+        lane = torch.ops.tensor_cast._internal_mark_lane_end.default(lane, "shared_expert")
+        _ = torch.ops.tensor_cast._internal_record.default(lane, 2)
+
+    names = {
+        event["args"]["name"]
+        for event in runtime.get_trace_events()
+        if event.get("name") == "thread_name" and event.get("tid") == 2
+    }
+    assert names == {"Stream 2 (shared_expert)"}
+
+
+def test_shared_expert_lane_never_slower_than_serial():
+    """Ours must not exceed the fully serial layout for the same program."""
+    durations_s = {torch.ops.aten.relu.default: 3.0, torch.ops.aten.sigmoid.default: 5.0}
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def serial(t):
+        c0 = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        a = torch.ops.aten.relu.default(c0)
+        _ = torch.ops.tensor_cast._internal_record.default(a, 0)
+        c1 = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        b = torch.ops.aten.sigmoid.default(c1)
+        _ = torch.ops.tensor_cast._internal_record.default(b, 0)
+        return a, b
+
+    def overlapped(t):
+        routed = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        routed = torch.ops.aten.relu.default(routed)
+        _ = torch.ops.tensor_cast._internal_record.default(routed, 0)
+
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [])
+        lane = torch.ops.aten.sigmoid.default(lane)
+        token = torch.ops.tensor_cast._internal_record.default(lane, 2, "tag")
+
+        spill_input = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [token])
+        spill = torch.ops.tensor_cast._internal_spill.default(spill_input, "shared_expert:gate_up", "tag")
+        _ = torch.ops.tensor_cast._internal_record.default(spill, 0)
+        return routed, lane
+
+    with Runtime(perf_model, TEST_DEVICE) as serial_runtime, torch.no_grad():
+        serial(x)
+    with Runtime(perf_model, TEST_DEVICE) as lane_runtime, torch.no_grad():
+        overlapped(x)
+
+    assert (
+        lane_runtime.total_execution_time_s()[perf_model.name]
+        <= serial_runtime.total_execution_time_s()[perf_model.name] + 1e-9
+    )
+
+
+def test_shared_expert_spill_reports_overrun_and_delay_separately():
+    """overrun = stage - window; delay = stage - routed-idle. Tail absorbs the rest."""
+    durations_s = {
+        torch.ops.aten.relu.default: 3.0,  # routed window end at 3s
+        torch.ops.aten.tanh.default: 2.0,  # routed tail after the window (3..5s)
+        torch.ops.aten.sigmoid.default: 5.0,  # lane stage (3..8s)
+        torch.ops.aten.add.Tensor: 1.0,  # join
+    }
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def func(t):
+        c0 = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        window = torch.ops.aten.relu.default(c0)  # 0..3s
+        window_token = torch.ops.tensor_cast._internal_record.default(window, 0, "w")
+
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [window_token])
+        stage = torch.ops.aten.sigmoid.default(lane)  # 3..8s
+        _ = torch.ops.tensor_cast._internal_record.default(stage, 2, "s")
+
+        tail = torch.ops.aten.tanh.default(window)  # 3..5s on stream 0
+        spill_input = torch.ops.tensor_cast._internal_wait_and_bind.default(tail, 0, [])
+        spill = torch.ops.tensor_cast._internal_spill.default(spill_input, "shared_expert:down", "s", "w")
+        _ = torch.ops.tensor_cast._internal_record.default(spill, 0)
+        return torch.ops.aten.add.Tensor(spill, stage)
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        func(x)
+
+    events = [event for event in runtime.get_trace_events() if event.get("ph") == "X"]
+    spills = [event for event in events if event["name"] == "shared_expert.spill[down]"]
+    assert len(spills) == 1
+    # The block length is the blocking part (delay) only; the window deficit (overrun)
+    # is a diagnostic and is deliberately absent from every reported figure.
+    assert spills[0]["dur"] == pytest.approx(3e6)
+    assert "lane" not in spills[0]["args"]
+    metric = runtime.lane_metrics["down"]
+    # stage 8s - window 3s = 5s overrun, but the routed tail absorbs 2s of it
+    assert metric["overrun"] == pytest.approx(5.0)
+    assert metric["delay"] == pytest.approx(3.0)
+    assert metric["overrun"] >= metric["delay"]
+    # the join waits for the stage, not for the overrun: 3 + 2 + 3 + 1
+    assert_close_value = runtime.total_execution_time_s()[perf_model.name]
+    assert abs(assert_close_value - 9.0) < 1e-9
+
+
+def test_shared_expert_lane_reports_missed_window_without_blocking(caplog):
+    """overrun > 0 with delay == 0: no trace block, but the deficit is still reported."""
+    durations_s = {
+        torch.ops.aten.relu.default: 3.0,  # window ends at 3s
+        torch.ops.aten.tanh.default: 5.0,  # routed tail 3..8s absorbs everything
+        torch.ops.aten.sigmoid.default: 4.0,  # lane stage 3..7s -> overrun 4s, delay 0
+    }
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def func(t):
+        c0 = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        window = torch.ops.aten.relu.default(c0)  # 0..3s
+        window_token = torch.ops.tensor_cast._internal_record.default(window, 0, "w")
+
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [window_token])
+        stage = torch.ops.aten.sigmoid.default(lane)  # 3..7s
+        _ = torch.ops.tensor_cast._internal_record.default(stage, 2, "s")
+
+        tail = torch.ops.aten.tanh.default(window)  # 3..8s
+        spill_input = torch.ops.tensor_cast._internal_wait_and_bind.default(tail, 0, [])
+        spill = torch.ops.tensor_cast._internal_spill.default(spill_input, "shared_expert:down", "s", "w")
+        _ = torch.ops.tensor_cast._internal_record.default(spill, 0)
+        return torch.ops.aten.add.Tensor(spill, stage)
+
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="tensor_cast.runtime"):
+        with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+            func(x)
+        # Metrics are resolved while the timeline is built (trace / total time).
+        events = [event for event in runtime.get_trace_events() if event.get("ph") == "X"]
+        metric = runtime.lane_metrics["down"]
+
+    # stage 3..7s against a window that ends at 3s -> 4s deficit, tail 3..8s absorbs it
+    assert metric["overrun"] == pytest.approx(4.0)
+    assert metric["delay"] == pytest.approx(0.0)
+    assert not [event for event in events if "spill" in event["name"]]
+    assert any("missed its window" in record.message for record in caplog.records)

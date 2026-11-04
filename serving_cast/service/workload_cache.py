@@ -78,6 +78,7 @@ _MODEL_KEY_FIELDS = (
     "enable_matmul_allreduce",
     "enable_dispatch_ffn_combine",
     "enable_mlapo",
+    "multistream_overlap_shared_expert",
     "enable_shared_expert_tp",
     "enable_external_shared_experts",
     "host_external_shared_experts",

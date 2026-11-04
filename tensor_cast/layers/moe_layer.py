@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from .. import ops  # noqa: F401
 from ..model_config import MoEConfig
 from ..parallel_group import _DEFAULT_PG, ParallelGroup
+from .internal import mark_lane_begin, mark_lane_end
 from .utils import ModelWrapperBase
 
 logger = logging.getLogger(__name__)
@@ -466,7 +467,10 @@ class ParallelMoELayer(ModelWrapperBase):
         # reuse vLLM's "add partial shared + partial routed, then one all-reduce"
         # scheme directly without over-reducing the routed branch. Instead, we
         # all-reduce only the shared-expert partial output here.
-        return self.mlp_tp_group.all_reduce(self._inner.fused_moe._run_shared_experts(hidden_states))
+        role = "shared_expert"
+        hidden_states = mark_lane_begin(hidden_states, role)
+        reduced = self.mlp_tp_group.all_reduce(self._inner.fused_moe._run_shared_experts(hidden_states))
+        return mark_lane_end(reduced, role)
 
     def _get_dp_alignment(self):
         """Get the alignment divisor for MoE DP domain transformations.
@@ -665,10 +669,12 @@ class FusedMoETensorCast(FusedMoEBase):
     def _run_shared_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.shared_experts is None:
             raise RuntimeError("_run_shared_experts called but shared_experts is None")
+        role = "shared_expert"
+        hidden_states = mark_lane_begin(hidden_states, role)
         output = self.shared_experts(hidden_states)
         if self.shared_experts_gate:
             output = torch.nn.functional.sigmoid(self.shared_experts_gate(hidden_states)) * output
-        return output
+        return mark_lane_end(output, role)
 
     def get_split_sizes(self, num_tokens: int, top_k: int):
         num_routing_devices = self.ep_group.world_size - self.num_external_shared_experts

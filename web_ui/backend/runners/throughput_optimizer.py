@@ -739,6 +739,7 @@ def _build_namespace(params: dict[str, Any]) -> argparse.Namespace:
     ns.enable_matmul_allreduce = "enable_matmul_allreduce" in cfg
     ns.enable_dispatch_ffn_combine = "enable_dispatch_ffn_combine" in cfg
     ns.enable_mlapo = "enable_mlapo" in cfg
+    ns.multistream_overlap_shared_expert = "multistream_overlap_shared_expert" in cfg
     # log_level: convention field (RFC §3.5.1 — not in registry). ParallelRunner
     # reads args.log_level to configure each worker process's logging; omitting
     # it crashes every worker at startup.

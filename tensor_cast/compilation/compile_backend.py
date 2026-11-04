@@ -40,6 +40,7 @@ from .passes.multistream_pass import MultiStreamSchedulePass
 from .passes.peep_hole_pass import PeepHolePass
 from .passes.redundant_node_elimination_pass import ReduandantNodeEliminationPass
 from .passes.sequence_parallel_pass import SequenceParallelPass
+from .passes.shared_expert_lane_pass import SharedExpertLanePass
 from .topo_sort import stable_topo_sort
 
 
@@ -129,6 +130,7 @@ class CompilerBackend:
         self.apply_freezing_passes(fx_graph, inputs)
         # Schedule the functional graph before lowering mutation wrappers.
         self.apply_multistream_pass(fx_graph, inputs)
+        self.apply_shared_expert_lane_pass(fx_graph, inputs)
         self.apply_decompose_auto_functionalized_pass(fx_graph)
         logger.debug("Graph after compiling:")
         if logger.isEnabledFor(logging.DEBUG):
@@ -222,6 +224,28 @@ class CompilerBackend:
             logger.debug("Graph after sequence parallel pass:")
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(gm.print_readable(print_output=False))
+
+    def apply_shared_expert_lane_pass(self, gm: fx.GraphModule, inputs):
+        """Bind the shared-expert branch of each MoE layer to its own stream.
+
+        Independent of ``compilation.multistream.enable``: this pass owns the lane
+        region and lowers it on its own, so it is scheduled right after the global
+        multistream pass only to keep a stable order when both are enabled (the global
+        pass then skips lane regions). Runs before mutation-wrapper lowering and only
+        inserts control ops: wait/record anchors and overflow-wait (spill) events. See
+        ``SharedExpertLanePass`` for the contract.
+        """
+        if not config.compilation.multistream_overlap_shared_expert.enable:
+            return
+        GraphTransformObserver = functools.partial(
+            torch.fx.passes.graph_transform_observer.GraphTransformObserver,
+            subsystem="shared_expert_lane_pass",
+            log_url=config.compilation.debug.graph_log_url,
+        )
+        GraphTransformObserver(gm, "shared_expert_lane_pass").apply_gm_pass(SharedExpertLanePass())
+        logger.debug("Graph after shared-expert lane pass:")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(gm.print_readable(print_output=False))
 
     def apply_decompose_auto_functionalized_pass(self, gm: fx.GraphModule):
         GraphTransformObserver = functools.partial(

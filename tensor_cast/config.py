@@ -44,6 +44,27 @@ class compilation:
         # Enable analytic estimator for schedulable FX nodes when metadata is available.
         enable_analytic_cost_model = True
 
+    class multistream_overlap_shared_expert:
+        """Shared-expert multistream overlap (RFC: Ascend/msmodeling#584).
+
+        Independent of ``compilation.multistream.enable``: this feature owns a
+        dedicated lane for the shared-expert branch and never engages the
+        global multistream scheduler.
+        """
+
+        enable = False
+        # Lane role emitted by _internal_mark_lane_begin/end and shown in the
+        # chrome trace lane name.
+        role = "shared_expert"
+        stream_id = 2
+        # None = auto ("staged" when the router-output anchor is locatable,
+        # otherwise "whole"); "staged"/"whole" forces a mode for debugging.
+        force_mode = None
+        # False (default) = yield to dispatch_ffn_combine fusion: when a fused
+        # routing op is present this feature stays off. True keeps the feature
+        # on in "staged" mode (stage 3 falls back to A_tail).
+        allow_with_dfc = False
+
     class passes:
         enable_life_combine_quant = True
         enable_merge_linear = True

@@ -801,6 +801,7 @@ class ParallelRunner:
         config.compilation.fusion_patterns.enable_matmul_allreduce = bool(user_input.enable_matmul_allreduce)
         config.compilation.fusion_patterns.enable_dispatch_ffn_combine = bool(user_input.enable_dispatch_ffn_combine)
         config.compilation.fusion_patterns.enable_mlapo = bool(user_input.enable_mlapo)
+        config.compilation.multistream_overlap_shared_expert.enable = bool(user_input.multistream_overlap_shared_expert)
 
     def _submit_task(
         self,

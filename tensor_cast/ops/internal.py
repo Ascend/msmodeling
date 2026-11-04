@@ -121,6 +121,7 @@ def _(
 def _(
     x: torch.Tensor,
     stream_id: int,
+    tag: str = "",
 ) -> torch.Tensor:
     """Create a control token marking completion of the paired stream region.
 
@@ -134,5 +135,71 @@ def _(
 
     The wait op can use ``token`` to express that a later op must not start until
     ``real_op`` on stream 0 has completed.
+
+    ``tag`` optionally names the token so a *forward-referenced* consumer can wait on
+    it without holding the FX node in its args (see ``_internal_spill``): the shared
+    expert lane publishes one tagged token per stage.
     """
+    del tag
     return torch.empty((), dtype=torch.int64, device=x.device)
+
+
+@register_tensor_cast_op("_internal_mark_lane_begin")
+def _(
+    x: torch.Tensor,
+    role: str,
+) -> torch.Tensor:
+    """Mark the beginning of a multistream lane region (shared-expert branch).
+
+    The paired ``_internal_mark_lane_end`` closes the region. ``SharedExpertLanePass``
+    binds every op between the pair to a dedicated stream. ``clone`` keeps the marker
+    alive under DCE (custom ops may not return an input alias).
+    """
+    del role
+    return x.clone()
+
+
+@register_tensor_cast_op("_internal_mark_lane_end")
+def _(
+    x: torch.Tensor,
+    role: str,
+) -> torch.Tensor:
+    """Mark the end of a multistream lane region.
+
+    Non-aliasing return keeps the end marker in compiled graphs, same rationale as
+    ``_internal_mark_lane_begin``.
+    """
+    del role
+    return x.clone()
+
+
+@register_tensor_cast_op("_internal_spill")
+def _(
+    x: torch.Tensor,
+    role: str,
+    wait_tag: str = "",
+    window_tag: str = "",
+) -> torch.Tensor:
+    """Occupy ``stream 0`` until a lane stage finishes (overflow wait).
+
+    Emitted by ``SharedExpertLanePass`` before the routed-side node that competes for
+    the same hardware unit as a shared-expert stage. The op itself costs nothing: the
+    runtime derives its duration as ``max(0, dep_ready - stream_end[stream 0])``, i.e.
+    the measured residual of the stage that could not be hidden. A zero-length spill
+    is dropped from the chrome trace and never enters op statistics.
+
+    ``wait_tag`` names the tagged token published by the stage's ``_internal_record``.
+    The reference is *forward*: the spill sits at the routed window boundary, while the
+    stage finishes later in program order, so the FX args cannot carry the token node.
+    The runtime resolves the tag when it evaluates the timeline.
+
+    ``window_tag`` names the token of the routed node that ends the overlap window. The
+    runtime reports ``overrun = stage_ready - window_ready`` next to the blocking
+    ``delay`` so a stage that missed its window is measurable even when the routed tail
+    absorbs part of the overrun.
+
+    The return value is an activation clone consumed by the routed node that competes
+    for the same unit, which keeps the node alive through DCE.
+    """
+    del role, wait_tag, window_tag
+    return x.clone()

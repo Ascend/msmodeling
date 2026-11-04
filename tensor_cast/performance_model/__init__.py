@@ -2830,9 +2830,21 @@ def _estimate_default(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfil
 register_op_estimator(None, None)(_estimate_default)
 
 
+def _internal_spill_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    """Control event: carries no data movement, its duration comes from the timeline."""
+    del op_invoke_info
+    return OpInvokeInfo.PerformanceProperties()
+
+
+OpInvokeInfo.register_op_properties(torch.ops.tensor_cast._internal_spill.default)(_internal_spill_properties)
+
+
 @register_op_estimator(torch.ops.tensor_cast._internal_wait_and_bind.default, None)
 @register_op_estimator(torch.ops.tensor_cast._internal_record.default, None)
 @register_op_estimator(torch.ops.tensor_cast._internal_order_barrier.default, None)
+@register_op_estimator(torch.ops.tensor_cast._internal_mark_lane_begin.default, None)
+@register_op_estimator(torch.ops.tensor_cast._internal_mark_lane_end.default, None)
+@register_op_estimator(torch.ops.tensor_cast._internal_spill.default, None)
 def _estimate_internal_multistream_anchor(
     op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
 ) -> PerformanceModel.Result:

@@ -354,6 +354,10 @@ UI: dict[str, UIFieldProps] = {
                 "value": "enable_dispatch_ffn_combine",
                 "label": "Enable Dispatch FFN Combine",
             },
+            {
+                "value": "multistream_overlap_shared_expert",
+                "label": "Multistream Overlap Shared Expert",
+            },
         ],
         default=[],
         group={"zh": "优化", "en": "Optimization"},

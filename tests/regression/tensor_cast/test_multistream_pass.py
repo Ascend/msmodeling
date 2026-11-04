@@ -823,5 +823,115 @@ class MultiStreamPassTestCase(unittest.TestCase):
         self.assertGreater(heuristic_cost, 0)
 
 
+_LANE_BEGIN = torch.ops.tensor_cast._internal_mark_lane_begin.default
+_LANE_END = torch.ops.tensor_cast._internal_mark_lane_end.default
+_LANE_WAIT = torch.ops.tensor_cast._internal_wait_and_bind.default
+_LANE_RECORD = torch.ops.tensor_cast._internal_record.default
+_LANE_SPILL = torch.ops.tensor_cast._internal_spill.default
+
+
+def _build_lane_coexistence_graph():
+    """Routed chain, one marked shared-expert lane region, and a join."""
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    w = graph.placeholder("w")
+    routed = graph.call_function(torch.ops.aten.mm.default, args=(x, w))
+    routed.meta["val"] = torch.empty(8, 16)
+    routed = graph.call_function(torch.ops.aten.relu.default, args=(routed,))
+    routed.meta["val"] = torch.empty(8, 16)
+
+    begin = graph.call_function(_LANE_BEGIN, args=(x, "shared_expert"))
+    lane = graph.call_function(torch.ops.aten.sigmoid.default, args=(begin,))
+    lane.meta["val"] = torch.empty(8, 16)
+    lane = graph.call_function(torch.ops.aten.tanh.default, args=(lane,))
+    lane.meta["val"] = torch.empty(8, 16)
+    end = graph.call_function(_LANE_END, args=(lane, "shared_expert"))
+    end.meta["val"] = torch.empty(8, 16)
+
+    out = graph.call_function(torch.ops.aten.add.Tensor, args=(routed, end))
+    out.meta["val"] = torch.empty(8, 16)
+    graph.output(out)
+    return fx.GraphModule({}, graph)
+
+
+def test_multistream_pass_skips_lane_region():
+    gm = _build_lane_coexistence_graph()
+    lane_nodes = {
+        node for node in gm.graph.nodes if node.target in (torch.ops.aten.sigmoid.default, torch.ops.aten.tanh.default)
+    }
+
+    with _override_multistream_config(enable=True):
+        MultiStreamSchedulePass(device_name=TEST_DEVICE.name)(gm)
+
+    # The global scheduler must not insert anchors around lane-owned ops and must not
+    # retag them onto another stream.
+    for node in gm.graph.nodes:
+        if node.target not in (_LANE_WAIT, _LANE_RECORD, _LANE_SPILL):
+            continue
+        for parent in node.all_input_nodes:
+            if parent in lane_nodes:
+                raise AssertionError(f"lane node {parent.name} was gated by the global multistream pass")
+
+
+def test_multistream_pass_resolves_dataflow_through_control_ops():
+    gm = _build_lane_coexistence_graph()
+    pass_ = MultiStreamSchedulePass(device_name=TEST_DEVICE.name)
+    add = next(node for node in gm.graph.nodes if node.target == torch.ops.aten.add.Tensor)
+    lane_end = next(node for node in gm.graph.nodes if node.target == _LANE_END)
+
+    inputs = pass_._dataflow_inputs(add)
+    relu = next(node for node in gm.graph.nodes if node.target == torch.ops.aten.relu.default)
+    tanh = next(node for node in gm.graph.nodes if node.target == torch.ops.aten.tanh.default)
+    assert relu in inputs
+    # The marker itself is transparent: the real producer behind it is resolved.
+    assert tanh in inputs
+    assert lane_end not in inputs
+
+    users = pass_._dataflow_users(relu)
+    assert add in users
+
+
+def test_multistream_lane_cache_is_reused_per_graph_only():
+    """A reused pass instance must not leak the previous graph's lane nodes."""
+    first = _build_lane_coexistence_graph()
+    second = _build_lane_coexistence_graph()
+    pass_ = MultiStreamSchedulePass(device_name=TEST_DEVICE.name)
+
+    first_lane = pass_._lane_region_nodes(first.graph)
+    assert first_lane
+    assert pass_._lane_region_nodes(first.graph) is first_lane  # same graph: cached
+
+    second_lane = pass_._lane_region_nodes(second.graph)
+    assert second_lane
+    assert pass_._lane_region_nodes(second.graph) is second_lane
+
+    # No leak either way: each result holds only nodes of its own graph.
+    assert all(node in first.graph.nodes for node in first_lane)
+    assert all(node in second.graph.nodes for node in second_lane)
+    assert not (first_lane & second_lane)
+
+
+def test_multistream_dataflow_users_follow_program_order():
+    """User order must come from the graph, not from fx.Node.users insertion order."""
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    shared = graph.call_function(torch.ops.aten.sigmoid.default, args=(x,))
+    shared.meta["val"] = torch.empty(4, 4)
+    with graph.inserting_after(shared):
+        later = graph.call_function(torch.ops.aten.tanh.default, args=(shared,))
+    with graph.inserting_after(shared):
+        earlier = graph.call_function(torch.ops.aten.relu.default, args=(shared,))
+    # ``later`` is created (and registered as a user) first, but ``earlier`` sits
+    # before it in the graph, so ``users.keys()`` order differs from program order.
+    assert list(shared.users.keys()) == [later, earlier]
+    graph.output((later, earlier))
+
+    pass_ = MultiStreamSchedulePass(device_name=TEST_DEVICE.name)
+    order = {node: index for index, node in enumerate(graph.nodes)}
+    users = pass_._dataflow_users(shared)
+    assert users == sorted(users, key=lambda node: order[node])
+    assert [node.target for node in users] == [torch.ops.aten.relu.default, torch.ops.aten.tanh.default]
+
+
 if __name__ == "__main__":
     unittest.main()

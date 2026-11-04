@@ -122,6 +122,13 @@ class RuntimeEvent:
     dependency_token_ids: tuple[int, ...] = ()
     produced_token_ids: List[int] = dataclasses.field(default_factory=list)
     memory_aliases: List[tuple[torch.Tensor, torch.Tensor]] = dataclasses.field(default_factory=list)
+    # Shared-expert lane overflow wait: zero work, duration derived by the timeline as
+    # ``max(0, stage_ready - stream_end[stream_id])``. The stage token is referenced by
+    # tag because it is produced later in program order (see ``_internal_spill``).
+    is_spill: bool = False
+    spill_wait_tag: str = ""
+    #: Token of the routed node that ends this stage's overlap window.
+    spill_window_tag: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -145,6 +152,11 @@ class Runtime(TorchDispatchMode):
 
     _INTERNAL_WAIT_AND_BIND = torch.ops.tensor_cast._internal_wait_and_bind.default
     _INTERNAL_RECORD = torch.ops.tensor_cast._internal_record.default
+    _LANE_MARKERS = {
+        torch.ops.tensor_cast._internal_mark_lane_begin.default,
+        torch.ops.tensor_cast._internal_mark_lane_end.default,
+    }
+    _INTERNAL_SPILL = torch.ops.tensor_cast._internal_spill.default
 
     def __deepcopy__(self, memo):
         return self
@@ -173,6 +185,10 @@ class Runtime(TorchDispatchMode):
         self._pending_wait_stream_id: Optional[int] = None
         self._pending_wait_dependency_token_ids: List[int] = []
         self._pending_wait_memory_aliases: List[tuple[torch.Tensor, torch.Tensor]] = []
+        # stream_id -> lane roles observed at replay time (trace lane naming).
+        self._lane_roles: Dict[int, set] = collections.defaultdict(set)
+        # Lane stage tag -> token ids published by the tagged record.
+        self._tag_token_ids: Dict[str, tuple] = {}
 
         self.exit_stack = contextlib.ExitStack()
 
@@ -320,6 +336,8 @@ class Runtime(TorchDispatchMode):
             if len(op_invoke_info.args) > 1:
                 event.stream_id = int(op_invoke_info.args[1])
             token_ids = self._extract_tensor_token_ids(op_invoke_info.out)
+            if len(op_invoke_info.args) > 2 and isinstance(op_invoke_info.args[2], str) and op_invoke_info.args[2]:
+                self._tag_token_ids[op_invoke_info.args[2]] = tuple(token_ids)
             if not token_ids:
                 return
             event.produced_token_ids = list(self._dedup_token_ids(event.produced_token_ids + token_ids))
@@ -335,8 +353,22 @@ class Runtime(TorchDispatchMode):
         if op_invoke_info.func == self._INTERNAL_RECORD:
             self._handle_record(op_invoke_info)
             return
+        if op_invoke_info.func in self._LANE_MARKERS:
+            # Lane markers are compile-time annotations: no event, no binding-domain
+            # change, no memory accounting. They only tell the trace what the lane is.
+            self._note_lane_role(op_invoke_info)
+            return
 
         stream_id, dependency_token_ids, memory_aliases = self._consume_pending_wait_context()
+        is_spill = op_invoke_info.func == self._INTERNAL_SPILL
+        spill_wait_tag = ""
+        spill_window_tag = ""
+        if is_spill:
+            self._lane_roles[stream_id].add("shared_expert.spill")
+            if len(op_invoke_info.args) > 2 and isinstance(op_invoke_info.args[2], str):
+                spill_wait_tag = op_invoke_info.args[2]
+            if len(op_invoke_info.args) > 3 and isinstance(op_invoke_info.args[3], str):
+                spill_window_tag = op_invoke_info.args[3]
         perf_results = {}
         for perf_model in self.perf_models:
             result = perf_model.process_op(op_invoke_info)
@@ -348,12 +380,25 @@ class Runtime(TorchDispatchMode):
                 stream_id=stream_id,
                 dependency_token_ids=dependency_token_ids,
                 memory_aliases=memory_aliases,
+                is_spill=is_spill,
+                spill_wait_tag=spill_wait_tag,
+                spill_window_tag=spill_window_tag,
             )
         )
 
+    def _note_lane_role(self, op_invoke_info) -> None:
+        role = ""
+        if len(op_invoke_info.args) > 1 and isinstance(op_invoke_info.args[1], str):
+            role = op_invoke_info.args[1]
+        stream_id = self._pending_wait_stream_id
+        if stream_id is None:
+            stream_id = self.event_list[-1].stream_id if self.event_list else 0
+        if role:
+            self._lane_roles[stream_id].add(role)
+
     @classmethod
     def _is_multistream_anchor_op(cls, func) -> bool:
-        return func in (cls._INTERNAL_WAIT_AND_BIND, cls._INTERNAL_RECORD)
+        return func in (cls._INTERNAL_WAIT_AND_BIND, cls._INTERNAL_RECORD, cls._INTERNAL_SPILL, *cls._LANE_MARKERS)
 
     def _record_single_memory_invocation(self, op_invoke_info: OpInvokeInfo, reference_id: int) -> None:
         if self._is_multistream_anchor_op(op_invoke_info.func):
@@ -428,7 +473,11 @@ class Runtime(TorchDispatchMode):
             if len(self.event_list) > num_events_before_replay:
                 self._event_reference_ids.append(reference_id)
         if self._pending_wait_stream_id is not None:
-            logger.warning(
+            # A dangling stream with no pending dependency only means that the last
+            # segment was never closed by a record; nothing runs after it, so dropping
+            # it changes no timing. Dangling *dependencies* would misplace real ops.
+            log = logger.warning if self._pending_wait_dependency_token_ids else logger.debug
+            log(
                 "Dropping dangling _internal_wait_and_bind context on stream %s.",
                 self._pending_wait_stream_id,
             )
@@ -490,6 +539,9 @@ class Runtime(TorchDispatchMode):
     ) -> Dict[OpAverageGroupKey, OpAverageGroupData]:
         aggregated_data: Dict[OpAverageGroupKey, OpAverageGroupData] = collections.defaultdict(OpAverageGroupData)
         for event in self.event_list:
+            if event.is_spill:
+                # Control event: its duration is a wait, not device work.
+                continue
             op_name = str(event.op_invoke_info.func)
             first_result = event.perf_results.get(first_model) if first_model else None
             key = OpAverageGroupKey(
@@ -695,6 +747,37 @@ class Runtime(TorchDispatchMode):
             dump_op_bound_results=dump_op_bound_results,
         )
 
+    def _stream_label(self, stream_id: int) -> str:
+        """Trace lane name, annotated with any lane role observed at replay time."""
+        label = f"Stream {stream_id}"
+        roles = sorted(
+            role for role in self._lane_roles.get(stream_id, ()) if not role.startswith("shared_expert.spill")
+        )
+        if roles:
+            label += f" ({','.join(roles)})"
+        return label
+
+    @property
+    def lane_metrics(self) -> Dict[str, Dict[str, float]]:
+        """Per-stage shared-expert lane metrics resolved on the last timeline pass.
+
+        ``overrun`` is the window deficit (``stage_end - window_end``) and ``delay`` the
+        blocking part (``stage_end - stream_idle``). Only ``delay`` reaches the trace as a
+        block length; ``overrun`` is a diagnostic and is deliberately kept out of every
+        reported figure.
+        """
+        return {stage: dict(metric) for stage, metric in getattr(self, "_spill_metrics", {}).items()}
+
+    @staticmethod
+    def _trace_event_name(event: RuntimeEvent) -> str:
+        """Trace label for an event; overflow waits get an explanatory block name."""
+        if event.is_spill:
+            role = ""
+            if len(event.op_invoke_info.args) > 1 and isinstance(event.op_invoke_info.args[1], str):
+                role = event.op_invoke_info.args[1].split(":")[-1]
+            return f"shared_expert.spill[{role}]" if role else "shared_expert.spill"
+        return str(event.op_invoke_info.func)
+
     def get_trace_events(self):
         """
         Transform self.event_list to trace_events. Results from different performance models are
@@ -726,20 +809,28 @@ class Runtime(TorchDispatchMode):
                         "ph": "M",
                         "pid": pid,
                         "tid": stream_id,
-                        "args": {"name": f"Stream {stream_id}"},
+                        "args": {"name": self._stream_label(stream_id)},
                     }
                 )
 
         # 2. Iterate through events and create trace entries
         for event_idx, event in enumerate(self.event_list):
-            op_name = str(event.op_invoke_info.func)
+            op_name = self._trace_event_name(event)
 
             # Create a trace event for each performance model's result
             for model_name, result in event.perf_results.items():
                 pid = perf_model_pids[model_name]
                 timeline = model_timelines[model_name]
                 start_time_us = max(0.0, timeline["event_start_s"][event_idx] * 1e6)
-                duration_us = max(0.0, result.execution_time_s * 1e6)
+                override_s = timeline.get("event_duration_override_s") or []
+                override = override_s[event_idx] if event_idx < len(override_s) else None
+                if override is None:
+                    duration_us = max(0.0, result.execution_time_s * 1e6)
+                else:
+                    duration_us = max(0.0, override * 1e6)
+                    if duration_us == 0.0:
+                        # Zero-length overflow wait: the stage was fully hidden.
+                        continue
 
                 trace_event = {
                     "name": op_name,
@@ -808,20 +899,32 @@ class Runtime(TorchDispatchMode):
         timelines = self._build_model_timelines()
         return {perf_model.name: timelines[perf_model.name]["total_time_s"] for perf_model in self.perf_models}
 
+    #: Upper bound on fixed-point rounds used to resolve forward-referenced spill waits.
+    _SPILL_FIXPOINT_ROUNDS = 8
+
     def _build_model_timelines(self) -> Dict[str, Dict[str, object]]:
         timelines: Dict[str, Dict[str, object]] = {}
         for perf_model in self.perf_models:
             model_name = perf_model.name
+            spill_duration_s = self._resolve_spill_durations(model_name)
             stream_end_s: Dict[int, float] = collections.defaultdict(float)
             token_ready_s: Dict[int, float] = {}
             event_start_s: List[float] = []
+            event_duration_override_s: List[Optional[float]] = []
+            spill_index = 0
 
             for event in self.event_list:
                 dep_ready_s = 0.0
                 for token_id in event.dependency_token_ids:
                     dep_ready_s = max(dep_ready_s, token_ready_s.get(token_id, 0.0))
                 start_time_s = max(stream_end_s[event.stream_id], dep_ready_s)
-                duration_s = max(0.0, event.perf_results[model_name].execution_time_s)
+                if event.is_spill:
+                    duration_s = spill_duration_s[spill_index]
+                    spill_index += 1
+                    event_duration_override_s.append(duration_s)
+                else:
+                    duration_s = max(0.0, event.perf_results[model_name].execution_time_s)
+                    event_duration_override_s.append(None)
                 end_time_s = start_time_s + duration_s
                 stream_end_s[event.stream_id] = end_time_s
                 for token_id in event.produced_token_ids:
@@ -830,8 +933,138 @@ class Runtime(TorchDispatchMode):
 
             timelines[model_name] = {
                 "event_start_s": event_start_s,
+                "event_duration_override_s": event_duration_override_s,
                 "stream_end_s": dict(stream_end_s),
                 "total_time_s": max(stream_end_s.values(), default=0.0),
             }
 
         return timelines
+
+    def _simulate_timeline(self, model_name: str, spill_durations: List[float]) -> Dict[str, object]:
+        """Run the per-stream timeline once with the spill durations already fixed."""
+        stream_end_s: Dict[int, float] = collections.defaultdict(float)
+        token_ready_s: Dict[int, float] = {}
+        event_start_s: List[float] = []
+        event_duration_override_s: List[Optional[float]] = []
+        spill_start_s: List[float] = []
+        spill_index = 0
+
+        for event in self.event_list:
+            dep_ready_s = 0.0
+            for token_id in event.dependency_token_ids:
+                dep_ready_s = max(dep_ready_s, token_ready_s.get(token_id, 0.0))
+            start_time_s = max(stream_end_s[event.stream_id], dep_ready_s)
+            if event.is_spill:
+                duration_s = spill_durations[spill_index] if spill_index < len(spill_durations) else 0.0
+                spill_index += 1
+                spill_start_s.append(start_time_s)
+                event_duration_override_s.append(duration_s)
+            else:
+                duration_s = max(0.0, event.perf_results[model_name].execution_time_s)
+                event_duration_override_s.append(None)
+            end_time_s = start_time_s + duration_s
+            stream_end_s[event.stream_id] = end_time_s
+            for token_id in event.produced_token_ids:
+                token_ready_s[token_id] = end_time_s
+            event_start_s.append(start_time_s)
+
+        return {
+            "event_start_s": event_start_s,
+            "event_duration_override_s": event_duration_override_s,
+            "stream_end_s": dict(stream_end_s),
+            "token_ready_s": token_ready_s,
+            "spill_start_s": spill_start_s,
+        }
+
+    def _tag_ready_s(self, tag: str, token_ready_s: Dict[int, float]) -> float:
+        """Ready time of a tagged token, or 0.0 when the tag was never published."""
+        ready_s = 0.0
+        for token_id in self._tag_token_ids.get(tag, ()):
+            ready_s = max(ready_s, token_ready_s.get(token_id, 0.0))
+        return ready_s
+
+    def _resolve_spill_durations(self, model_name: str) -> List[float]:
+        """Fixed-point resolution of the shared-expert overflow waits.
+
+        A spill sits at the routed window boundary and waits for the lane stage that
+        finishes later in program order. Its tag is therefore a *forward* reference: when
+        the spill is reached, the stage record that publishes its token has not been
+        simulated yet, so a single pass cannot resolve it.
+
+        Each round runs in two phases:
+
+        1. simulate the whole timeline with the *current* durations and keep every
+           token's ready time plus every spill's start time;
+        2. resolve the tags against that complete timeline to build the next vector, then
+           compare it with the current one.
+
+        A longer wait only pushes later events later, so the iteration converges in a
+        couple of rounds. The loop is capped and falls back to the element-wise maximum,
+        so a non-converged round can never under-estimate a wait.
+        """
+        spill_events = [event for event in self.event_list if event.is_spill]
+        durations = [0.0] * len(spill_events)
+        self._spill_metrics: Dict[str, Dict[str, float]] = {}
+        if not spill_events:
+            return durations
+
+        metrics: List[Dict[str, float]] = []
+        for _ in range(self._SPILL_FIXPOINT_ROUNDS):
+            simulated = self._simulate_timeline(model_name, durations)
+            token_ready_s = simulated["token_ready_s"]
+            spill_start_s = simulated["spill_start_s"]
+            next_durations: List[float] = []
+            round_metrics: List[Dict[str, float]] = []
+            for index, event in enumerate(spill_events):
+                stage_ready_s = self._tag_ready_s(event.spill_wait_tag, token_ready_s)
+                window_ready_s = self._tag_ready_s(event.spill_window_tag, token_ready_s)
+                start_s = spill_start_s[index] if index < len(spill_start_s) else 0.0
+                delay_s = max(0.0, stage_ready_s - start_s)
+                next_durations.append(delay_s)
+                round_metrics.append(
+                    {
+                        "overrun": max(0.0, stage_ready_s - window_ready_s),
+                        "delay": delay_s,
+                        "t_stage": stage_ready_s - window_ready_s,
+                        "t_window": window_ready_s,
+                    }
+                )
+            metrics = round_metrics
+            previous_durations = durations
+            if next_durations == durations:
+                durations = next_durations
+                break
+            durations = next_durations
+        else:
+            # Not converged inside the cap: keep the larger of the last two rounds so the
+            # returned wait can only over-estimate (never silently hide a real residual).
+            durations = [max(current, nxt) for current, nxt in zip(previous_durations, durations)]
+            logger.debug(
+                "shared-expert lane spill durations did not converge in %d rounds; "
+                "using the element-wise maximum of the last two rounds.",
+                self._SPILL_FIXPOINT_ROUNDS,
+            )
+
+        self._record_spill_metrics(spill_events, metrics)
+        return durations
+
+    def _record_spill_metrics(self, spill_events: List[RuntimeEvent], metrics: List[Dict[str, float]]) -> None:
+        for event, metric in zip(spill_events, metrics):
+            stage = event.op_invoke_info.args[1].split(":")[-1] if len(event.op_invoke_info.args) > 1 else "?"
+            self._spill_metrics[stage] = metric
+            if metric["overrun"] > 0 and metric["delay"] == 0:
+                # The only case a zero-width (invisible) spill still carries information:
+                # the stage missed its window but the routed tail absorbed the deficit.
+                logger.info(
+                    "shared-expert lane stage %-8s missed its window by %.3fus, fully absorbed "
+                    "by the routed tail (no blocking wait).",
+                    stage,
+                    metric["overrun"] * 1e6,
+                )
+            else:
+                logger.debug(
+                    "shared-expert lane stage %-8s overrun=%.3fus delay=%.3fus",
+                    stage,
+                    metric["overrun"] * 1e6,
+                    metric["delay"] * 1e6,
+                )
