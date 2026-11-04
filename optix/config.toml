@@ -197,10 +197,12 @@ enabled = false
 action = "terminate"
 metrics_url = "http://127.0.0.1:8000/metrics"
 
+# Optional automatic deployment + full-service refinement is configured under
+# pd_disagg.full_service.enabled=true (default: false); see docs/zh/use_cases/examples/optix_pd_disaggregation/full_pipeline.toml.
 # ------------------------- Built-in PD Disaggregation Tuning --------------------------------------------
-# This mode only searches P/D service parameters and recommends the ratio:
+# With full_service.enabled=false, this mode only searches P/D parameters and recommends the ratio:
 #   msmodeling optix --mode pd_disagg -c ./config.toml
-# After starting the PD service yourself, use the regular standard mode
+# For manual deployment, start the PD service and use the regular standard mode
 # with skip_pso=true and manage_simulator_lifecycle=false for benchmark tuning.
 # Prefill/Decode can override the top-level n_particles/iters independently;
 # an omitted phase value falls back to the corresponding top-level value.

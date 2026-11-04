@@ -1074,7 +1074,8 @@ def _run_optimizer(run_id: str | None = None) -> None:
         help=(
             "Optimization workflow. standard runs the existing general optimization, including optional PSO "
             "and fine-tuning; "
-            "pd_disagg runs separate Prefill and Decode searches followed by ratio recommendation. "
+            "pd_disagg runs Prefill/Decode searches and ratio recommendation, then optionally deploys the PD cluster "
+            "and refines the full-service load when pd_disagg.full_service is configured. "
             "Defaults to standard."
         ),
     )

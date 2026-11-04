@@ -592,7 +592,9 @@ msmodeling optix -c my_config.toml
 
 ### 内置 PD 分离两步寻优
 
-OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并推荐 P/D 实例配比：先通过 `--mode pd_disagg` 分别搜索 P/D 参数，再由用户部署完整 PD 服务，最后通过普通 `standard` 模式微调并发和请求速率。
+OptiX 支持配置 `pd_disagg.full_service`，通过现有 `vllm_pd` 插件自动串联单侧搜索、配比推荐、完整服务部署和负载微调，见[一个命令运行完整流程](../use_cases/optix_pso_pd_disaggregation.md#一个命令运行完整流程)。
+
+分步使用时，OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并推荐 P/D 实例配比：先通过 `--mode pd_disagg` 分别搜索 P/D 参数，再由用户部署完整 PD 服务，最后通过普通 `standard` 模式微调并发和请求速率。
 
 首次使用可按[PD 分离寻优新手操作指南](../quick_start/optix_pso_pd_disaggregation.md)中的具体例子复制配置并运行。完整参数解释、配比解读和进阶配置见[使用案例：OptiX PD 分离两步寻优](../use_cases/optix_pso_pd_disaggregation.md)。其他 PD 分离或 PD 混部寻优可使用[插件支持](#3-插件支持)中列出的现有插件。
 

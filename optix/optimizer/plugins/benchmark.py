@@ -102,6 +102,23 @@ class AisBench(BenchmarkInterface):
         with open_file(self.model_config_path, "r", encoding="utf-8") as f:
             self.default_data = f.read()
 
+    def bind_service_endpoint(self, *, host, port, model):
+        """Bind this benchmark to an automatically deployed PD Proxy."""
+        from ..aisbench_endpoint import bind_endpoint
+
+        endpoint = {"host": host, "port": port, "model": model}
+        self._endpoint_original = self.model_config_path.read_bytes()
+        bind_endpoint(self._endpoint_original.decode("utf-8"), **endpoint)
+        self._service_endpoint = endpoint
+
+    def restore_service_endpoint(self):
+        """Restore the shared AISBench model config after full-service refinement."""
+        original = getattr(self, "_endpoint_original", None)
+        if original is not None:
+            self.model_config_path.write_bytes(original)
+            self._endpoint_original = None
+        self._service_endpoint = None
+
     def configure_pd_phase(self, *, phase_name, phase_config):
         """Refresh AISBench's derived model path after a phase-local command override."""
 
@@ -245,6 +262,10 @@ class AisBench(BenchmarkInterface):
                 concurrency = rate = None
         with open_file(self.model_config_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
+        if getattr(self, "_service_endpoint", None):
+            from ..aisbench_endpoint import bind_endpoint
+
+            lines = bind_endpoint("".join(lines), **self._service_endpoint).splitlines(keepends=True)
         _request_rate_pattern = re.compile(r"(request_rate\s*=\s*)\d{1,10}(?:\.\d{1,30})?\s*,")
         _batch_size_pattern = re.compile(r"(batch_size\s*=\s*)\d{1,10}(?:\.\d{1,30})?\s*,")
         # Modify request_rate and batch_size

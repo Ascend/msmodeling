@@ -16,7 +16,7 @@
 
 set -euo pipefail
 <%= vllm_pd.run_envs %>
-source ${PD_CANN_HOME:-/usr/local/Ascend/cann-9.0.0}/set_env.sh
+
 # conda 激活：失败时告警但不终止（远端可能无 conda，回退系统 python）
 if [ -f /opt/mamba/etc/profile.d/conda.sh ]; then
     source /opt/mamba/etc/profile.d/conda.sh

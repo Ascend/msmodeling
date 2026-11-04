@@ -4,6 +4,65 @@
 
 操作顺序：**分别搜索 P（处理输入）和 D（生成后续 token）的参数 → 按结果部署 PD 服务与 Proxy → 通过 Proxy 压测完整服务**。已有可用 PD 服务、只需调整压测负载时，直接从[第 5 步](#第-5-步通过-proxy-压测完整-pd-服务)开始。
 
+## 一个命令运行完整流程
+
+通过 `pd_disagg.full_service.enabled` 开关控制是否执行完整链路，默认 `false`。设为 `true` 后，同一条命令依次完成 P 搜索、D 搜索、配比推荐、完整 PD 服务部署和负载微调，中间无需人工部署或再次启动 OptiX。设为 `false` 时，只运行 P/D 搜索和配比推荐，跳过完整服务预检、部署和压测，其他完整服务配置可以保留。已有配置若省略该开关，现在也按关闭处理；需要完整流程时请显式补上 `enabled = true`。
+
+```toml
+[pd_disagg.full_service]
+enabled = true  # false：只搜索 P/D 并推荐配比；true：继续部署完整 PD 并微调负载
+```
+
+开启时仍需填写下述完整流程模板中的负载搜索范围和部署信息。
+
+首次准备时安装现有 PD 插件（重新 `uv sync` 后需重装）：
+
+```bash
+uv pip install --python .venv/bin/python -e contrib/optix/vllm_pd_simulator
+```
+
+复制 [完整流程配置模板](../use_cases/examples/optix_pd_disaggregation/full_pipeline.toml)，按环境填写搜索参数、模型、AISBench 短名、`cluster.hosts` 和 `vllm_pd.nodes` 中允许使用的设备、通信网卡及 Proxy 地址。模板按 24 卡、P/D 每实例 8 卡展示。路径从仓库根目录解析。
+
+```bash
+uv run --no-sync msmodeling optix --mode pd_disagg -c ./pd_full.toml
+```
+
+- 设备池使用 `role="auto"` 时，按推荐实例数自动分成 P/D；`prefill`、`decode` 可限制设备角色，必须留足对应卡数。支持留卡，受 `use_full_device` 控制。该流程要求扁平 `vllm_pd.nodes`，不接受旧的手工 group 布局。
+- P/D 服务参数及各自固定启动参数自动传递到部署插件；两侧 TP×DP 必须与各自每实例卡数一致，当前插件要求 PP=1，DP>1 适用于 MoE 模型。
+- 单侧模拟与最终部署需要不同的固定启动参数时，设置 `full_service.prefill_others` / `decode_others`。例如 D 单侧开启 prefix caching 模拟 Decode，而实际完整服务关闭缓存，可将最终 D 的完整 `others` 填入 `decode_others`，明确使用 `--no-enable-prefix-caching`。该字段整段替换对应角色继承的 `others`，需保留 TP/DP、量化等必要参数；搜索选中的服务参数仍会叠加且优先，未填写则保持原有继承方式。
+- `full_service.target_field` 仅配置 `CONCURRENCY`、`REQUESTRATE` 和可选 `NUM_PROMPTS`，前两项必须存在；最后阶段固定配比与服务参数，复用同一套服务微调负载，不再跑 PSO。
+- 完整服务阶段固定使用 `fine_tune_mode="pd_mixed"` 和 `use_request_rate_calibration=false`，在 `full_service.target_field` 的范围内联合调整并发与请求率。顶层请求率标定开关仍作用于 P/D 单侧搜索，不会将完整服务的并发固定到上限；需要固定完整服务并发时，将其 `CONCURRENCY` 的 `min`、`max`、`value` 设为同一值。
+- 仅适用于真实 PD 节点的 vLLM 参数可放入 `full_service.prefill_additional_config` / `decode_additional_config`，合并到对应角色的 `--additional-config`；例如 `decode_additional_config = { recompute_scheduler_enable = true }`。单侧搜索不启用它们，已搜索参数仍优先。
+- 最后阶段单独配置端到端 TTFT/TPOT 目标和 benchmark 负载，使用完整输出长度。支持 `vllm_benchmark`、`ais_bench`；工具自动绑定 Proxy 地址。AISBench 可复用 D 模型配置，要求单个显式模型、地址为字面量，结束后恢复该配置文件。
+- `full_service.benchmark_run_count` 允许大于等于 `1` 的整数，默认 `2`：每个完整服务负载候选在同一套服务上先预热一轮，再取第二轮计分。配置为 N 时，前 N−1 轮预热，仅最后一轮计分；各轮候选负载参数不变，不因重复压测重启 P/D 或 Proxy。显式配置 `1` 时单轮直接计分，报告会注明未额外安排压测预热轮次。原先未填写该字段的完整服务配置会采用新的两轮默认值；单侧搜索默认值仍为 `1`。
+- 完整服务 SLO 使用 `full_service.ttft_slo` / `tpot_slo` / `success_rate_slo`，应按模型、完整输入输出长度和业务要求设置。未填写 TTFT 目标时仍采用 `0.5` 秒，报告会注明使用默认值；模板显式填写的 `3.0` 秒仅是示例，不代表所有模型的通用标准。预热用于统一测量口径，实际是否消除首次运行影响仍需实测核对。
+- SSH、模型、vLLM、CANN、KV Connector 以及 Proxy 脚本须在执行前就绪，部署插件负责服务启停与健康检查。所有资源应为本次测试专用；单侧搜索依然在当前控制端配置的设备上依次执行。
+
+Proxy 地址预检用于排除空值和未指定地址，不能证明服务实际可达，也不限制 P/D 的监听网卡。P/D 启动模板仍使用 `--host 0.0.0.0`；节点的 `bind_ip` / `service_ip` 用于服务连接和路由，不会收窄 P/D 监听范围。本流程不自动配置接口鉴权，应在部署环境中通过网络隔离、访问控制或网关限定服务访问范围。静态端口检查会识别同一 SSH 执行上下文中的全网卡监听冲突，但不探测 DNS 别名或不同容器是否共享宿主机网络；这些情况仍需按实际网络拓扑分配端口。
+
+完整服务拓扑分配并通过静态校验后，插件会在该阶段首次 SSH 操作前打印 `Configured PD deployment ports` 清单，包含 Proxy 服务端口、每个 P/D 进程的 SSH 地址与容器、HTTP 服务端口、KV 端口范围、配置中保留的 RPC 端口及 Ascend 基础端口；MoE 模型另列各组实际传给 vLLM 的 DP Coordinator 地址和端口。`configured_rpc` 是静态校验保留的节点 RPC 配置值，不代表启动模板一定启用该监听；`ASCEND_BASE_PORT` 仅为基础端口，不代表通信后端使用的全部端口。清单不包含后端动态选择的端口，也不探测远端实时占用；配置校验通过不等于端口空闲。部署前应在对应主机/容器的网络命名空间核对占用情况，例如使用 `ss -lntup`，必要时调整配置端口或处理已确认归属的残留服务。
+
+插件已有启动前清理和正常退出、可捕获异常时的清理；SIGKILL、容器退出或主机故障可能使清理无法执行。当前没有 `--dry-run` 或 `--pd-cleanup-only` 入口。异常中断后，可结合本轮 `full_service/deployment.json`、生成的脚本和日志确认实际分配的节点、容器、卡号与端口，再定向排查和清理；不要将整个资源池都视为本轮已使用资源。
+
+完整服务阶段若启动或压测失败，汇总和报告保留主流程的异常类型与原因；压测停止、配置恢复、服务停止各自独立尝试，失败项追加到 `full_service.cleanup_errors`，并在 `final_result.md` 的“清理异常（附加信息）”中逐项展示。若主流程成功而清理失败，整体仍标记失败，不输出成功的完整服务阶段结果。
+
+开启 `enabled = true` 时，运行结束直接查看 **`output/pd_disagg/<run_id>/final_result.md`**，命令最后会打印该文件路径。报告在一个文件中集中展示：
+
+- 完整流程状态，以及完整服务的吞吐、TTFT、TPOT、成功率和逐项 SLO 判定；
+- 最终并发、请求速率及压测命令覆盖，并发的配置范围、初始值及最终实测值来源；
+- 最终选中的 P/D 服务参数、单侧负载与指标、理论配比及实际实例数；
+- 实际机器、容器、物理卡、Proxy 地址与完整部署配置（内嵌 JSON，可直接核对和提取）。
+
+资源统计分别展示设备池总卡数、`total_devices` 预算、已分配卡数、预算内余量和池内闲置。设备池允许大于预算：例如池内 32 卡、预算 24 卡、实际分配 24 卡时，预算内余量为 0，池内闲置为 8。总量按分配前设备池统计，不包含 Proxy 角色的设备；旧部署记录未保存池总量时，报告显示未知，不用已分配设备反推池总量。
+
+当前未采集单侧搜索与部署节点的卡型号，也未自动关联控制端与 `cluster.hosts` 的主机标识，报告不保证硬件一致。单侧搜索在控制端配置的设备上运行；将参数用于不同型号、显存容量或带宽的部署机器前，应另行核对其适用性，不能仅凭完整服务 SLO 结果判断参数失配原因。
+
+`final_result.md` 用于在部署环境中核对结果，保留原始信息，未自动脱敏。机器地址、容器标识、模型与输出路径、启动参数及环境配置可能出现在部署表、内嵌 JSON、压测配置、错误信息和追溯路径中；对外分享至 Issue、PR 评论或群聊前，请检查整份报告并脱敏。原始 `deployment.json` 和生成的启动脚本也应按相同原则处理。
+
+若流程中途失败，同一报告会记录失败阶段、错误和已保存的阶段结果，不会把缺失指标标记为达标。`status="completed"` 表示流程完成，`full_service.slo_met` 单独表示性能目标是否全部达到。
+
+原有 `pd_disagg_summary.json`、`full_service/deployment.json`、各阶段 `phase_result.json` 和 CSV 继续保留用于追溯，日常查看最终结果无需逐个打开。`enabled = false` 或未配置完整服务时不生成这份报告，分步模式的状态、文件和查看方式保持不变。完整服务结束后自动停止。
+
 ## 第 1 步：确认示例配置，准备环境
 
 本例使用以下模型、服务参数和压测负载：
@@ -192,6 +251,8 @@ cp docs/zh/use_cases/examples/optix_pd_disaggregation/search.toml ./pd_search.to
 每个参数使用一个 `[[pd_disagg.<阶段>.target_field]]` 块。`min`、`max` 是搜索上下限，`dtype_param` 给出枚举候选或联动规则，`value` 是初始值。两个服务参数使用 `config_position="run"`，压测参数使用 `env`；`NUM_PROMPTS` 通过 `times` 按并发 × 4 计算。新增参数时，在对应阶段追加同样格式的块，保留其他已有字段。
 
 模板已配置好两阶段的区别：P 输出 1 个 token、按 TTFT 评分；D 开启 prefix caching，连续测两轮，第一轮预热、第二轮按 TPOT 评分。`top_k=0` 省去候选微调，仍验证最优结果并推荐配比。
+
+若模型或引擎在 D 单侧场景下不支持 prefix caching，应关闭该单侧缓存；关闭后 D 单侧吞吐包含 Prefill 成本。完整 PD 对应角色的缓存设置独立按实际部署要求填写，可通过 `full_service.decode_others` 与单侧区分；单侧容量用于配比估计，最终是否达标由完整服务实测确认。使用 AISBench `stable_stage` 时，请求数需大于并发数，并提供足够的后续补入请求，避免短测试没有有效稳态区间。
 
 两阶段的 `others` 保留模型启动参数，两个批处理参数由各自的搜索字段生成。`others` 会**替换整个启动参数字符串**，修改时要保留该阶段所需的完整参数。
 

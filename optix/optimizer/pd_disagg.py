@@ -18,14 +18,13 @@
 from __future__ import annotations
 
 import csv
-import json
 import shlex
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from math import isfinite
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from loguru import logger
 
@@ -41,10 +40,7 @@ from ..config.config import (
 from ..io_utils import open_file
 from .errors import PdDisaggError
 from .outcome import OptimizationResult
-
-PREFILL_PHASE = "prefill"
-DECODE_PHASE = "decode"
-PHASES = (PREFILL_PHASE, DECODE_PHASE)
+from .pd_common import DECODE_PHASE, PHASES, PREFILL_PHASE, write_json
 
 
 @dataclass(frozen=True)
@@ -169,21 +165,6 @@ def allocate_instances(
             )
     candidates.sort(key=lambda item: (item.ratio_error, -item.balanced_qps, -item.used_devices))
     return candidates[:top_k]
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
-    with open_file(path, "w") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=2, default=_json_default)
-
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    item = getattr(value, "item", None)
-    if callable(item):
-        return item()
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _write_candidate_rows(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -588,9 +569,6 @@ class OptixPhaseRunner:
                 f"PD phase '{phase_name}' requires manage_simulator_lifecycle=true to manage the service during search"
             )
         from .experience_fine_tunning import FineTune
-        from .optimizer import PSOOptimizer
-        from .scheduler import Scheduler
-        from .store import DataStorage
 
         simulator_cls, benchmark_cls = self._resolve_and_validate_plugins(phase_name, phase_config)
         simulator = simulator_cls(
@@ -615,17 +593,41 @@ class OptixPhaseRunner:
                 FineTune.validate_pd_disaggregation_fields(target_fields)
             except ValueError as error:
                 raise PdDisaggError(f"PD phase '{phase_name}' has invalid fine-tune fields: {error}") from error
+        return self.optimize_phase(phase_config, phase_output_dir, simulator, benchmark, target_fields)
+
+    def optimize_phase(
+        self,
+        phase_config,
+        phase_output_dir,
+        simulator,
+        benchmark,
+        target_fields,
+        *,
+        mode: Literal["search", "full_service"] = "search",
+    ):
+        """Apply search or full-service refinement semantics in one place."""
+        from .experience_fine_tunning import FineTune
+        from .optimizer import PSOOptimizer
+        from .scheduler import Scheduler
+        from .store import DataStorage
+
+        if mode not in {"search", "full_service"}:
+            raise PdDisaggError(f"Unknown PD optimization mode: {mode!r}")
+        full_service = mode == "full_service"
+        benchmark_run_count = phase_config.benchmark_run_count
+        if benchmark_run_count < 1:
+            raise PdDisaggError("PD phase benchmark_run_count must be greater than or equal to 1")
+        use_request_rate_calibration = False if full_service else self.settings.use_request_rate_calibration
+        if use_request_rate_calibration and benchmark_run_count > 1:
+            raise PdDisaggError(
+                f"PD phase benchmark_run_count={benchmark_run_count} requires use_request_rate_calibration=false"
+            )
+
         service_param_names = tuple(field.name for field in getattr(simulator, "data_field", ()) or ())
         benchmark_param_names = tuple(field.name for field in getattr(benchmark, "data_field", ()) or ())
 
-        storage_config = DataStorageConfig(store_dir=phase_output_dir, pso_top_k=self.top_k)
+        storage_config = DataStorageConfig(store_dir=phase_output_dir, pso_top_k=1 if full_service else self.top_k)
         data_storage = DataStorage(storage_config, simulator, benchmark)
-        benchmark_run_count = phase_config.benchmark_run_count
-        if self.settings.use_request_rate_calibration and benchmark_run_count > 1:
-            raise PdDisaggError(
-                f"PD phase '{phase_name}' benchmark_run_count={benchmark_run_count} requires "
-                "use_request_rate_calibration=false"
-            )
         scheduler = Scheduler(
             simulator,
             benchmark,
@@ -646,7 +648,12 @@ class OptixPhaseRunner:
             fine_tune_mode=phase_config.fine_tune_mode,
         )
         n_particles, iters = self._resolve_search_budget(phase_config)
-        optimizer = PSOOptimizer(
+        optimizer_cls = PSOOptimizer
+        if full_service:
+            from .pd_full_service import FullServiceOptimizer
+
+            optimizer_cls = FullServiceOptimizer
+        optimizer = optimizer_cls(
             scheduler,
             n_particles=n_particles,
             iters=iters,
@@ -658,11 +665,11 @@ class OptixPhaseRunner:
             tpot_slo=phase_config.tpot_slo,
             success_rate_slo=phase_config.success_rate_slo,
             generate_speed_target=self.settings.generate_speed_target,
-            load_breakpoint=self.load_breakpoint,
+            load_breakpoint=False if full_service else self.load_breakpoint,
             fine_tune=fine_tune,
             max_fine_tune=self.settings.max_fine_tune,
-            skip_pso=self.settings.skip_pso,
-            use_request_rate_calibration=self.settings.use_request_rate_calibration,
+            skip_pso=True if full_service else self.settings.skip_pso,
+            use_request_rate_calibration=use_request_rate_calibration,
             manage_simulator_lifecycle=self.settings.manage_simulator_lifecycle,
             pso_init_kwargs={"ftol": self.settings.ftol, "ftol_iter": self.settings.ftol_iter},
         )
@@ -748,8 +755,19 @@ class PdDisaggOrchestrator:
                 else None
             ),
         )
-        _write_json(self._phase_result_path(phase_name), result.to_dict())
+        write_json(self._phase_result_path(phase_name), result.to_dict())
         return result
+
+    def _write_final_report(self, summary):
+        if self.config.full_service is None or not self.config.full_service.enabled:
+            return self.summary_path
+        from .pd_report import write_final_report
+
+        path = write_final_report(self.run_dir, summary, self.config)
+        summary["artifacts"]["final_report"] = str(path)
+        write_json(self.summary_path, summary)
+        logger.info("PD complete pipeline result: {}", path)
+        return path
 
     def run(self) -> dict[str, Any]:
         self.run_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
@@ -759,20 +777,27 @@ class PdDisaggOrchestrator:
             "status": "running",
             "artifacts": {"summary": str(self.summary_path)},
         }
-        _write_json(self.summary_path, summary)
+        write_json(self.summary_path, summary)
         current_phase = None
         try:
+            full_runner = None
+            if self.config.full_service is not None and self.config.full_service.enabled:
+                current_phase = "full_service_preflight"
+                from .pd_full_service import OptixFullServiceRunner
+
+                full_runner = OptixFullServiceRunner(self.phase_runner)
+                full_runner.preflight()
             preflight = getattr(self.phase_runner, "preflight", None)
             if callable(preflight):
                 preflight(self.config)
             for phase_name in (PREFILL_PHASE, DECODE_PHASE):
                 current_phase = phase_name
                 summary[phase_name] = {"status": "running"}
-                _write_json(self.summary_path, summary)
+                write_json(self.summary_path, summary)
                 results[phase_name] = self._run_phase(phase_name)
                 summary[phase_name] = self._summary_phase(results[phase_name])
                 summary["artifacts"][f"{phase_name}_csv"] = results[phase_name].csv_path
-                _write_json(self.summary_path, summary)
+                write_json(self.summary_path, summary)
 
             prefill = results[PREFILL_PHASE]
             decode = results[DECODE_PHASE]
@@ -811,8 +836,19 @@ class PdDisaggOrchestrator:
             if self.config.total_devices and not candidates:
                 summary["allocation_warning"] = "No integer instance allocation satisfies the resource constraints"
             summary["status"] = "service_search_completed"
-            _write_json(self.summary_path, summary)
-            logger.success("PD service parameter search finished: {}", self.summary_path)
+            write_json(self.summary_path, summary)
+            if full_runner is not None:
+                current_phase = "full_service"
+                summary[current_phase] = {"status": "running"}
+                write_json(self.summary_path, summary)
+                summary[current_phase] = full_runner.run(results, summary["instances"], self.run_dir / current_phase)
+                summary["status"] = "completed"
+                summary["artifacts"]["full_service"] = str(self.run_dir / current_phase / "phase_result.json")
+                write_json(self.summary_path, summary)
+            if full_runner is not None:
+                current_phase = "final_report"
+            result_path = self._write_final_report(summary)
+            logger.success("PD service parameter search finished: {}", result_path)
             return summary
         except Exception as error:
             summary["status"] = "failed"
@@ -823,7 +859,15 @@ class PdDisaggOrchestrator:
                     "status": "failed",
                     "error": summary["error"],
                 }
-            _write_json(self.summary_path, summary)
+                if current_phase == "full_service":
+                    cleanup_errors = list(getattr(full_runner, "cleanup_errors", ()))
+                    if cleanup_errors:
+                        summary[current_phase]["cleanup_errors"] = cleanup_errors
+            write_json(self.summary_path, summary)
+            try:
+                self._write_final_report(summary)
+            except Exception as report_error:
+                logger.warning("Could not write PD final report: {}", report_error)
             if isinstance(error, PdDisaggError):
                 raise
             raise PdDisaggError(f"PD phase '{current_phase}' failed: {error}") from error

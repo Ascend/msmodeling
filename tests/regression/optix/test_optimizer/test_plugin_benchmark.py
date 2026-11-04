@@ -193,6 +193,39 @@ class TestAisbench:
         assert result == 100
 
 
+@pytest.mark.parametrize("penalty", [0.0, 1.0])
+def test_single_token_result_only_allows_missing_tpot_when_unscored(tmp_path, penalty):
+    csv_path = tmp_path / "single_token.csv"
+    csv_path.write_text("Performance Parameters,Stage,Average\nTTFT,total,150.0 ms\n")
+    csv_path.with_suffix(".json").write_text(
+        json.dumps(
+            {
+                "Total Requests": {"total": 16},
+                "Success Requests": {"total": 16},
+                "Request Throughput": {"total": "4.0 req/s"},
+                "Output Token Throughput": {"total": "4.0 token/s"},
+            }
+        )
+    )
+    bench = object.__new__(AisBench)
+    bench.config = AisBenchConfig(output_path=tmp_path)
+    bench.mindie_benchmark_perf_columns = ["average"]
+    phase_settings = MagicMock(tpot_penalty=penalty)
+    with (
+        patch("optix.optimizer.plugins.benchmark.glob.glob", return_value=[str(csv_path)]),
+        patch("optix.optimizer.plugins.benchmark.get_settings", return_value=phase_settings),
+    ):
+        if penalty:
+            with pytest.raises(ValueError, match="metric_name tpot"):
+                bench.get_performance_index()
+        else:
+            result = bench.get_performance_index()
+            assert result.time_to_first_token == 0.15
+            assert result.time_per_output_token is None
+            assert result.throughput == 4.0
+            assert result.success_rate == 1.0
+
+
 class TestBeforeRun:
     """BeforeRun test class using pytest fixtures."""
 

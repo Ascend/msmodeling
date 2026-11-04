@@ -950,17 +950,20 @@ class PdClusterSimulator(SimulatorInterface):
             ),
             "current_node": current_node,
         }
-        rendered_others = render_template(self.vllm_others, partial_context)
+        plan = getattr(self, "_pipeline_plans", {}).get("prefill" if role == "P" else "decode")
+        rendered_others = render_template(plan["others"] if plan else self.vllm_others, partial_context)
 
         vllm_command_ns = SimpleNamespace(
-            model=self.model_path,
-            served_model_name=self.served_model_name,
+            model=shell_quote(plan["model"]) if plan else self.model_path,
+            served_model_name=shell_quote(plan["served_model_name"]) if plan else self.served_model_name,
             others=rendered_others,
         )
         partial_context["vllm.command"] = vllm_command_ns
         return partial_context
 
     def _engine_id_for(self, role: str, group_idx: int = 0, dp_rank: int = 0) -> str:
+        if getattr(self, "_pipeline_plans", None) and not self._is_moe:
+            return f"{role}-I{group_idx}-R{dp_rank}"
         if self._is_moe:
             return f"{'prefill' if role == 'P' else 'decode'}_instance_{group_idx}"
         return f"{role}-{dp_rank}"
@@ -1368,6 +1371,41 @@ class PdClusterSimulator(SimulatorInterface):
             "rpc_port": node.rpc_port + dp_rank,
         }
 
+    def _log_deployment_ports(self):
+        """Print configured endpoints without opening SSH or probing live ports."""
+        lines = [
+            "[OPT] Configured PD deployment ports (static plan; live availability NOT checked; "
+            "backend-selected ports are not listed):"
+        ]
+        proxy = self.config.proxy
+        lines.append(
+            f"[proxy] ssh={proxy.ssh_ip}:{proxy.ssh_port} container={proxy.docker_container_id or 'none'} "
+            f"service={proxy.bind_ip}:{proxy.service_port}"
+        )
+        for role, groups, tp, dp in (
+            ("P", self.config.prefill_groups, self._prefill_tp_size, self._prefill_dp_size),
+            ("D", self.config.decode_groups, self._decode_tp_size, self._decode_dp_size),
+        ):
+            for group_idx, group in enumerate(groups):
+                if self._is_moe and group.nodes:
+                    coordinator = group.nodes[0].bind_ip or group.nodes[0].ssh_ip
+                    lines.append(f"[{role}-I{group_idx}] dp_coordinator={coordinator}:{group.dp_rpc_port}")
+                dp_rank = 0
+                for node in group.nodes:
+                    count = min(len(node.gpu_ids) // tp, max(dp - dp_rank, 0))
+                    for local_rank in range(count):
+                        resources = self._calc_process_resources(role, node, local_rank)
+                        kv_start = resources['kv_port']
+                        lines.append(
+                            f"[{role}-I{group_idx}-R{dp_rank + local_rank}] "
+                            f"ssh={node.ssh_ip}:{node.ssh_port} container={node.docker_container_id or 'none'} "
+                            f"route={node.bind_ip or node.ssh_ip} service=0.0.0.0:{resources['port']} "
+                            f"kv={kv_start}-{kv_start + tp - 1} configured_rpc={resources['rpc_port']} "
+                            f"ASCEND_BASE_PORT={node.ascend_base_port}"
+                        )
+                    dp_rank += count
+        logger.info("\n".join(lines))
+
     def _cleanup_node(self, node, port: int | None = None, *, label: str = "") -> None:
         """Container cleanup before restart: stop residual processes on this container's
         GPUs/ports and wait for release without affecting other containers.
@@ -1621,9 +1659,32 @@ class PdClusterSimulator(SimulatorInterface):
         """Run a kill -0 liveness check and an HTTP health probe on all started nodes, and print a summary log."""
         self._probe_all_nodes(node_infos, raise_on_dead=True)
 
+    def configure_pd_pipeline(self, plans, allocation, common_env):
+        """Install frozen search results and an automatically allocated topology."""
+        from .pipeline import allocate_resource_pool, validate_deployment
+
+        self._pipeline_plans = plans
+        self.config = allocate_resource_pool(self.config, allocation, plans)
+        self.config.target_field = []
+        for role in ("prefill", "decode"):
+            plan = plans[role]
+            if not self._is_moe and plan["dp"] != 1:
+                raise ValueError("PD plugin supports DP>1 only for MoE models")
+            setattr(self, f"_{role}_tp_size", plan["tp"])
+            setattr(self, f"_{role}_dp_size", plan["dp"])
+            role_env = getattr(self.config, f"env_{role}")
+            inherited_env = {k: str(v) for k, v in common_env.items() if k != "ASCEND_RT_VISIBLE_DEVICES"}
+            inherited_env.update(role_env)
+            role_env.clear()
+            role_env.update(inherited_env)
+            role_env.update({k: v for k, v in plan["env"].items() if k != "ASCEND_RT_VISIBLE_DEVICES"})
+        self.update_config()
+        validate_deployment(self.config, plans)
+        self._log_deployment_ports()
+
     def before_run(self, run_params=None):
         """Receive optimizer parameters and apply them to the P/D node config."""
-        self.update_config(run_params)
+        self.update_config(None if getattr(self, "_pipeline_plans", None) else run_params)
 
     def run(self, run_params=None, **kwargs):
         logger.info(f"[OPT] run called: run_params={run_params}, kwargs={kwargs}")
@@ -1638,6 +1699,8 @@ class PdClusterSimulator(SimulatorInterface):
         self._remote_pid_nodes = {}
         self._remote_logs = {}
         self._node_infos = None
+        if getattr(self, "_pipeline_plans", None):
+            self._pipeline_started = True
         try:
             failures: List[str] = []
 
@@ -1994,17 +2057,25 @@ class PdClusterSimulator(SimulatorInterface):
         intact for relaunch. stop() calls this then clears state and closes executors.
         """
         seen: set = set()
+        failures = []
         for node in self._all_nodes():
             key = self._container_key(node)
             if key in seen:
                 continue
             seen.add(key)
             try:
-                self._stop_node(node, label=key)
+                result = self._stop_node(node, label=key)
+                logger.info(f"[{key}] stop:\n{result.stdout.strip()}")
+                if getattr(result, "failed", False) or getattr(result, "returncode", 0) != 0:
+                    failures.append(f"{key}: {result.stdout.strip()[-500:]}")
             except Exception as e:
-                logger.warning(f"[{key}] stop error: {e}")
+                failures.append(f"{key}: {e}")
+        if failures:
+            raise RuntimeError("PD cleanup failed: " + "; ".join(failures))
 
     def stop(self, del_log: bool = True):
+        if getattr(self, "_pipeline_plans", None) and not getattr(self, "_pipeline_started", False):
+            return
         logger.info(f"[OPT] stop called: del_log={del_log}")
 
         # ---- Replaces super().stop(del_log) ----
@@ -2029,6 +2100,7 @@ class PdClusterSimulator(SimulatorInterface):
         self._process_stage = ProcessState(stage=Stage.stop)
         # _cleanup_round_dir() is idempotent; unconditionally cleans this round's temp directory (scripts + logs).
         self._cleanup_round_dir()
+        self._pipeline_started = False
         logger.info("[OPT] stop completed")
 
     def __del__(self):

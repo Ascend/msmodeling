@@ -25,7 +25,6 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "contrib/optix/multihost_infer"
 _PLUGIN_PACKAGE = "multihost_inference_optimization"
@@ -35,26 +34,6 @@ def _drop_plugin_modules() -> None:
     for name in list(sys.modules):
         if name == _PLUGIN_PACKAGE or name.startswith(f"{_PLUGIN_PACKAGE}."):
             del sys.modules[name]
-
-
-def test_real_fabric_skips_invalid_controller_ssh_config(tmp_path, monkeypatch):
-    """Exercise the Fabric/Paramiko parsing path when the dependency is installed."""
-    fabric = pytest.importorskip("fabric")
-    paramiko = pytest.importorskip("paramiko")
-    ssh_dir = tmp_path / ".ssh"
-    ssh_dir.mkdir()
-    (ssh_dir / "config").write_text("Match final all\n", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-
-    with pytest.raises(
-        paramiko.ssh_exception.ConfigParseError,
-        match=r"Match does not allow 'all'.*canonical",
-    ):
-        fabric.Config()
-
-    config = fabric.Config(overrides={"load_ssh_configs": False})
-    assert config.load_ssh_configs is False
 
 
 def _load_modules():

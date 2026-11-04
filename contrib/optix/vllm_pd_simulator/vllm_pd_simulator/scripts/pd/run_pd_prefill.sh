@@ -16,7 +16,6 @@
 
 set -euo pipefail
 <%= vllm_pd.run_envs %>
-source ${PD_CANN_HOME:-/usr/local/Ascend/cann-9.0.0}/set_env.sh
 # conda 激活：失败时告警但不终止（远端可能无 conda，回退系统 python）
 if [ -f /opt/mamba/etc/profile.d/conda.sh ]; then
     source /opt/mamba/etc/profile.d/conda.sh
@@ -54,6 +53,7 @@ ASCEND_RT_VISIBLE_DEVICES=<%= current_node.gpu_ids %> vllm serve <%= vllm.comman
     <%= vllm.command.others %> \
     --kv-transfer-config '{
         "kv_connector": "'${PD_KV_CONNECTOR:-MooncakeLayerwiseConnector}'",
+        "kv_buffer_device": "npu",
         "kv_role": "kv_producer",
         "kv_port": <%= current_node.kv_port %>,
         "engine_id": "<%= current_node.engine_id %>",

@@ -249,6 +249,14 @@ class TestPSOOptimizer:
         assert fitness == fitness_list[expected]
         np.testing.assert_array_equal(params, params_list[expected])
 
+    def test_prefill_best_result_preserves_unmeasured_tpot(self):
+        opt = self._create_optimizer(ttft_penalty=1.0, tpot_penalty=0)
+        opt.fine_tune = _make_fine_tune_mock(ttft_upper_bound=1.0)
+        result = PerformanceIndex(generate_speed=10, time_to_first_token=0.5)
+        _, _, best = opt.best_params([1.0], [np.array([10])], [result])
+        assert best.time_per_output_token is None
+        assert np.isfinite(opt.minimum_algorithm(best.model_copy(update={"success_rate": 1.0})))
+
     def test_best_params_with_both_penalties(self):
         opt = self._create_optimizer(ttft_penalty=1.0, tpot_penalty=1.0)
         opt.fine_tune = _make_fine_tune_mock(tpot_upper_bound=0.05, ttft_upper_bound=0.15)

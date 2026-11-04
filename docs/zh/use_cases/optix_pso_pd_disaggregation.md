@@ -12,6 +12,47 @@
 
 如果完整 PD 服务已经部署好，只需要调整压测并发和请求速率，可以直接从[第三步](#第三步微调完整-pd-服务)开始。
 
+## 一个命令运行完整流程
+
+通过 `pd_disagg.full_service.enabled` 开关控制是否执行完整链路，默认 `false`。设为 `true` 后，同一条命令依次完成 P 搜索、D 搜索、配比推荐、完整 PD 服务部署和负载微调，中间无需人工部署或再次启动 OptiX。设为 `false` 时，只运行 P/D 搜索和配比推荐，跳过完整服务预检、部署和压测，其他完整服务配置可以保留。已有配置若省略该开关，现在也按关闭处理；需要完整流程时请显式补上 `enabled = true`。
+
+```toml
+[pd_disagg.full_service]
+enabled = true  # false：只搜索 P/D 并推荐配比；true：继续部署完整 PD 并微调负载
+```
+
+开启时仍需填写下述完整流程模板中的负载搜索范围和部署信息。
+
+首次准备时安装现有 PD 插件（重新 `uv sync` 后需重装）：
+
+```bash
+uv pip install --python .venv/bin/python -e contrib/optix/vllm_pd_simulator
+```
+
+复制 [完整流程配置模板](examples/optix_pd_disaggregation/full_pipeline.toml)，按环境填写搜索参数、模型、AISBench 短名、`cluster.hosts` 和 `vllm_pd.nodes` 中允许使用的设备、通信网卡及 Proxy 地址。模板按 24 卡、P/D 每实例 8 卡展示。路径从仓库根目录解析。
+
+```bash
+uv run --no-sync msmodeling optix --mode pd_disagg -c ./pd_full.toml
+```
+
+- 设备池使用 `role="auto"` 时，按推荐实例数自动分成 P/D；`prefill`、`decode` 可限制设备角色，必须留足对应卡数。支持留卡，受 `use_full_device` 控制。该流程要求扁平 `vllm_pd.nodes`，不接受旧的手工 group 布局。
+- P/D 服务参数及各自固定启动参数自动传递到部署插件；两侧 TP×DP 必须与各自每实例卡数一致，当前插件要求 PP=1，DP>1 适用于 MoE 模型。
+- `full_service.target_field` 仅配置 `CONCURRENCY`、`REQUESTRATE` 和可选 `NUM_PROMPTS`，前两项必须存在；最后阶段固定配比与服务参数，复用同一套服务微调负载，不再跑 PSO。
+- 仅适用于真实 PD 节点的 vLLM 参数可放入 `full_service.prefill_additional_config` / `decode_additional_config`，合并到对应角色的 `--additional-config`；例如 `decode_additional_config = { recompute_scheduler_enable = true }`。单侧搜索不启用它们，已搜索参数仍优先。
+- 最后阶段单独配置端到端 TTFT/TPOT 目标和 benchmark 负载，使用完整输出长度。支持 `vllm_benchmark`、`ais_bench`；工具自动绑定 Proxy 地址。AISBench 可复用 D 模型配置，要求单个显式模型、地址为字面量，结束后恢复该配置文件。
+- SSH、模型、vLLM、CANN、KV Connector 以及 Proxy 脚本须在执行前就绪，部署插件负责服务启停与健康检查。所有资源应为本次测试专用；单侧搜索依然在当前控制端配置的设备上依次执行。
+
+开启 `enabled = true` 时，运行结束直接查看 **`output/pd_disagg/<run_id>/final_result.md`**，命令最后会打印该文件路径。报告在一个文件中集中展示：
+
+- 完整流程状态，以及完整服务的吞吐、TTFT、TPOT、成功率和逐项 SLO 判定；
+- 最终并发、请求速率及压测命令覆盖；
+- 最终选中的 P/D 服务参数、单侧负载与指标、理论配比及实际实例数；
+- 实际机器、容器、物理卡、Proxy 地址与完整部署配置（内嵌 JSON，可直接核对和提取）。
+
+若流程中途失败，同一报告会记录失败阶段、错误和已保存的阶段结果，不会把缺失指标标记为达标。`status="completed"` 表示流程完成，`full_service.slo_met` 单独表示性能目标是否全部达到。
+
+原有 `pd_disagg_summary.json`、`full_service/deployment.json`、各阶段 `phase_result.json` 和 CSV 继续保留用于追溯，日常查看最终结果无需逐个打开。`enabled = false` 或未配置完整服务时不生成这份报告，分步模式的状态、文件和查看方式保持不变。完整服务结束后自动停止。
+
 ## 准备环境和配置文件
 
 先按[环境准备与安装](../user_guide/msmodeling_optix_user_guide.md#4-环境准备与安装)安装 OptiX，并确认运行环境中可以使用 `vllm` 和所选压测工具。
@@ -101,6 +142,8 @@ others = "--seed 1024 --num-prompts 500 --random-input-len 1024 --random-output-
 P 阶段把输出长度设为 `1`，使请求在首 token 后结束，主要测量 Prefill 的处理能力。D 阶段启用 prefix caching，并对同一组候选连续测评两次：第一次填充缓存，第二次记录指标。两次测评共用一个 vLLM 实例，第一轮预热结果不计入搜索成绩或配比。
 
 Decode 的两轮请求需要一致，所以示例在 **benchmark 命令**中设置了 `--seed 1024`。输入输出长度、请求数、并发和请求率也要保持一致。仅在 `vllm serve` 中设置 seed 无法固定压测请求。缓存预热可以减少 Prefill 对独立 D 测评的影响，完整 PD 链路的性能仍需在第三步验证。
+
+若当前模型或引擎不支持该场景的 prefix caching，在 D 单侧和完整 PD 对应角色中显式设置 `--no-enable-prefix-caching`。此时重复测评仍可用于预热运行环境，但 D 单侧请求包含 Prefill 成本，其吞吐不能视为纯 Decode 容量。
 
 | 参数 | 含义与修改方法 |
 |---|---|
@@ -206,6 +249,8 @@ others = "--datasets your_prefill_dataset_config"
 ```
 
 D 阶段同样在 `[pd_disagg.decode.benchmark_command_overrides]` 中指定对应配置。`models` 和 `datasets` 填写 AISBench 能解析的配置短名；`datasets` 通过 `others` 传入。AISBench 的模型 Python 配置还需填写正确的服务地址、端口和服务模型名。如果使用 `ais_bench` 并需要开启稳态测试，可在 `[ais_bench.command]` 的 `others` 中追加 `--summarizer stable_stage`，例如 `others = "--datasets your_dataset_config --summarizer stable_stage"`。
+
+使用 `stable_stage` 时，请求数需要大于并发数，并留出足够的后续补入请求；请求数等于并发数时无法形成有效稳态区间。短预算验证应相应限制并发范围，并检查实际参与稳态统计的样本数。
 
 P 的输出长度设为 1 token；D 的模型与数据集配置应保证预热和正式测评生成相同请求。AISBench 的配置方式与 `vllm_benchmark` 不同，不要直接沿用 `--random-input-len` 等参数。可覆盖的 OptiX 命令字段为 `models`、`mode`、`work_dir` 和 `others`。
 

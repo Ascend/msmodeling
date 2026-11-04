@@ -1122,6 +1122,40 @@ def _default_decode_phase() -> PdDisaggPhaseConfig:
     )
 
 
+class PdFullServiceConfig(PdDisaggPhaseConfig):
+    """Optional automatic deployment and end-to-end load refinement."""
+
+    enabled: bool = Field(default=False, description="Automatically deploy and benchmark the full PD service")
+
+    engine: Literal["vllm_pd"] = "vllm_pd"
+    benchmark_policy: Literal["vllm_benchmark", "ais_bench"] = "vllm_benchmark"
+    fine_tune_mode: Literal["pd_mixed"] = "pd_mixed"
+    benchmark_run_count: int = Field(
+        default=2, ge=1, description="Full-service passes: warm up on preceding passes and score only the final pass"
+    )
+    prefill_others: str | None = Field(default=None, description="Replace Prefill serve arguments for deployment only")
+    decode_others: str | None = Field(default=None, description="Replace Decode serve arguments for deployment only")
+    prefill_additional_config: dict[str, Any] = Field(default_factory=dict)
+    decode_additional_config: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_load_fields(self):
+        if not self.enabled:
+            return self
+        if self.simulator_command_overrides:
+            raise ValueError("full_service inherits serving commands from the P/D search phases")
+        names = [field.name for field in self.target_field]
+        if len(names) != len(set(names)):
+            raise ValueError("full_service target_field names must be unique")
+        if "CONCURRENCY" not in names or "REQUESTRATE" not in names:
+            raise ValueError("full_service requires CONCURRENCY and REQUESTRATE load fields")
+        if any(name not in {"CONCURRENCY", "REQUESTRATE", "NUM_PROMPTS"} for name in names):
+            raise ValueError("full_service may tune only CONCURRENCY, REQUESTRATE and NUM_PROMPTS")
+        if any(field.config_position != "env" for field in self.target_field):
+            raise ValueError("full_service load fields must use config_position='env'")
+        return self
+
+
 class PdDisaggConfig(BaseModel):
     """Built-in P/D service parameter search and ratio recommendation settings."""
 
@@ -1135,6 +1169,7 @@ class PdDisaggConfig(BaseModel):
     phase_output_dir: str = "pd_disagg"
     prefill: PdDisaggPhaseConfig = Field(default_factory=_default_prefill_phase)
     decode: PdDisaggPhaseConfig = Field(default_factory=_default_decode_phase)
+    full_service: PdFullServiceConfig | None = None
 
     @field_validator("phase_output_dir")
     @classmethod
@@ -1156,6 +1191,8 @@ class PdDisaggConfig(BaseModel):
                 "total_devices, prefill_devices_per_instance and decode_devices_per_instance "
                 "must be configured together"
             )
+        if self.full_service is not None and self.full_service.enabled and not all(device_fields):
+            raise ValueError("full_service requires total_devices and both devices_per_instance values")
         if self.prefill.engine != "vllm" or self.decode.engine != "vllm":
             raise ValueError("built-in pd_disagg supports only the 'vllm' engine for prefill and decode")
         return self

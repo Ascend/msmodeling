@@ -319,17 +319,22 @@ def validate_settings(content: str) -> tuple:
     """best-effort：用 optix 的 pydantic Settings 做真·加载校验。
 
     返回 (errors, notes)：notes 为信息性说明（如依赖不可用），不计入失败。
-    注意：SettingsConfigDict 未设 extra='forbid'，未知键会被 pydantic 静默忽略——
-    未知键 allowlist 需要完整环境里的 schema，属于完整环境门禁的补充项。
+    顶层扩展节与 optix --config 的加载规则一致，允许插件拥有自己的配置节；
+    已知字段及嵌套配置仍由 Settings 的完整 schema 校验。
     """
     try:
         import tomllib
+        from pydantic_settings import SettingsConfigDict
 
         from optix.config.config import Settings
     except Exception as e:  # noqa: BLE001
         return [], [f"ℹ 跳过 pydantic Settings 校验（optix 依赖不可用: {type(e).__name__}: {e}），在完整环境自动生效"]
     try:
-        Settings.model_validate(tomllib.loads(content))
+
+        class PluginSettings(Settings):
+            model_config = SettingsConfigDict(**{**Settings.model_config, "extra": "allow"})
+
+        PluginSettings.model_validate(tomllib.loads(content))
         return [], []
     except Exception as e:  # noqa: BLE001
         return [f"pydantic Settings 校验失败: {e}"], []

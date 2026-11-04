@@ -19,7 +19,7 @@ from pathlib import Path
 
 from loguru import logger
 
-# Characteristic fields in a MoE model's config.json; presence of any one identifies it as MoE
+# Characteristic fields in the top-level or nested language model configuration.
 _MOE_INDICATOR_KEYS = {
     "num_experts_per_tok",
     "n_routed_experts",
@@ -35,7 +35,7 @@ def detect_is_moe(model_path: str) -> bool:
         model_path: Path to the model root directory (the directory containing config.json)
 
     Returns:
-        True if the model's config.json contains MoE characteristic fields, otherwise False.
+        True if config.json or its text_config contains MoE characteristic fields, otherwise False.
         Returns False when the path is empty, the file does not exist, or reading fails.
     """
     if not model_path:
@@ -47,7 +47,12 @@ def detect_is_moe(model_path: str) -> bool:
     try:
         with open(config_file, "r", encoding="utf-8") as f:
             model_config = json.load(f)
-        return any(k in model_config for k in _MOE_INDICATOR_KEYS)
+        if not isinstance(model_config, dict):
+            return False
+        language_configs = (model_config, model_config.get("text_config"))
+        return any(
+            isinstance(config, dict) and any(k in config for k in _MOE_INDICATOR_KEYS) for config in language_configs
+        )
     except Exception as e:
         logger.warning(f"Failed to read model config for MoE detection: {config_file}: {e}")
         return False

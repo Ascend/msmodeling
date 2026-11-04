@@ -208,7 +208,7 @@ def _find_config_file() -> Path:
     return Path(__file__).parent / "config.toml"
 
 
-def load_pd_config() -> Optional[VLLMPDDisaggConfig]:
+def load_pd_config(*, strict: bool = False) -> Optional[VLLMPDDisaggConfig]:
     """Load the plugin config.toml, supporting both legacy format (inline host info) and new format ([[hosts]] reference)."""
     if tomllib is None:
         return None
@@ -224,6 +224,8 @@ def load_pd_config() -> Optional[VLLMPDDisaggConfig]:
 
         plugin_data = toml_data.get("vllm_pd", {})
         if not plugin_data:
+            if strict:
+                raise ValueError("Missing [vllm_pd] deployment configuration")
             return None
 
         # Check whether a [[hosts]] section exists (new format)
@@ -235,6 +237,13 @@ def load_pd_config() -> Optional[VLLMPDDisaggConfig]:
             or toml_data.get("vllm_hosts", [])
             or toml_data.get("hosts", [])
         )
+        if strict:
+            host_ids = {h.get("id") for h in hosts_list}
+            referenced = [*plugin_data.get("nodes", []), plugin_data.get("proxy", {})]
+            for node in referenced:
+                ref = node.get("hosts") or node.get("vllm_hosts")
+                if ref and ref not in host_ids:
+                    raise ValueError(f"Unknown deployment host reference: {ref}")
         if hosts_list:
             hosts_map: Dict[str, HostConfig] = {}
             for h in hosts_list:
@@ -324,6 +333,8 @@ def load_pd_config() -> Optional[VLLMPDDisaggConfig]:
         return VLLMPDDisaggConfig(**plugin_data)
 
     except Exception as e:
+        if strict:
+            raise ValueError(f"Invalid PD deployment configuration {config_file}: {e}") from e
         logger.warning(
             f"Failed to load plugin config from {config_file}: {e}. "
             f"Falling back to default VLLMPDDisaggConfig (all hosts = localhost). "

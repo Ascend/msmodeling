@@ -6,7 +6,6 @@ from pathlib import Path
 
 import tomlkit
 
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPT = SCRIPT_DIR / "config_writer.py"
 
@@ -60,3 +59,22 @@ def test_string_command_field_unchanged(tmp_path):
     doc = _run(tmp_path, "vllm.command.port=8089")
     assert doc["vllm"]["command"]["port"] == "8089"
     assert isinstance(doc["vllm"]["command"]["port"], str)
+
+
+def test_settings_accepts_plugin_sections_and_rejects_invalid_phase_schema():
+    module = load_module()
+    errors, notes = module.validate_settings('[vllm_pd]\nremote_tmp_dir="/tmp/pd"\n[cluster]\nhosts=[]\n')
+    assert not notes  # This regression must exercise the installed OptiX schema.
+    assert not errors
+    errors, notes = module.validate_settings('[pd_disagg.prefill]\nbenchmark_run_count=0\n')
+    assert not notes
+    assert errors and "benchmark_run_count" in errors[0]
+
+
+def test_full_service_can_be_disabled_without_removing_its_section(tmp_path):
+    doc = _run(tmp_path, "pd_disagg.full_service.enabled=false")
+    assert doc["pd_disagg"]["full_service"]["enabled"] is False
+    module = load_module()
+    errors, notes = module.validate_settings('[pd_disagg.full_service]\nenabled=true\n')
+    assert not notes
+    assert errors and "requires CONCURRENCY" in errors[0]
