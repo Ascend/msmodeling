@@ -95,3 +95,56 @@ class CachingRotaryEmb(torch.nn.Module):
             return cos, sin
         else:
             return _call_rotary_emb(self.rotary_emb, x, position_ids, layer_type=layer_type)
+
+
+class CachingMRotaryEmb(torch.nn.Module):
+    """Model M-RoPE generation as one serving-style cache lookup.
+
+    Unlike :class:`CachingRotaryEmb`, this wrapper keeps the model's final
+    rotary width in a combined ``[cos | sin]`` table and represents T/H/W
+    selection as a single TensorCast op.  This is required for Bailing M-RoPE,
+    whose upstream module collapses the three position axes before returning;
+    the generic cache wrapper cannot recover that layout from its output.
+    """
+
+    def __init__(
+        self,
+        rotary_emb: torch.nn.Module,
+        act_dtype: torch.dtype,
+        max_position_embeddings: int,
+    ):
+        super().__init__()
+        self.rotary_emb = rotary_emb
+        self.act_dtype = act_dtype
+
+        # Equal T/H/W coordinates reduce the model-specific M-RoPE layout to
+        # the canonical one-dimensional table.  Cache construction happens
+        # during model adaptation and is therefore outside the simulated
+        # request's prefill/decode hot path.
+        x = torch.empty((1, max_position_embeddings), device="meta", dtype=act_dtype)
+        position_ids = torch.arange(
+            max_position_embeddings,
+            device="meta",
+            dtype=torch.long,
+        ).unsqueeze(0)
+        with support_autocast_for_meta():
+            cos, sin = _call_rotary_emb(rotary_emb, x, position_ids)
+        cos = cos.squeeze(0)
+        sin = sin.squeeze(0)
+        if cos.ndim != 2 or sin.shape != cos.shape:
+            raise ValueError(
+                "CachingMRotaryEmb expects rotary outputs shaped "
+                f"[max_position, rotary_dim], got {tuple(cos.shape)} and {tuple(sin.shape)}"
+            )
+        self.rotary_dim = cos.shape[-1]
+        self.register_buffer("cos_sin_cache", torch.cat((cos, sin), dim=-1), persistent=False)
+
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if x.dtype != self.act_dtype:
+            return _call_rotary_emb(self.rotary_emb, x, position_ids)
+        cos_sin = torch.ops.tensor_cast.mrope_cache_lookup(
+            self.cos_sin_cache,
+            position_ids,
+            self.rotary_dim,
+        )
+        return cos_sin.chunk(2, dim=-1)

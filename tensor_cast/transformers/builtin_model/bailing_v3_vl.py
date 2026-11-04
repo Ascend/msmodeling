@@ -42,6 +42,7 @@ import torch
 import torch.nn.functional as F
 
 from ...layers import COLWISE_LINEAR, ROWWISE_LINEAR
+from ...layers.rotary_embedding import CachingMRotaryEmb
 from ..model import _EXTRA_TC_KWARGS_KEYS
 from ..custom_model_registry import ModelProfile, register_model_profile
 from .bailing_v3 import (
@@ -213,6 +214,19 @@ def _bailing_vl_rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+def _bailing_vl_apply_vision_rotary_pos_emb(query_states, key_states, cos, sin):
+    """Match the official vision RoPE FP32 accumulation semantics."""
+    query_dtype = query_states.dtype
+    key_dtype = key_states.dtype
+    query_states = query_states.float()
+    key_states = key_states.float()
+    cos = cos.unsqueeze(1).float()
+    sin = sin.unsqueeze(1).float()
+    query_states = query_states * cos + _bailing_vl_rotate_half(query_states) * sin
+    key_states = key_states * cos + _bailing_vl_rotate_half(key_states) * sin
+    return query_states.to(query_dtype), key_states.to(key_dtype)
+
+
 def _patch_bailing_v3_vl_official_runtime(decoder):
     """Class-level runtime patches for the official self-contained modeling.
 
@@ -277,10 +291,12 @@ def _patch_bailing_v3_vl_official_runtime(decoder):
                 if cos.size(-1) * 2 == query_states.shape[-1]:
                     cos = torch.cat([cos, cos], dim=-1)
                     sin = torch.cat([sin, sin], dim=-1)
-                cos = cos.unsqueeze(1)
-                sin = sin.unsqueeze(1)
-                query_states = query_states * cos + _bailing_vl_rotate_half(query_states) * sin
-                key_states = key_states * cos + _bailing_vl_rotate_half(key_states) * sin
+                query_states, key_states = _bailing_vl_apply_vision_rotary_pos_emb(
+                    query_states,
+                    key_states,
+                    cos,
+                    sin,
+                )
 
             # [S, H, hd] -> [1, H, S, hd]: the dispatch contract used by the HF
             # vision attention interface (cf. transformers Qwen3VLVisionAttention).
@@ -414,6 +430,12 @@ def _patch_bailing_v3_vl_model(model):
 
     decoder._use_flash_attention_2 = True
     decoder._use_sdpa = False
+    if hasattr(decoder, "rotary_emb") and not isinstance(decoder.rotary_emb, CachingMRotaryEmb):
+        decoder.rotary_emb = CachingMRotaryEmb(
+            decoder.rotary_emb,
+            act_dtype=model.model_config.dtype,
+            max_position_embeddings=model.text_config.max_position_embeddings,
+        )
     stripped_mtp_layers = _strip_bailing_v3_native_mtp(decoder)
     if stripped_mtp_layers:
         logger.warning(

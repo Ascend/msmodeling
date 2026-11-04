@@ -321,6 +321,14 @@ operator_mappings:
       v0.18.0: CANN dispatch to GatherV2AiCore in Decode mode. 0325 profiling: Qwen3 DC GatherV2AiCore(191x).
       TC has (weight, indices, ...); NPU CSV has (weight, indices, axis) — tc_input_count=2.
 
+  "tensor_cast.mrope_cache_lookup.default":
+    kernel_type: GatherV2
+    alternate_kernel_types: [GatherV3, GatherV2AiCore]
+    tc_input_count: 2
+    notes: >
+      Bailing M-RoPE serving path selects the precomputed cos/sin table by
+      token positions; TensorCast folds the T/H/W layout into this lookup.
+
   "aten.index_select.default":
     kernel_type: GatherV3
     alternate_kernel_types: [GatherV2]

@@ -43,6 +43,55 @@ _CHUNK_FP32_SCALAR_VECTOR_WIDTH = 3
 CHUNK_EXTRA_STATIC_KERNELS = 8
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_state_gather.default)
+def _state_gather_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    state = op_invoke_info.args[0]
+    output = op_invoke_info.out
+    assert isinstance(state, torch.Tensor)
+    assert isinstance(output, torch.Tensor)
+
+    # Read only selected rows, not the complete persistent state cache.  Index
+    # and flag metadata are accounted by the default input walk.
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
+    properties.memory_read_bytes += byte_count(output.numel(), state.dtype)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_state_scatter.default)
+def _state_scatter_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    state = op_invoke_info.args[0]
+    final_state = op_invoke_info.args[1]
+    assert isinstance(state, torch.Tensor)
+    assert isinstance(final_state, torch.Tensor)
+
+    # The source and indices are normal reads; charge only the selected cache
+    # rows as writes instead of the full persistent cache allocation.
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
+    properties.memory_write_bytes += byte_count(final_state.numel(), state.dtype)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_recurrent_state_io.default)
+def _recurrent_state_io_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    state = op_invoke_info.args[1]
+    state_indices = op_invoke_info.args[2]
+    assert isinstance(state, torch.Tensor)
+    assert isinstance(state_indices, torch.Tensor)
+
+    # Recurrent KDA accesses selected cache rows in place.  The dependency
+    # output is only a graph anchor, not a materialized copy, and this semantic
+    # marker does not represent an additional kernel launch.
+    properties = op_invoke_info.get_memory_access_properties(
+        exclude_input_ids={0, 1},
+        exclude_output_ids={0},
+    )
+    selected_state_bytes = byte_count(state_indices.numel() * state[0].numel(), state.dtype)
+    properties.memory_read_bytes += selected_state_bytes
+    properties.memory_write_bytes += selected_state_bytes
+    properties.extra_static_cost_count = -1
+    return properties
+
+
 def chunk_gated_delta_rule_ops(
     batch_size: int,
     seq_len: int,
@@ -339,6 +388,9 @@ def _recurrent_gated_delta_rule_properties(op_invoke_info: OpInvokeInfo) -> OpIn
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_gated_rmsnorm.default)
 def _gated_rmsnorm_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     core_attn_out = op_invoke_info.args[0]
+    activation = (
+        op_invoke_info.args[4] if len(op_invoke_info.args) > 4 else op_invoke_info.kwargs.get("activation", "silu")
+    )
     batch_size = core_attn_out.size(0)
     seq_len = core_attn_out.size(1)
     num_v_heads = core_attn_out.size(2)
@@ -347,8 +399,12 @@ def _gated_rmsnorm_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.Perf
     num_elements = num_rows * head_v_dim
 
     properties = op_invoke_info.get_memory_access_properties()
-    gated_rmsnorm_gp_ops = (
-        rmsnorm_ops(num_rows, head_v_dim) + num_elements + elementwise_silu_ops(num_elements) + num_elements
-    )
+    if activation == "silu":
+        activation_ops = elementwise_silu_ops(num_elements)
+    elif activation == "sigmoid":
+        activation_ops = elementwise_sigmoid_ops(num_elements)
+    else:
+        raise ValueError(f"Unsupported gated RMSNorm activation: {activation!r}")
+    gated_rmsnorm_gp_ops = rmsnorm_ops(num_rows, head_v_dim) + num_elements + activation_ops + num_elements
     accumulate_compute_ops(properties, torch.float32, gp_ops=gated_rmsnorm_gp_ops)
     return properties

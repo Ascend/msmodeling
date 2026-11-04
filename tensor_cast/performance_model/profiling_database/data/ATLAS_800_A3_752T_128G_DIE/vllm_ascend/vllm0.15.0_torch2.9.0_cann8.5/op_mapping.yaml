@@ -261,6 +261,14 @@ operator_mappings:
       TC has (weight, indices, ...); NPU CSV has (weight, indices, axis) — tc_input_count=2.
       Dispatch: aten.embedding → GatherV2; aten.index_select → GatherV3 (different API path).
 
+  "tensor_cast.mrope_cache_lookup.default":
+    kernel_type: GatherV2
+    alternate_kernel_types: [GatherV3, GatherV2AiCore]
+    tc_input_count: 2
+    notes: >
+      Bailing M-RoPE serving path selects the precomputed cos/sin table by
+      token positions; TensorCast folds the T/H/W layout into this lookup.
+
   "aten.index_select.default":
     kernel_type: GatherV3
     alternate_kernel_types: [GatherV2]

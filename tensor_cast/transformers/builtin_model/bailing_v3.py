@@ -77,6 +77,27 @@ class BailingV3KimiDeltaAttentionTensorCast(ModelWrapperBase):
         self.conv_size = attention.conv_size
         self.no_kda_lora = attention.no_kda_lora
 
+    def _recurrent_state_view(self, cache, local_num_heads, activation_dtype):
+        """Expose the FP32 recurrent prefix of Bailing's packed KDA cache."""
+        state_elements_per_request = local_num_heads * self.head_dim * self.head_dim
+        recurrent_bytes_per_request = state_elements_per_request * torch.float32.itemsize
+        conv_bytes_per_request = 3 * local_num_heads * self.head_dim * (self.conv_size - 1) * activation_dtype.itemsize
+        bytes_per_request = recurrent_bytes_per_request + conv_bytes_per_request
+        cache_bytes = cache.numel() * cache.element_size()
+        if cache_bytes % bytes_per_request:
+            raise ValueError(
+                "Bailing KDA cache size must contain complete per-request states; "
+                f"got {cache_bytes} bytes and {bytes_per_request} bytes per request"
+            )
+        capacity = cache_bytes // bytes_per_request
+        recurrent_bytes = capacity * recurrent_bytes_per_request
+        return (
+            cache.reshape(-1)
+            .view(torch.uint8)[:recurrent_bytes]
+            .view(torch.float32)
+            .reshape(capacity, local_num_heads, self.head_dim, self.head_dim)
+        )
+
     def forward(self, hidden_states, attention_mask=None, past_key_value=None, **kwargs):
         del attention_mask
         extra_kwargs = getattr(self, "_extra_forward_kwargs", {})
@@ -103,30 +124,69 @@ class BailingV3KimiDeltaAttentionTensorCast(ModelWrapperBase):
             gate = self.g_b_proj(self.g_a_proj(hidden_states))
         beta = self.b_proj(hidden_states)
 
-        local_num_heads = q.shape[-1] // self.head_dim
-        q = q.view(*q.shape[:-1], local_num_heads, self.head_dim)
-        k = k.view(*k.shape[:-1], local_num_heads, self.head_dim)
-        v = v.view(*v.shape[:-1], local_num_heads, self.head_dim)
-        f = f.view(*f.shape[:-1], local_num_heads, self.head_dim)
-        gate = gate.view(*gate.shape[:-1], local_num_heads, self.head_dim)
-
         if self.layer_idx not in kv_cache_by_layers:
             raise KeyError(
                 f"KimiDeltaAttention layer_idx={self.layer_idx} is missing from kv_cache_by_layers "
                 f"(available layer indices: {sorted(kv_cache_by_layers)})"
             )
-        state = kv_cache_by_layers[self.layer_idx]
-        output = torch.ops.tensor_cast.kimi_delta_attention_core(
-            q,
-            k,
-            v,
-            f,
-            beta,
+        packed_cache = kv_cache_by_layers[self.layer_idx]
+        is_decode_values = getattr(attention_meta, "is_decode_values", None)
+        if is_decode_values is None:
+            use_recurrent = hidden_states.shape[1] == 1
+        else:
+            use_recurrent = bool(is_decode_values) and all(bool(value) for value in is_decode_values)
+        query_lens_values = getattr(attention_meta, "query_lens_values", None)
+        num_requests = len(query_lens_values) if query_lens_values is not None else attention_meta.query_lens.numel()
+
+        mixed_qkv = torch.cat([q, k, v], dim=-1).transpose(1, 2)
+        conv_op = (
+            torch.ops.tensor_cast.linear_attn_causal_conv_update
+            if use_recurrent
+            else torch.ops.tensor_cast.linear_attn_causal_conv
+        )
+        mixed_qkv = conv_op(mixed_qkv, self.conv_size).transpose(1, 2)
+
+        local_num_heads = q.shape[-1] // self.head_dim
+        projection_size = local_num_heads * self.head_dim
+        q, k, v = torch.split(mixed_qkv, [projection_size] * 3, dim=-1)
+        q = q.view(*q.shape[:-1], local_num_heads, self.head_dim)
+        k = k.view(*k.shape[:-1], local_num_heads, self.head_dim)
+        v = v.view(*v.shape[:-1], local_num_heads, self.head_dim)
+        f = f.view(*f.shape[:-1], local_num_heads, self.head_dim)
+        gate = gate.view(*gate.shape[:-1], local_num_heads, self.head_dim)
+        beta = beta.float().sigmoid()
+
+        if use_recurrent:
+            output = torch.ops.tensor_cast.linear_attn_recurrent_gated_delta_rule(
+                q, k, v, beta, f, state_read_passes=0, state_write_passes=0
+            )
+            recurrent_state = self._recurrent_state_view(packed_cache, local_num_heads, hidden_states.dtype)
+            state_indices = torch.arange(num_requests, dtype=torch.int64, device=q.device)
+            output = torch.ops.tensor_cast.linear_attn_recurrent_state_io(output, recurrent_state, state_indices)
+        else:
+            recurrent_state = self._recurrent_state_view(packed_cache, local_num_heads, hidden_states.dtype)
+            state_indices = torch.arange(num_requests, dtype=torch.int64, device=q.device)
+            has_initial_state = torch.empty((num_requests,), dtype=torch.bool, device=q.device)
+            initial_state = torch.ops.tensor_cast.linear_attn_state_gather(
+                recurrent_state,
+                state_indices,
+                has_initial_state,
+            )
+            output, final_state = torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule(
+                q, k, v, beta, f, 64, 0, 0, initial_state=initial_state
+            )
+            torch.ops.tensor_cast.linear_attn_state_scatter(
+                recurrent_state,
+                final_state,
+                state_indices,
+            )
+
+        output = torch.ops.tensor_cast.linear_attn_gated_rmsnorm(
+            output,
             gate,
-            state,
-            attention_meta.query_lens,
-            attention_meta.seq_lens,
-            self.conv_size,
+            getattr(self.o_norm, "weight", None),
+            getattr(self.o_norm, "eps", 1e-6),
+            "sigmoid",
         )
         output = self.o_proj(output.flatten(-2))
         return output, None, past_key_value

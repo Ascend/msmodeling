@@ -21,6 +21,37 @@ import torch
 from ..utils import register_tensor_cast_op
 
 
+@register_tensor_cast_op("mrope_cache_lookup")
+def _(
+    cos_sin_cache: torch.Tensor,
+    position_ids: torch.Tensor,
+    rotary_dim: int,
+) -> torch.Tensor:
+    """Return the position-selected M-RoPE table metadata.
+
+    The operator represents the serving implementation's single cache lookup,
+    including the model-specific T/H/W layout selection.  TensorCast only
+    needs the resulting shape; the cache contents are deliberately not
+    materialized while simulating on meta tensors.
+    """
+    if position_ids.ndim == 3:
+        _, batch_size, seq_len = position_ids.shape
+    elif position_ids.ndim == 2:
+        batch_size, seq_len = position_ids.shape
+    else:
+        raise ValueError(f"M-RoPE position_ids must be 2D or 3D, got {position_ids.ndim}D")
+    if rotary_dim <= 0 or cos_sin_cache.shape[-1] != 2 * rotary_dim:
+        raise ValueError(
+            "M-RoPE cache width must equal 2 * rotary_dim, got "
+            f"cache width {cos_sin_cache.shape[-1]} and rotary_dim {rotary_dim}"
+        )
+    return torch.empty(
+        (batch_size, seq_len, 2 * rotary_dim),
+        device=cos_sin_cache.device,
+        dtype=cos_sin_cache.dtype,
+    )
+
+
 @register_tensor_cast_op("apply_rope")
 def _(
     query: torch.Tensor,

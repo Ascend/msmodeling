@@ -183,7 +183,7 @@ def patch_method_for_qwen3_next(model):
             )
         else:
             chunk_size = kwargs.get("chunk_size", 64)
-            core_attn_out = torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule(
+            core_attn_out, _ = torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule(
                 query,
                 key,
                 value,

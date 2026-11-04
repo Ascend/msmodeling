@@ -64,6 +64,49 @@ def _(
     return query_out, key_out, beta, g
 
 
+@register_tensor_cast_op("linear_attn_state_gather")
+def _(
+    state: torch.Tensor,
+    state_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+) -> torch.Tensor:
+    """Select recurrent-state rows without materializing cache contents."""
+    if state.ndim != 4 or state_indices.ndim != 1 or has_initial_state.ndim != 1:
+        raise ValueError("Linear-attention state gather expects a 4D cache and 1D metadata")
+    if state_indices.numel() != has_initial_state.numel():
+        raise ValueError("State indices and initial-state flags must have the same length")
+    return torch.empty(
+        (state_indices.numel(), *state.shape[1:]),
+        dtype=state.dtype,
+        device=state.device,
+    )
+
+
+@register_tensor_cast_op("linear_attn_state_scatter", mutates_args=("state",))
+def _(
+    state: torch.Tensor,
+    final_state: torch.Tensor,
+    state_indices: torch.Tensor,
+) -> None:
+    """Record indexed recurrent-state cache writes on meta tensors."""
+    if state.ndim != 4 or final_state.ndim != 4 or state_indices.ndim != 1:
+        raise ValueError("Linear-attention state scatter expects 4D states and 1D indices")
+    if final_state.shape != (state_indices.numel(), *state.shape[1:]):
+        raise ValueError("Final-state rows must match the selected cache rows")
+
+
+@register_tensor_cast_op("linear_attn_recurrent_state_io")
+def _(
+    output: torch.Tensor,
+    state: torch.Tensor,
+    state_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Keep fused recurrent-state traffic dependent on the recurrent output."""
+    if state.ndim < 1 or state_indices.ndim != 1:
+        raise ValueError("Linear-attention recurrent state I/O expects a row-based cache and 1D indices")
+    return torch.empty_like(output)
+
+
 @register_tensor_cast_op("linear_attn_chunk_gated_delta_rule")
 def _(
     query: torch.Tensor,
@@ -74,15 +117,22 @@ def _(
     chunk_size: int,
     state_read_passes: int,
     state_write_passes: int,
-) -> torch.Tensor:
+    initial_state: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     del key, beta, g, chunk_size, state_read_passes, state_write_passes
     batch_size, seq_len, num_v_heads, _ = query.shape
     head_v_dim = value.shape[-1]
-    return torch.empty(
+    output = torch.empty(
         (batch_size, seq_len, num_v_heads, head_v_dim),
         dtype=query.dtype,
         device=query.device,
     )
+    final_state = (
+        torch.empty_like(initial_state)
+        if initial_state is not None
+        else torch.empty((0,), dtype=torch.float32, device=query.device)
+    )
+    return output, final_state
 
 
 @register_tensor_cast_op("linear_attn_recurrent_gated_delta_rule")
@@ -111,6 +161,7 @@ def _(
     z: torch.Tensor,
     weight: Optional[torch.Tensor],
     eps: float,
+    activation: str = "silu",
 ) -> torch.Tensor:
-    del z, weight, eps
+    del z, weight, eps, activation
     return torch.empty_like(core_attn_out).contiguous()

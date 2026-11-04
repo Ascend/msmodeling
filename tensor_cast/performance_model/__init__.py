@@ -784,6 +784,22 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mrope_cache_lookup.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    cos_sin_cache = op_invoke_info.args[0]
+    position_ids = op_invoke_info.args[1]
+    output = op_invoke_info.out
+    assert isinstance(cos_sin_cache, torch.Tensor)
+    assert isinstance(position_ids, torch.Tensor)
+    assert isinstance(output, torch.Tensor)
+
+    # Do not charge reading the full static table.  A GatherV2-style lookup
+    # reads only the selected rows, whose total payload equals the output.
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
+    properties.memory_read_bytes += bytes_of_tensor(output)
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.apply_rope_single.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     x = op_invoke_info.args[0]

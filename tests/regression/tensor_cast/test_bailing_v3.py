@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 import torch
 import transformers.utils.import_utils as import_utils  # pylint: disable=no-name-in-module
+from torch.fx.experimental.proxy_tensor import make_fx
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS  # pylint: disable=no-name-in-module
 
 from tensor_cast import ops  # noqa: F401
@@ -333,6 +334,123 @@ def test_kimi_delta_attention_core_preserves_value_shape():
     assert state_argument.alias_info.is_write
 
 
+def test_linear_attn_state_copy_ops_preserve_selected_shape_and_mutation():
+    state = torch.empty((8, 2, 4, 4), device="meta", dtype=torch.float32)
+    indices = torch.empty((3,), device="meta", dtype=torch.int64)
+    flags = torch.empty((3,), device="meta", dtype=torch.bool)
+
+    selected = torch.ops.tensor_cast.linear_attn_state_gather(state, indices, flags)
+    torch.ops.tensor_cast.linear_attn_state_scatter(state, selected, indices)
+
+    assert selected.shape == (3, 2, 4, 4)
+    state_argument = torch.ops.tensor_cast.linear_attn_state_scatter.default._schema.arguments[0]
+    assert state_argument.name == "state"
+    assert state_argument.alias_info is not None
+    assert state_argument.alias_info.is_write
+
+
+def test_linear_attn_state_copy_properties_only_charge_selected_rows():
+    state = torch.empty((8, 2, 4, 4), device="meta", dtype=torch.float32)
+    indices = torch.empty((3,), device="meta", dtype=torch.int64)
+    flags = torch.empty((3,), device="meta", dtype=torch.bool)
+    selected = torch.ops.tensor_cast.linear_attn_state_gather(state, indices, flags)
+
+    gather = OpInvokeInfo(
+        torch.ops.tensor_cast.linear_attn_state_gather.default,
+        (state, indices, flags),
+        {},
+        selected,
+    ).get_perf_properties()
+    scatter = OpInvokeInfo(
+        torch.ops.tensor_cast.linear_attn_state_scatter.default,
+        (state, selected, indices),
+        {},
+        None,
+    ).get_perf_properties()
+
+    assert gather.memory_read_bytes == selected.numel() * selected.element_size() + indices.numel() * (
+        indices.element_size() + flags.element_size()
+    )
+    assert scatter.memory_write_bytes == selected.numel() * state.element_size()
+
+
+def test_linear_attn_recurrent_state_io_charges_selected_rows_without_launch():
+    output = torch.empty((1, 3, 2, 4), device="meta", dtype=torch.bfloat16)
+    state = torch.empty((8, 2, 4, 4), device="meta", dtype=torch.float32)
+    indices = torch.empty((3,), device="meta", dtype=torch.int64)
+    op = torch.ops.tensor_cast.linear_attn_recurrent_state_io.default
+    result = op(output, state, indices)
+
+    properties = OpInvokeInfo(op, (output, state, indices), {}, result).get_perf_properties()
+    selected_state_bytes = 3 * 2 * 4 * 4 * torch.float32.itemsize
+    assert result.shape == output.shape
+    assert properties.memory_read_bytes == selected_state_bytes + indices.numel() * indices.element_size()
+    assert properties.memory_write_bytes == selected_state_bytes
+    assert properties.extra_static_cost_count == -1
+
+
+def test_linear_attn_chunk_state_dependency_orders_gather_chunk_scatter():
+    def stateful_chunk(state, indices, flags, query, key, value, beta, g):
+        initial_state = torch.ops.tensor_cast.linear_attn_state_gather(state, indices, flags)
+        output, final_state = torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            beta,
+            g,
+            64,
+            0,
+            0,
+            initial_state=initial_state,
+        )
+        torch.ops.tensor_cast.linear_attn_state_scatter(state, final_state, indices)
+        return output
+
+    state = torch.empty((8, 2, 4, 4), device="meta", dtype=torch.float32)
+    indices = torch.empty((3,), device="meta", dtype=torch.int64)
+    flags = torch.empty((3,), device="meta", dtype=torch.bool)
+    query = torch.empty((3, 8, 2, 4), device="meta", dtype=torch.bfloat16)
+    key = torch.empty_like(query)
+    value = torch.empty_like(query)
+    beta = torch.empty((3, 8, 2), device="meta", dtype=torch.float32)
+    g = torch.empty_like(query)
+
+    graph = make_fx(stateful_chunk)(state, indices, flags, query, key, value, beta, g).graph
+    nodes = {node.target: node for node in graph.nodes if node.op == "call_function"}
+    gather = nodes[torch.ops.tensor_cast.linear_attn_state_gather.default]
+    chunk = nodes[torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule.default]
+    scatter = nodes[torch.ops.tensor_cast.linear_attn_state_scatter.default]
+
+    assert gather in chunk.all_input_nodes
+    final_state = scatter.args[1]
+    assert chunk in final_state.all_input_nodes
+
+
+def test_linear_attn_chunk_state_traffic_is_charged_once_by_tensor_io():
+    query = torch.empty((3, 8, 2, 4), device="meta", dtype=torch.bfloat16)
+    key = torch.empty_like(query)
+    value = torch.empty_like(query)
+    beta = torch.empty((3, 8, 2), device="meta", dtype=torch.float32)
+    g = torch.empty_like(query)
+    initial_state = torch.empty((3, 2, 4, 4), device="meta", dtype=torch.float32)
+    op = torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule.default
+
+    stateless_output = op(query, key, value, beta, g, 64, 0, 0)
+    stateless = OpInvokeInfo(op, (query, key, value, beta, g, 64, 0, 0), {}, stateless_output).get_perf_properties()
+    stateful_output = op(query, key, value, beta, g, 64, 0, 0, initial_state=initial_state)
+    stateful = OpInvokeInfo(
+        op,
+        (query, key, value, beta, g, 64, 0, 0),
+        {"initial_state": initial_state},
+        stateful_output,
+    ).get_perf_properties()
+
+    state_bytes = initial_state.numel() * initial_state.element_size()
+    assert stateful.memory_read_bytes - stateless.memory_read_bytes == state_bytes
+    assert stateful.memory_write_bytes - stateless.memory_write_bytes == state_bytes
+    assert stateful.memory_readwrite_bytes == stateless.memory_readwrite_bytes
+
+
 def test_bailing_v3_kda_requires_runtime_metadata():
     from tensor_cast.transformers.builtin_model.bailing_v3 import BailingV3KimiDeltaAttentionTensorCast
 
@@ -358,7 +476,15 @@ def test_bailing_v3_kda_requires_runtime_metadata():
 
 
 @pytest.mark.parametrize("no_kda_lora", [True, False])
-def test_bailing_v3_kda_forwards_both_projection_layouts(no_kda_lora):
+@pytest.mark.parametrize(
+    ("is_decode_values", "op_name"),
+    [
+        ([False], "linear_attn_chunk_gated_delta_rule"),
+        ([True], "linear_attn_recurrent_gated_delta_rule"),
+        ([True, False], "linear_attn_chunk_gated_delta_rule"),
+    ],
+)
+def test_bailing_v3_kda_forwards_both_projection_layouts(no_kda_lora, is_decode_values, op_name):
     from tensor_cast.transformers.builtin_model.bailing_v3 import BailingV3KimiDeltaAttentionTensorCast
 
     class Attention(torch.nn.Module):
@@ -380,18 +506,34 @@ def test_bailing_v3_kda_forwards_both_projection_layouts(no_kda_lora):
                 self.g_a_proj = torch.nn.Linear(4, 2, bias=False)
                 self.g_b_proj = torch.nn.Linear(2, 4, bias=False)
             self.b_proj = torch.nn.Linear(4, 2, bias=False)
+            self.o_norm = torch.nn.Identity()
             self.o_proj = torch.nn.Identity()
 
     wrapper = BailingV3KimiDeltaAttentionTensorCast(Attention())
     hidden_states = torch.empty((1, 3, 4))
-    state = torch.empty((1, 64))
-    attention_meta = SimpleNamespace(query_lens=torch.tensor([3]), seq_lens=torch.tensor([3]))
+    state = torch.empty((128,), dtype=torch.uint8)
+    attention_meta = SimpleNamespace(
+        query_lens=torch.tensor([3]),
+        seq_lens=torch.tensor([3]),
+        is_decode_values=is_decode_values,
+    )
     past_key_value = object()
 
-    with patch(
-        "torch.ops.tensor_cast.kimi_delta_attention_core",
-        side_effect=lambda q, _k, v, _f, _beta, _gate, *_args: v,
-    ) as core:
+    def core_side_effect(q, _k, v, *_args, **kwargs):
+        if op_name == "linear_attn_chunk_gated_delta_rule":
+            return v, kwargs["initial_state"]
+        return v
+
+    with (
+        patch(
+            f"torch.ops.tensor_cast.{op_name}",
+            side_effect=core_side_effect,
+        ) as core,
+        patch(
+            "torch.ops.tensor_cast.linear_attn_state_gather", side_effect=lambda state, indices, _flags: state[indices]
+        ) as gather,
+        patch("torch.ops.tensor_cast.linear_attn_state_scatter") as scatter,
+    ):
         output, attention_weights, returned_cache = wrapper(
             hidden_states,
             past_key_value=past_key_value,
@@ -399,15 +541,139 @@ def test_bailing_v3_kda_forwards_both_projection_layouts(no_kda_lora):
             kv_cache_by_layers={0: state},
         )
 
-    q, k, v, f, beta, gate = core.call_args.args[:6]
-    assert all(tensor.shape == (1, 3, 2, 2) for tensor in (q, k, v, f, gate))
+    q, k, v, beta, f = core.call_args.args[:5]
+    assert all(tensor.shape == (1, 3, 2, 2) for tensor in (q, k, v, f))
     assert beta.shape == (1, 3, 2)
-    assert core.call_args.args[6] is state
-    assert core.call_args.args[7] is attention_meta.query_lens
-    assert core.call_args.args[8] is attention_meta.seq_lens
     assert output.shape == hidden_states.shape
     assert attention_weights is None
     assert returned_cache is past_key_value
+    if op_name == "linear_attn_chunk_gated_delta_rule":
+        assert gather.call_count == 1
+        assert scatter.call_count == 1
+        state_cache, final_state, state_indices = scatter.call_args.args
+        assert state_cache.shape == (1, 2, 2, 2)
+        assert final_state.shape == (1, 2, 2, 2)
+        assert state_indices.shape == (1,)
+        assert core.call_args.args[-2:] == (0, 0)
+        assert core.call_args.kwargs["initial_state"] is final_state
+    else:
+        gather.assert_not_called()
+        scatter.assert_not_called()
+
+
+def test_bailing_v3_chunk_kda_uses_request_count_for_state_rows():
+    from tensor_cast.transformers.builtin_model.bailing_v3 import BailingV3KimiDeltaAttentionTensorCast
+
+    class Attention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer_idx = 0
+            self.head_dim = 2
+            self.conv_size = 3
+            self.no_kda_lora = True
+            self.q_proj = torch.nn.Linear(4, 4, bias=False)
+            self.k_proj = torch.nn.Linear(4, 4, bias=False)
+            self.v_proj = torch.nn.Linear(4, 4, bias=False)
+            self.f_proj = torch.nn.Linear(4, 4, bias=False)
+            self.g_proj = torch.nn.Linear(4, 4, bias=False)
+            self.b_proj = torch.nn.Linear(4, 2, bias=False)
+            self.o_norm = torch.nn.Identity()
+            self.o_proj = torch.nn.Identity()
+
+    wrapper = BailingV3KimiDeltaAttentionTensorCast(Attention())
+    hidden_states = torch.empty((1, 24, 4))
+    packed_cache = torch.empty((1024,), dtype=torch.uint8)
+    attention_meta = SimpleNamespace(
+        query_lens=torch.tensor([3] * 8),
+        query_lens_values=[3] * 8,
+        seq_lens=torch.tensor([3] * 8),
+        is_decode_values=[False] * 8,
+    )
+
+    def chunk_side_effect(_q, _k, v, *_args, **kwargs):
+        return v, kwargs["initial_state"]
+
+    with (
+        patch(
+            "torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule",
+            side_effect=chunk_side_effect,
+        ) as chunk,
+        patch(
+            "torch.ops.tensor_cast.linear_attn_state_gather",
+            side_effect=lambda state, indices, _flags: state[indices],
+        ) as gather,
+        patch("torch.ops.tensor_cast.linear_attn_state_scatter") as scatter,
+    ):
+        wrapper(
+            hidden_states,
+            past_key_value=object(),
+            attention_meta=attention_meta,
+            kv_cache_by_layers={0: packed_cache},
+        )
+
+    state_cache, state_indices, has_initial_state = gather.call_args.args
+    assert state_cache.shape == (8, 2, 2, 2)
+    assert state_indices.shape == (8,)
+    assert has_initial_state.shape == (8,)
+    assert chunk.call_args.kwargs["initial_state"].shape == (8, 2, 2, 2)
+    _, final_state, scatter_indices = scatter.call_args.args
+    assert final_state.shape == (8, 2, 2, 2)
+    assert scatter_indices.shape == (8,)
+
+
+def test_bailing_v3_recurrent_kda_models_fused_state_io_per_request():
+    from tensor_cast.transformers.builtin_model.bailing_v3 import BailingV3KimiDeltaAttentionTensorCast
+
+    class Attention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer_idx = 0
+            self.head_dim = 2
+            self.conv_size = 3
+            self.no_kda_lora = True
+            self.q_proj = torch.nn.Linear(4, 4, bias=False)
+            self.k_proj = torch.nn.Linear(4, 4, bias=False)
+            self.v_proj = torch.nn.Linear(4, 4, bias=False)
+            self.f_proj = torch.nn.Linear(4, 4, bias=False)
+            self.g_proj = torch.nn.Linear(4, 4, bias=False)
+            self.b_proj = torch.nn.Linear(4, 2, bias=False)
+            self.o_norm = torch.nn.Identity()
+            self.o_proj = torch.nn.Identity()
+
+    wrapper = BailingV3KimiDeltaAttentionTensorCast(Attention())
+    hidden_states = torch.empty((1, 8, 4))
+    packed_cache = torch.empty((1024,), dtype=torch.uint8)
+    attention_meta = SimpleNamespace(
+        query_lens=torch.tensor([1] * 8),
+        query_lens_values=[1] * 8,
+        seq_lens=torch.tensor([9] * 8),
+        is_decode_values=[True] * 8,
+    )
+
+    with (
+        patch(
+            "torch.ops.tensor_cast.linear_attn_recurrent_gated_delta_rule",
+            side_effect=lambda q, _k, _v, _beta, _g, *_args, **_kwargs: q,
+        ) as recurrent,
+        patch(
+            "torch.ops.tensor_cast.linear_attn_recurrent_state_io",
+            side_effect=lambda output, _state, _indices: output,
+        ) as state_io,
+    ):
+        output, _, _ = wrapper(
+            hidden_states,
+            past_key_value=object(),
+            attention_meta=attention_meta,
+            kv_cache_by_layers={0: packed_cache},
+        )
+
+    assert recurrent.call_args.args[0].shape == (1, 8, 2, 2)
+    assert recurrent.call_args.kwargs == {"state_read_passes": 0, "state_write_passes": 0}
+    recurrent_output, state_cache, state_indices = state_io.call_args.args
+    assert recurrent_output.shape == (1, 8, 2, 2)
+    assert state_cache.shape == (8, 2, 2, 2)
+    assert state_indices.shape == (8,)
+    assert output.shape == hidden_states.shape
 
 
 def test_bailing_v3_kda_reports_missing_cache_layer():
@@ -442,6 +708,28 @@ def test_bailing_v3_kda_reports_missing_cache_layer():
 def _get_performance_properties(op, args):
     output = op(*args)
     return OpInvokeInfo(op, args, {}, output).get_perf_properties()
+
+
+def test_linear_attn_gated_rmsnorm_models_selected_activation():
+    core_attn_out = torch.empty((1, 2, 2, 4), device="meta", dtype=torch.float16)
+    gate = torch.empty_like(core_attn_out)
+    weight = torch.empty((4,), device="meta", dtype=torch.float32)
+
+    silu = _get_performance_properties(
+        torch.ops.tensor_cast.linear_attn_gated_rmsnorm.default,
+        (core_attn_out, gate, weight, 1e-6, "silu"),
+    )
+    default = _get_performance_properties(
+        torch.ops.tensor_cast.linear_attn_gated_rmsnorm.default,
+        (core_attn_out, gate, weight, 1e-6),
+    )
+    sigmoid = _get_performance_properties(
+        torch.ops.tensor_cast.linear_attn_gated_rmsnorm.default,
+        (core_attn_out, gate, weight, 1e-6, "sigmoid"),
+    )
+
+    assert default.compute_ops == silu.compute_ops
+    assert silu.compute_ops[torch.float32].gp_ops - sigmoid.compute_ops[torch.float32].gp_ops == 2 * gate.numel()
 
 
 def _kimi_delta_attention_properties(query_len):

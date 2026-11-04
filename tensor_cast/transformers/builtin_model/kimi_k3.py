@@ -2616,7 +2616,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
                 chunk_size = 64
                 state_read_passes = 1 if has_previous_state else 0
                 state_write_passes = 1
-                core_attn_out = torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule(
+                core_attn_out, _ = torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule(
                     query,
                     key,
                     value,
