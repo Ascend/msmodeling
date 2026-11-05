@@ -354,8 +354,11 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         target = module._inner if hasattr(module, "_inner") else module
         if isinstance(target, TensorCastQuantLinear) and target.quant_config.quant_type.name == "W4A8":
             packed_weight = target.qweight
-            high_bits = (packed_weight >> 4).to(torch.int8) - 8
-            low_bits = (packed_weight & 0x0F).to(torch.int8) - 8
+            # Relabel to uint8 before shifting: an int8 arithmetic right shift
+            # would sign-extend and corrupt the high nibble (see pack_int4).
+            packed_bytes = packed_weight.view(torch.uint8)
+            high_bits = (packed_bytes >> 4).to(torch.int8) - 8
+            low_bits = (packed_bytes & 0x0F).to(torch.int8) - 8
             unpacked = torch.empty(
                 packed_weight.shape[0],
                 packed_weight.shape[1] * 2,

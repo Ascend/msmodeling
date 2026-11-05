@@ -217,6 +217,17 @@ def build_quant_matmul_case(
     return case
 
 
+def build_case(row: dict[str, str]):
+    """Replayable-case builder used by grid-generator row preflight.
+
+    Validates the row against the replay contract (INT8 x INT8 inputs,
+    exactly one output, inferable optional-input roles) and returns the
+    case dict consumed by :func:`run_row`. Tensor construction is stubbed
+    by the preflight runtime, so no NPU device is required here.
+    """
+    return build_row_tensors(row)
+
+
 def build_row_tensors(row: dict[str, str]):
     input_shapes = [parse_shape(item) for item in parse_list_field(row["Input Shapes"])]
     input_formats = parse_list_field(row["Input Formats"])

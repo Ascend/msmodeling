@@ -180,12 +180,70 @@ def _fit_rank(shape: tuple[int, ...], template_shape: tuple[int, ...], kernel_ty
     return None
 
 
+# Ops whose int4 weights are packed two values per byte.  Packing is an op-level
+# semantic (vLLM-Ascend container dtype), not a kernel-level one: the same
+# QuantBatchMatmulV3 kernel also serves unpacked W8A8 linear ops.  Membership is
+# explicit to avoid accidentally absorbing future ops whose name contains "int4"
+# (e.g. mxfp4) but that do not use the two-values-per-byte packing.
+_INT4_PACKED_WEIGHT_OPS = {
+    "static_quant_linear_int4",
+    "static_quant_linear_int4_all_reduce",
+    "grouped_matmul_quant_int4",
+    "grouped_matmul_quant_int4_swiglu",
+}
+
+
+def _is_int4_packed_weight_op(op_name: str) -> bool:
+    # Demands record the fully qualified TorchDispatch name, e.g.
+    # ``tensor_cast.static_quant_linear_int4.default``; sweep-synthesized
+    # demands and tests may use the bare core name.  Match on the core name so
+    # both forms hit the registry.
+    name = str(op_name or "").split("::")[-1]
+    if name.endswith(".default"):
+        name = name[: -len(".default")]
+    return name.rsplit(".", 1)[-1] in _INT4_PACKED_WEIGHT_OPS
+
+
+def _restore_int4_packed_weights(
+    pairs: Sequence[tuple[tuple[int, ...], str]],
+) -> tuple[list[tuple[int, ...]], list[str]] | None:
+    """Restore the logical (…, K, N) weight shapes from packed (…, K/2, N).
+
+    The runtime tensor stores two int4 values per byte, so the captured demand
+    shape halves the logical contraction dim K.  The CSV/replay contract encodes
+    the unpacked logical matrix, so projection must restore K before the
+    FRACTAL_NZ encoding is built.  The shape guard ``weight[-2] * 2 == K`` is
+    mutually exclusive with the unpacked case (``weight[-2] == K``) for any
+    K > 0, so it cannot misclassify unpacked demands; it only guards against a
+    misconfigured registry entry.
+    """
+    activation, weight = pairs[0], pairs[1]
+    # Length guard must precede the [-2]/[-1] indexing: a malformed demand with
+    # a rank-<2 weight must fail closed (return None) instead of raising
+    # IndexError, which would abort the whole generate_shape_grid batch.
+    if len(weight[0]) < 2 or len(activation[0]) < 2:
+        return None
+    packed_k = weight[0][-2]
+    activation_k = activation[0][-1]
+    if packed_k * 2 != activation_k:
+        return None
+    logical_weight = (*weight[0][:-2], packed_k * 2, weight[0][-1])
+    rest_shapes = [shape for shape, _ in pairs[2:]]
+    rest_dtypes = [dtype for _, dtype in pairs[2:]]
+    return [activation[0], logical_weight, *rest_shapes], [activation[1], weight[1], *rest_dtypes]
+
+
 def _normalize_query_inputs(
     kernel_type: str,
     shapes: Sequence[tuple[int, ...]],
     dtypes: Sequence[str],
+    op_name: str = "",
 ) -> tuple[list[tuple[int, ...]], list[str]]:
     pairs = list(zip(shapes, [*dtypes, *([""] * max(0, len(shapes) - len(dtypes)))]))
+    if _is_int4_packed_weight_op(op_name) and len(pairs) >= 2:
+        restored = _restore_int4_packed_weights(pairs)
+        if restored is not None:
+            return restored
     if kernel_type == "MoeTokenPermute" and len(pairs) >= 2:
         activations, indices = pairs[:2]
         activation_shape = activations[0]
@@ -305,6 +363,7 @@ def _template_score(demand: KernelQueryDemand, template: dict[str, str]) -> int 
         demand.kernel_type,
         [shape for shape in demand.input_shapes if shape],
         [dtype for shape, dtype in zip(demand.input_shapes, demand.input_dtypes) if shape],
+        op_name=demand.op_name,
     )
     if demand.query_mode == "attention_special":
         if demand.kernel_type != "FusedInferAttentionScore":
@@ -553,6 +612,7 @@ def _project_generic(
         demand.kernel_type,
         [shape for shape in demand.input_shapes if shape],
         [dtype for shape, dtype in zip(demand.input_shapes, demand.input_dtypes) if shape],
+        op_name=demand.op_name,
     )
     if demand.query_mode == "compute_scale" and demand.kernel_type != "AscendQuantV2":
         if len(demand_inputs) != 1 or len(demand.output_shapes) < 2:
@@ -1003,6 +1063,40 @@ def _validates_elementwise_binary(candidate: "ProjectedCandidate") -> bool:
     return True
 
 
+# Exact-token whitelist for FRACTAL_NZ weight dtypes.  Per the Ascend cube
+# fractal spec the inner fractal is 16 x (32B / sizeof(dtype)): int4 -> 64,
+# int8 -> 32, fp16/bf16 -> 16, fp32 -> 8.  Tokens are matched exactly after
+# stripping the optional "DT_" prefix; substring matching previously let
+# e.g. "FLOAT8_E4M3" hit the FLOAT32 rule and silently validate with a wrong
+# block size, so anything outside this whitelist must fail closed (None).
+_FRACTAL_NZ_INNER_BLOCK_SIZES = {
+    "INT4": 64,
+    "INT8": 32,
+    "FLOAT16": 16,
+    "FP16": 16,
+    "BF16": 16,
+    "BFLOAT16": 16,
+    "HALF": 16,
+    "FLOAT32": 8,
+    "FP32": 8,
+    "FLOAT": 8,
+}
+
+
+def _fractal_nz_block_n(dtype: str) -> int | None:
+    """Return the dtype-dependent inner-block size of a FRACTAL_NZ weight.
+
+    The inner fractal is 16 x (32B / sizeof(dtype)): the first inner dim is
+    fixed at 16 and the second depends on the element width.  Only whitelisted
+    dtypes (see ``_FRACTAL_NZ_INNER_BLOCK_SIZES``) return a size; unknown
+    dtypes such as fp8/hif8 return None so callers fail closed.
+    """
+    token = dtype.strip().upper()
+    if token.startswith("DT_"):
+        token = token[len("DT_"):]
+    return _FRACTAL_NZ_INNER_BLOCK_SIZES.get(token)
+
+
 def _validate_candidate(candidate: "ProjectedCandidate") -> bool:
     """Return False if the candidate violates kernel-specific replay constraints."""
     kernel = candidate.kernel_type
@@ -1052,7 +1146,30 @@ def _validate_candidate(candidate: "ProjectedCandidate") -> bool:
         elif in1 and in2 and out and len(in1) >= 2 and len(in2) >= 2 and len(out) >= 1:
             k = in1[-1]
             n = out[-1]
-            if in2[-1] != k or in2[-2] != n:
+            if (
+                len(in2) == 4
+                and in2[2] == 16
+                and len(candidate.input_formats) > 1
+                and candidate.input_formats[1] == "FRACTAL_NZ"
+            ):
+                # FRACTAL_NZ weight encodes the logical (N, K) matrix with a
+                # 16 x (32B / sizeof(dtype)) inner fractal (int8 -> 32,
+                # fp16/bf16 -> 16, fp32 -> 8, int4 -> 64).  Outer dim order
+                # differs per kernel: QuantBatchMatmulV3 stores (N/N0, K/16)
+                # while MatMulCommon stores (K/16, N/N0).  Validate the
+                # encoded K/N against in1/out instead of the raw last two
+                # dims, and require the dtype-consistent inner block.
+                block_n = _fractal_nz_block_n(
+                    candidate.input_dtypes[1] if len(candidate.input_dtypes) > 1 else ""
+                )
+                if block_n is None or in2[3] != block_n:
+                    return False
+                if not (
+                    (in2[0] * block_n == n and in2[1] * 16 == k)
+                    or (in2[0] * 16 == k and in2[1] * block_n == n)
+                ):
+                    return False
+            elif in2[-1] != k or in2[-2] != n:
                 return False
 
     # Elementwise binary (Add/Mul/AddRmsNormBias): inputs must be broadcastable

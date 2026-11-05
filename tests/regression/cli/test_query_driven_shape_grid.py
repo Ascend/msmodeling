@@ -30,7 +30,12 @@ from tensor_cast.performance_model.profiling_database.query_demand import (
     load_query_demand_traces,
 )
 from tools.perf_data_collection.generate_shape_grid import build_argparser
-from tools.perf_data_collection.grid_generator.query_coverage import _permuted_product, project_query_demand
+from tools.perf_data_collection.grid_generator.query_coverage import (
+    _is_int4_packed_weight_op,
+    _permuted_product,
+    _restore_int4_packed_weights,
+    project_query_demand,
+)
 
 
 def _headers() -> list[str]:
@@ -202,6 +207,255 @@ def test_grouped_matmul_projection_keeps_expert_prefix_and_weight_orientation() 
 
     assert projected.input_shapes[:2] == ((5, 4), (2, 8, 4))
     assert projected.output_shapes == ((5, 8),)
+
+
+def test_grouped_int4_packed_weight_projection_restores_logical_k() -> None:
+    headers = _headers()
+    template = {
+        "OP State": "dynamic",
+        "Input Shapes": "1,64;2,4,4,16,32",
+        "Input Data Types": "INT8;INT8",
+        "Input Formats": "ND;FRACTAL_NZ",
+        "Output Shapes": "1,128",
+        "Output Data Types": "DT_BF16",
+        "Output Formats": "ND",
+        "Average Duration(us)": "1",
+    }
+    demand = KernelQueryDemand(
+        projector_version="projector/v1",
+        op_name="tensor_cast.grouped_matmul_quant_int4.default",
+        kernel_type="GroupedMatmul",
+        query_mode="compute",
+        # Runtime captures the packed (E, K/2, N) weight: K=64 packed into 32.
+        input_shapes=((5, 64), (2, 32, 128)),
+        output_shapes=((5, 128),),
+        input_dtypes=("INT8", "INT8"),
+        output_dtypes=("DT_BF16",),
+    )
+
+    projected, _ = project_query_demand(demand, headers, [template])
+
+    # Weight restored to logical (E, K, N) = (2, 64, 128), transposed to the
+    # CSV (E, N, K) = (2, 128, 64) and encoded as FRACTAL_NZ (2, 4, 4, 16, 32).
+    assert projected.input_shapes[:2] == ((5, 64), (2, 4, 4, 16, 32))
+    assert projected.output_shapes == ((5, 128),)
+
+
+def test_grouped_int4_packed_swiglu_projection_restores_logical_k() -> None:
+    headers = _headers()
+    template = {
+        "OP State": "dynamic",
+        "Input Shapes": "1,64;2,4,4,16,32;2",
+        "Input Data Types": "INT8;INT8;DT_BF16",
+        "Input Formats": "ND;FRACTAL_NZ;ND",
+        "Output Shapes": "1,128",
+        "Output Data Types": "DT_BF16",
+        "Output Formats": "ND",
+        "Average Duration(us)": "1",
+    }
+    demand = KernelQueryDemand(
+        projector_version="projector/v1",
+        op_name="tensor_cast.grouped_matmul_quant_int4_swiglu.default",
+        kernel_type="GroupedMatmul",
+        query_mode="compute",
+        # SwiGLU variant signature is (x, w, w_scale, w_offset, x_scale,
+        # x_offset, bias, out_dtype): pairs[0] is the activation and pairs[1]
+        # the packed (E, K/2, N) weight, so the restore must key on that order
+        # and pass the extra w_scale slot through untouched.
+        # kernel_type reflects what profiling actually recorded; op_mapping
+        # currently routes this op to DequantSwigluQuant, but the packed-K
+        # restore is op-level and independent of the kernel it dispatches to.
+        input_shapes=((5, 64), (2, 32, 128), (2,)),
+        output_shapes=((5, 128),),
+        input_dtypes=("INT8", "INT8", "DT_BF16"),
+        output_dtypes=("DT_BF16",),
+    )
+
+    projected, _ = project_query_demand(demand, headers, [template])
+
+    # x unchanged; w restored to logical (E, K, N) = (2, 64, 128), transposed
+    # to the CSV (E, N, K) = (2, 128, 64) and encoded as FRACTAL_NZ
+    # (2, 4, 4, 16, 32); w_scale slot preserved.
+    assert projected.input_shapes[:2] == ((5, 64), (2, 4, 4, 16, 32))
+    assert projected.input_shapes[2] == (2,)
+    assert projected.output_shapes == ((5, 128),)
+
+
+def test_static_quant_linear_int4_all_reduce_projection_restores_logical_k() -> None:
+    headers = _headers()
+    template = {
+        "OP State": "dynamic",
+        "Input Shapes": "1,64;4,4,16,32",
+        "Input Data Types": "INT8;INT8",
+        "Input Formats": "ND;FRACTAL_NZ",
+        "Output Shapes": "1,128",
+        "Output Data Types": "DT_BF16",
+        "Output Formats": "ND",
+        "Average Duration(us)": "1",
+    }
+    demand = KernelQueryDemand(
+        projector_version="projector/v1",
+        op_name="tensor_cast.static_quant_linear_int4_all_reduce.default",
+        kernel_type="QuantBatchMatmulV3",
+        query_mode="compute",
+        # The matmul-allreduce fusion (tensor_cast.static_quant_linear_int4_all_reduce)
+        # forwards the same packed weight to QuantBatchMatmulV3, so the runtime
+        # demand records (K/2, N) = (32, 128) with logical K=64.
+        input_shapes=((5, 64), (32, 128)),
+        output_shapes=((5, 128),),
+        input_dtypes=("INT8", "INT8"),
+        output_dtypes=("DT_BF16",),
+    )
+
+    projected, _ = project_query_demand(demand, headers, [template])
+
+    # Weight restored to logical (K, N) = (64, 128), transposed to the CSV
+    # (N, K) = (128, 64) and encoded as FRACTAL_NZ (4, 4, 16, 32).
+    assert projected.input_shapes[:2] == ((5, 64), (4, 4, 16, 32))
+    assert projected.output_shapes == ((5, 128),)
+
+
+def test_int4_packed_registry_op_with_unpacked_weight_keeps_shape() -> None:
+    headers = _headers()
+    template = {
+        "OP State": "dynamic",
+        "Input Shapes": "1,32;2,2,2,16,32",
+        "Input Data Types": "INT8;INT8",
+        "Input Formats": "ND;FRACTAL_NZ",
+        "Output Shapes": "1,64",
+        "Output Data Types": "DT_BF16",
+        "Output Formats": "ND",
+        "Average Duration(us)": "1",
+    }
+    demand = KernelQueryDemand(
+        projector_version="projector/v1",
+        op_name="tensor_cast.grouped_matmul_quant_int4.default",
+        kernel_type="GroupedMatmul",
+        query_mode="compute",
+        # Unpacked weight (E, K, N) = (2, 32, 64): the packed guard
+        # weight[-2] * 2 == activation K fails (32 * 2 != 32), so no restore.
+        input_shapes=((5, 32), (2, 32, 64)),
+        output_shapes=((5, 64),),
+        input_dtypes=("INT8", "INT8"),
+        output_dtypes=("DT_BF16",),
+    )
+
+    projected, _ = project_query_demand(demand, headers, [template])
+
+    # Unpacked (2, 32, 64) transposes to (E, N, K) = (2, 64, 32) -> (2, 2, 2, 16, 32).
+    assert projected.input_shapes[:2] == ((5, 32), (2, 2, 2, 16, 32))
+    assert projected.output_shapes == ((5, 64),)
+
+
+def test_int4_packed_weight_op_registry_matches_core_names() -> None:
+    assert _is_int4_packed_weight_op("tensor_cast.static_quant_linear_int4.default")
+    assert _is_int4_packed_weight_op("tensor_cast.static_quant_linear_int4_all_reduce.default")
+    assert _is_int4_packed_weight_op("tensor_cast.grouped_matmul_quant_int4.default")
+    assert _is_int4_packed_weight_op("grouped_matmul_quant_int4")
+    assert _is_int4_packed_weight_op("tensor_cast::grouped_matmul_quant_int4_swiglu.default")
+    assert not _is_int4_packed_weight_op("tensor_cast.quant_linear.default")
+    assert not _is_int4_packed_weight_op("tensor_cast.grouped_matmul.default")
+    assert not _is_int4_packed_weight_op("aten.mm.default")
+    assert not _is_int4_packed_weight_op("")
+    # Names merely containing "int4" (e.g. mxfp4) must not be absorbed.
+    assert not _is_int4_packed_weight_op("tensor_cast.mxfp4_linear_int4.default")
+
+
+def test_int4_packed_restore_rejects_malformed_rank_fail_closed() -> None:
+    # Regression lock: the length guard must run before [-2]/[-1] indexing, or
+    # a rank-1 weight raises IndexError and aborts the whole generate_shape_grid
+    # batch instead of failing closed for that single demand.
+    assert _restore_int4_packed_weights([((5, 64), "INT8"), ((32,), "INT8")]) is None
+    assert _restore_int4_packed_weights([((64,), "INT8"), ((32, 128), "INT8")]) is None
+
+    # End to end: a registered int4 op demand with a rank-1 weight must not
+    # raise, and the projection must fail closed (return None) instead of
+    # "restoring" the malformed weight to rank 2.  Returning None is exactly
+    # the old IndexError path now downgraded to a per-demand rejection.
+    headers = _headers()
+    template = {
+        "OP State": "dynamic",
+        "Input Shapes": "1,64;4,4,16,32;64;64",
+        "Input Data Types": "INT8;INT8;FLOAT;INT32",
+        "Input Formats": "ND;FRACTAL_NZ;ND;ND",
+        "Output Shapes": "1,128",
+        "Output Data Types": "DT_BF16",
+        "Output Formats": "ND",
+        "Average Duration(us)": "1",
+    }
+    demand = KernelQueryDemand(
+        projector_version="projector/v1",
+        op_name="tensor_cast.static_quant_linear_int4.default",
+        kernel_type="QuantBatchMatmulV3",
+        query_mode="compute",
+        input_shapes=((5, 64), (32,)),
+        output_shapes=((5, 128),),
+        input_dtypes=("INT8", "INT8"),
+        output_dtypes=("DT_BF16",),
+    )
+    assert project_query_demand(demand, headers, [template]) is None
+
+
+def test_fractal_nz_block_whitelist_accepts_int8_and_rejects_unknown_dtype(tmp_path: Path) -> None:
+    from tools.perf_data_collection.grid_generator.query_coverage import build_query_generated_rows
+    from tools.perf_data_collection.grid_generator.utils import load_csv_template_rows
+
+    header = ",".join(_headers())
+    csv_path = tmp_path / "QuantBatchMatmulV3.csv"
+    # Template A: logical weight (N, K) = (2048, 6144) encoded FRACTAL_NZ
+    # (N/N0=64, K/16=384, 16, block=32) with INT8 weight (block 32 in whitelist).
+    # Template B: logical weight (N, K) = (1024, 2048) encoded (32, 128, 16, 32)
+    # with FP8 weight, which is outside the block-size whitelist.
+    csv_path.write_text(
+        f"{header}\n"
+        'enabled,"6656,6144;64,384,16,32;2048;2048","INT8;INT8;FLOAT;INT32",'
+        '"ND;FRACTAL_NZ;ND;ND","6656,2048","DT_BF16","ND",130.44\n'
+        'enabled,"6656,2048;32,128,16,32;1024;1024","INT8;DT_FLOAT8_E4M3;FLOAT;INT32",'
+        '"ND;FRACTAL_NZ;ND;ND","6656,1024","DT_BF16","ND",130.44\n',
+        encoding="utf-8",
+    )
+    headers, source_rows = load_csv_template_rows(csv_path, require_rows=True)
+
+    def qbmm_demand(act_shape, weight_shape, weight_dtype, workload_id="target") -> KernelQueryDemand:
+        n = weight_shape[-1]
+        return KernelQueryDemand(
+            projector_version="projector/v1",
+            op_name="tensor_cast.quant_linear.default",
+            kernel_type="QuantBatchMatmulV3",
+            query_mode="compute",
+            input_shapes=(act_shape, weight_shape, (n,), (n,)),
+            output_shapes=((act_shape[0], n),),
+            input_dtypes=("INT8", weight_dtype, "FLOAT", "INT32"),
+            output_dtypes=("DT_BF16",),
+            workload_id=workload_id,
+        )
+
+    demands = [
+        # (M=128, K=6144, N=2048): projects to (128,6144;64,384,16,32;...) which
+        # differs from the template row (M=6656), so the INT8 block passes
+        # validation and the row is appended as new.
+        qbmm_demand((128, 6144), (6144, 2048), "INT8"),
+        # (K=2048, N=1024): projects to (32, 128, 16, 32); FP8 has no whitelisted
+        # inner-block size, so validation must fail closed.  The budget check in
+        # build_query_generated_rows precedes validation, so this demand is
+        # marked exact-unlimited to reach the whitelist check with row_limit=1.
+        qbmm_demand((6656, 2048), (2048, 1024), "DT_FLOAT8_E4M3", workload_id="spec"),
+    ]
+    rows, summary = build_query_generated_rows(
+        csv_path=csv_path,
+        headers=headers,
+        source_rows=source_rows,
+        demands=demands,
+        row_limit=1,
+        seed=0,
+        exact_unlimited_workload_ids={"spec"},
+    )
+
+    assert summary["demand_statuses"] == ["generated", "validation_rejected"]
+    assert summary["exact_generated"] == 1
+    assert summary["validation_rejected"] == 1
+    assert len(rows) == 1
+    assert "64,384,16,32" in rows[0]["Input Shapes"]
 
 
 def test_dynamic_quant_projection_preserves_scalar_scale_buffer() -> None:
