@@ -649,6 +649,11 @@ operator_mappings:
     decomposer: true
     notes: Explicit quantized decode q@W_UK_T absorption mapped to QuantBatchMatmulV3.
 
+  "tensor_cast.batch_matmul_quant.default":
+    kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    notes: Quantized batched matmul maps directly to QuantBatchMatmulV3 and preserves its batch axis.
+
   "tensor_cast.mla_v_up_projection.default":
     composite: true
     decomposer: true

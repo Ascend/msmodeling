@@ -520,6 +520,11 @@ operator_mappings:
       Prefill: MatMulV2(kv_c@kv_b_proj) + RINGMLAPrefillBF16Kernel.
       Note: Prefill path is the same as the non-quantized version (RINGMLAPrefillBF16Kernel).
 
+  "tensor_cast.batch_matmul_quant.default":
+    kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    notes: Quantized batched matmul maps directly to QuantBatchMatmulV3 and preserves its batch axis.
+
   "tensor_cast.mlapo.default":
     composite: true
     sub_kernels: [MatMulV2, KvRmsNormRopeCache]

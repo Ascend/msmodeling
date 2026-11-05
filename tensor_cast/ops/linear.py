@@ -22,6 +22,44 @@ from ..quantize_utils import validate_hif8_matmul
 from ..utils import register_tensor_cast_op
 
 
+@register_tensor_cast_op("batch_matmul_quant")
+def _(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    w_scale: torch.Tensor,
+    w_offset: Optional[torch.Tensor],
+    x_scale: Optional[torch.Tensor],
+    x_offset: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+    out_dtype: Optional[torch.dtype],
+) -> torch.Tensor:
+    """Quantized batched matrix multiplication.
+
+    Semantically equivalent to a batch of ``static_quant_linear`` calls with
+    one weight matrix per batch item.  Unlike grouped matmul, the batch axis is
+    preserved in the output and does not represent routed expert groups.
+
+    Args:
+        x: ``(B, M, K)`` quantized activations.
+        w: ``(B, K, N)`` quantized weights.
+        w_scale: Weight dequantization scale.
+        w_offset: Optional weight dequantization offset.
+        x_scale: Optional activation dequantization scale.
+        x_offset: Optional activation dequantization offset.
+        bias: Optional output bias.
+        out_dtype: Floating-point output dtype. This must be specified explicitly.
+    """
+    if x.ndim != 3 or w.ndim != 3:
+        raise ValueError("batch_matmul_quant expects rank-3 activation and weight tensors")
+    if x.shape[0] != w.shape[0] or x.shape[2] != w.shape[1]:
+        raise ValueError("batch_matmul_quant requires compatible batch and contraction dimensions")
+    if out_dtype is None:
+        raise ValueError("batch_matmul_quant requires an explicit floating-point out_dtype")
+    if not out_dtype.is_floating_point:
+        raise ValueError("batch_matmul_quant requires a floating-point out_dtype")
+    return torch.empty((x.shape[0], x.shape[1], w.shape[2]), dtype=out_dtype, device="meta")
+
+
 @register_tensor_cast_op("static_quant_linear")
 @register_tensor_cast_op("static_quant_linear_int4")
 def _(

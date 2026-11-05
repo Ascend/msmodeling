@@ -202,6 +202,10 @@ _LINEAR_QUANTIZATION = {
     "tensor_cast.mxfp4_linear.default": "mxfp4",
 }
 
+_BATCH_MATMUL_QUANTIZATION = {
+    "tensor_cast.batch_matmul_quant.default": "w8a8",
+}
+
 
 def _attention_features(tensors: list[torch.Tensor], kwargs: Mapping[str, Any]) -> dict[str, Any]:
     if len(tensors) < 2:
@@ -397,6 +401,12 @@ def build_calibration_signature(
         features = _matmul_features(tensors)
         features["mm_kind"] = "batch" if op_name == "aten.bmm.default" else "dense"
         features["quantization"] = "none"
+        features["compute_dtype"] = _dtype_name(first_tensor)
+    elif op_name in _BATCH_MATMUL_QUANTIZATION:
+        family = "matmul"
+        features = _matmul_features(tensors)
+        features["mm_kind"] = "batch"
+        features["quantization"] = _BATCH_MATMUL_QUANTIZATION[op_name]
         features["compute_dtype"] = _dtype_name(first_tensor)
     elif op_name in _GMM_VARIANTS:
         family = "matmul"

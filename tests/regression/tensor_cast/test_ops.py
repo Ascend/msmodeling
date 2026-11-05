@@ -165,6 +165,27 @@ def test_mxfp4_linear_uses_native_mma_without_int4_dequant():
     assert torch.float32 not in fp_properties.compute_ops
 
 
+@pytest.mark.parametrize("out_dtype", [None, torch.int8])
+def test_batch_matmul_quant_requires_explicit_floating_output(out_dtype):
+    x = torch.empty((2, 1, 8), device="meta", dtype=torch.int8)
+    w = torch.empty((2, 8, 16), device="meta", dtype=torch.int8)
+    scale = torch.ones(1, device="meta")
+
+    with pytest.raises(ValueError, match="floating-point out_dtype"):
+        torch.ops.tensor_cast.batch_matmul_quant.default(x, w, scale, None, scale, None, None, out_dtype)
+
+
+def test_batch_matmul_quant_preserves_explicit_floating_output():
+    x = torch.empty((2, 1, 8), device="meta", dtype=torch.int8)
+    w = torch.empty((2, 8, 16), device="meta", dtype=torch.int8)
+    scale = torch.ones(1, device="meta")
+
+    out = torch.ops.tensor_cast.batch_matmul_quant.default(x, w, scale, None, scale, None, None, torch.bfloat16)
+
+    assert out.shape == (2, 1, 16)
+    assert out.dtype == torch.bfloat16
+
+
 def test_grouped_mxfp4_uses_the_same_native_mma_model_as_dense_linear():
     m, k, n, k_groups = 3, 64, 6, 2
     x = [torch.empty((m, k), device="meta", dtype=torch.int4)]

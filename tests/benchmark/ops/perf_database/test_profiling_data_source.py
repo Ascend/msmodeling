@@ -1319,6 +1319,39 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 "144,512;512,5120","INT8;INT8","ND;ND","144,5120","DT_BF16","ND",22.5
 """
 
+
+def test_quant_batch_matmul_direct_mapping_preserves_batched_shapes(tmp_path):
+    (tmp_path / "op_mapping.yaml").write_text(
+        'version: "test"\n'
+        "operator_mappings:\n"
+        '  "tensor_cast.batch_matmul_quant.default":\n'
+        "    kernel_type: QuantBatchMatmulV3\n"
+        "    tc_input_count: 2\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "QuantBatchMatmulV3.csv").write_text(
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us)\n"
+        '"16,8,128;16,128,512","INT8;INT8","ND;ND","16,8,512","DT_BF16","ND",12.5\n',
+        encoding="utf-8",
+    )
+    activation = torch.empty(16, 8, 128, device="meta", dtype=torch.int8)
+    weight = torch.empty(16, 128, 512, device="meta", dtype=torch.int8)
+    scale = torch.ones(1, device="meta")
+    op = _make_op_info(
+        torch.ops.tensor_cast.batch_matmul_quant.default,
+        [activation, weight, scale, None, scale, None, None, torch.bfloat16],
+    )
+
+    result = ProfilingDataSource(tmp_path).lookup(op)
+
+    assert result is not None
+    assert result.source == QuerySource.MEASURED
+    assert result.latency_us == pytest.approx(12.5)
+    assert result.details["kernel_type"] == "QuantBatchMatmulV3"
+    assert result.shape_match_info.simulation_shapes == [[16, 8, 128], [16, 128, 512]]
+
+
 # Comm CSV: message_bytes = 144 * 5120 * 2 (BF16 output) = 1474560
 QUANT_COMM_CSV = """\
 message_bytes,num_devices,Duration(us)

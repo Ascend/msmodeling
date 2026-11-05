@@ -620,6 +620,43 @@ def test_unfused_mixed_projections_use_tensor_request_lengths(monkeypatch):
     assert selected == {"kv": [1.0, 2.0], "q": [0.0, 3.0]}
 
 
+def test_unfused_quant_decode_uses_batch_matmul_not_grouped_matmul():
+    layer = make_layer(direct=True)
+    layer.quant_config = SimpleNamespace(
+        is_hif8_kv=False,
+        qk_scale=torch.ones(1, device="meta"),
+        qk_offset=None,
+    )
+    layer.kv_b_proj_scale = torch.ones(1, device="meta")
+    layer.kv_b_proj_offset = None
+    layer.W_UK_T = layer.W_UK_T.to(torch.int8)
+    kv = torch.empty(2, layer.kv_lora_rank, device="meta", dtype=torch.float16)
+    q = torch.empty(
+        2,
+        layer._num_heads_per_rank,
+        layer.qk_nope_head_dim + layer.qk_rope_head_dim,
+        device="meta",
+        dtype=torch.float16,
+    )
+
+    with Runtime(AnalyticPerformanceModel(TEST_DEVICE), TEST_DEVICE) as runtime:
+        _, absorbed = layer._compute_unfused_mla_projections(kv, q, prefill=0, decode=2)
+
+    names = [str(event.op_invoke_info.func) for event in runtime.event_list]
+    assert absorbed.shape == (2, layer._num_heads_per_rank, layer.kv_lora_rank + layer.qk_rope_head_dim)
+    assert names.count("tensor_cast.batch_matmul_quant.default") == 1
+    assert names.count("tensor_cast.grouped_matmul_quant.default") == 0
+    event = next(
+        event
+        for event in runtime.event_list
+        if str(event.op_invoke_info.func) == "tensor_cast.batch_matmul_quant.default"
+    )
+    props = event.op_invoke_info.get_perf_properties()
+    assert props.compute_ops[torch.int8].mma_ops == (
+        2 * layer._num_heads_per_rank * 2 * layer.qk_nope_head_dim * layer.kv_lora_rank
+    )
+
+
 def test_mixed_mla_phase_requires_materialized_request_lengths():
     from tensor_cast.layers.mla import _get_mla_phase_token_counts
 

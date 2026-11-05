@@ -258,6 +258,33 @@ def test_signature_covers_quantized_linear_semantics():
     }
 
 
+def test_signature_covers_quantized_batch_matmul_semantics():
+    x = torch.empty(16, 8, 128, device="meta", dtype=torch.int8)
+    weight = torch.empty(16, 128, 512, device="meta", dtype=torch.int8)
+    scale = torch.ones(1, device="meta")
+    args = (x, weight, scale, None, scale, None, None, torch.bfloat16)
+    out = torch.empty(16, 8, 512, device="meta", dtype=torch.bfloat16)
+    info = OpInvokeInfo(torch.ops.tensor_cast.batch_matmul_quant.default, args, {}, out)
+
+    signature = build_calibration_signature(info, PerformanceModel.Result(1e-6), device_name="TEST_DEVICE")
+
+    assert signature.op_family == "matmul"
+    assert signature.dtype == "int8"
+    assert signature.features == {
+        "m": 8,
+        "k": 128,
+        "n": 512,
+        "batch": 16,
+        "min_kn": 128,
+        "max_kn": 512,
+        "mn": 4096,
+        "aspect": 4.0,
+        "mm_kind": "batch",
+        "quantization": "w8a8",
+        "compute_dtype": "int8",
+    }
+
+
 def _gmm_info(op, *, swiglu=False, skewed=False):
     m_values = (2, 2) if not skewed else (1, 3)
     k = 8

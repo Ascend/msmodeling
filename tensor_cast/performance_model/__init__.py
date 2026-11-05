@@ -108,6 +108,31 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.batch_matmul_quant.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    named = get_named_args(op_invoke_info)
+    x = named["x"]
+    w = named["w"]
+    bias = named["bias"]
+    assert isinstance(x, torch.Tensor) and x.ndim == 3
+    assert isinstance(w, torch.Tensor) and w.ndim == 3
+    b, m, k = x.shape
+    assert w.shape[0] == b and w.shape[1] == k
+    n = w.shape[2]
+
+    # Each matrix FMA is counted as one multiply plus one add (2 FLOPs).
+    mma_ops = b * m * n * k * 2
+    if mma_ops == 0:
+        return OpInvokeInfo.PerformanceProperties()
+
+    properties = op_invoke_info.get_memory_access_properties()
+    compute_dtype = _quantized_weight_compute_dtype(w.dtype)
+    properties.compute_ops[compute_dtype] = OpInvokeInfo.ComputeOps(mma_ops=mma_ops)
+    if bias is not None:
+        properties.compute_ops[compute_dtype].gp_ops = b * m * n
+    return properties
+
+
 def _mm_properties_helper(op_invoke_info: OpInvokeInfo, mat1, mat2, bias) -> OpInvokeInfo.PerformanceProperties:
     # Get the logical dimensions of the operation.
     # mat1 is (M, K).

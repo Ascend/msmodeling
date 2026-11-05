@@ -384,17 +384,16 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             else:
                 qc = self.quant_config
                 quantized = torch.ops.tensor_cast.quantize(q_nope, qc.qk_scale, qc.qk_offset)
-                heads = self._num_heads_per_rank
-                absorbed = torch.ops.tensor_cast.grouped_matmul_quant(
-                    list(quantized.unbind(0)),
-                    list(self.W_UK_T.unbind(0)),
-                    [self.kv_b_proj_scale] * heads,
-                    [self.kv_b_proj_offset] * heads,
-                    [qc.qk_scale] * heads,
-                    [qc.qk_offset] * heads,
-                    [None] * heads,
+                absorbed = torch.ops.tensor_cast.batch_matmul_quant(
+                    quantized,
+                    self.W_UK_T,
+                    self.kv_b_proj_scale,
+                    self.kv_b_proj_offset,
+                    qc.qk_scale,
+                    qc.qk_offset,
+                    None,
                     q.dtype,
-                ).view(heads, decode, self.kv_lora_rank)
+                )
             absorbed = torch.cat(
                 (absorbed.transpose(0, 1), q_decode[..., self.qk_nope_head_dim :]),
                 dim=-1,
