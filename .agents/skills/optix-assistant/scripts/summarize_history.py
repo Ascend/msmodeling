@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-from common import read_json
+from optix_assistant_common import read_json
 
 
 def _build_trend(values: List[float], label: str) -> str:

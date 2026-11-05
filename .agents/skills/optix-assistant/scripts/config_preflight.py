@@ -58,7 +58,7 @@ from typing import Any, Dict, List
 import tomlkit
 
 from check_search_space import check_fixed_concurrency
-from common import bad_json_tokens, table_or_create, load_cluster_topology
+from optix_assistant_common import bad_json_tokens, table_or_create, load_cluster_topology
 
 #: placeholder values in the default config.toml that must be replaced by the user
 _PLACEHOLDER_VALUES = {"", "model_path", "model_name", "dataset_name", "models", "port", "host"}

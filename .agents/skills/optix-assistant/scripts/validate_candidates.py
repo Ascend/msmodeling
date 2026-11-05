@@ -537,7 +537,7 @@ def validate_round(data: dict, run_dir: Path, round_no: int) -> None:
             prepare_pd_fields(simulator, tuple(resolved))
         if (context.get("deployment") or {}).get("type") == "multihost":
             from types import SimpleNamespace
-            from common import load_cluster_topology
+            from optix_assistant_common import load_cluster_topology
             from optix.optimizer.multihost_adapter import prepare_multihost_fields
 
             topology = load_cluster_topology(context["source"]["cluster_config"])

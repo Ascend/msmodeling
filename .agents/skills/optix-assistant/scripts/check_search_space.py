@@ -27,7 +27,7 @@ import shlex
 from itertools import product
 from pathlib import Path
 
-from common import read_json
+from optix_assistant_common import read_json
 
 try:
     import tomllib

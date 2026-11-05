@@ -52,4 +52,4 @@ python <SKILL_ROOT>/scripts/export_best_config.py --run-dir <run-dir>
 
 候选按最新协议填写方向 trial_type 和顶层 routing_review；diagnosis 只作诊断证据，不参与正常判优。导出回查同轮候选，只选 optimization 中无错误、fitness 有限且非 early_exit 的 trial，优先 SLO 达标。多机直接输出胜出轮次的脚本到 `best_deployment/`，`serve_command_multihost.json` 记录文件清单，handoff 记录参数与部署清单。缺少完整脚本时拒绝导出，不根据当前配置猜造。
 
-脚本复制到各自节点运行；worker 脚本不能在 master 上当作单机命令执行。导出脚本与 common.py 可以脱离仓库运行，不导入 optix；单机仍输出 serve_command.json/sh。真实集群验证需覆盖服务就绪、压测、worker 失败清理和导出重启。
+脚本复制到各自节点运行；worker 脚本不能在 master 上当作单机命令执行。导出脚本与 optix_assistant_common.py 可以脱离仓库运行，不导入 optix；单机仍输出 serve_command.json/sh。真实集群验证需覆盖服务就绪、压测、worker 失败清理和导出重启。

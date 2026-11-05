@@ -68,16 +68,3 @@ reports/
 
 # optix runtime log artifact produced in repo cwd by mindie/ais_bench runs (issue #480)
 report.log
-
-# --- OptiX 寻优/压测运行产物与本地备份（不入库）---
-.agent_optimizer/
-result/
-tmp/
-case_base_out/
-config.pd-*.toml
-*.bak
-*.bak-*
-.codebuddy/
-
-# --- 手工验证轮原始产物（manual_p/d/proxy.sh + bench_raw/ + RESULT.md，5.1MB）---
-pd_final_r7/

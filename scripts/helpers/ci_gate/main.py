@@ -76,6 +76,7 @@ from scripts.helpers.common.coverage_config import corrupt_coverage_files, cov_p
 from scripts.helpers.common.coverage_symbol_check import load_coverage_data
 from scripts.helpers.common.pytest_runner import (
     build_pytest_cmd,
+    collect_test_node_ids,
     count_collected_tests,
     filter_collectable_node_ids,
 )
@@ -91,6 +92,7 @@ _CHANGED_TEST_MARKER: str | None = None
 # Mapped/guard regression wave and config-triggered full suite share this marker.
 _REGRESSION_MARKER = "not npu and not nightly and not network"
 _FULL_SUITE_MARKER = _REGRESSION_MARKER
+_TESTS_TARGET = "tests"
 _COVERAGE_DATA_PATH = REPO_ROOT / ".coverage"
 _SAMPLE_NODE_LIMIT = 3
 _MISSING_LINE_LIMIT = 20
@@ -412,6 +414,37 @@ def _sample_nodes(nodes: tuple[str, ...], limit: int = _SAMPLE_NODE_LIMIT) -> st
 
 def _changeset_has_gate_paths(changes: ChangeSet) -> bool:
     return bool(changes.unscoped_python or _changes_need_fresh_test_map(changes))
+
+
+def _needs_full_suite_collect(changes: ChangeSet) -> bool:
+    """True when test-tree edits can break whole-suite collection without a config change."""
+    if changes.config:
+        return False
+    return bool(
+        changes.new_test
+        or changes.modified_test
+        or changes.del_test
+        or any(path.startswith(f"{_TESTS_TARGET}/") for path in changes.unscoped_python)
+    )
+
+
+def _collect_full_suite(logger: logging.Logger) -> int:
+    """Collect tests/ in one process. Non-zero means the incremental gate must stop."""
+    logger.info(
+        "Collecting full suite before incremental tests: %s marker=%s",
+        _TESTS_TARGET,
+        _FULL_SUITE_MARKER,
+    )
+    try:
+        collected = collect_test_node_ids((_TESTS_TARGET,), marker=_FULL_SUITE_MARKER)
+    except ConfigError as exc:
+        logger.error("Full-suite collection failed: %s", exc)
+        return 1
+    if not collected:
+        logger.error("Full-suite collection returned no node ids (marker=%s)", _FULL_SUITE_MARKER)
+        return 1
+    logger.info("Full-suite collection OK: %d node ids", len(collected))
+    return 0
 
 
 def _changes_need_fresh_test_map(changes: ChangeSet) -> bool:
@@ -871,6 +904,12 @@ def main() -> int:
     use_cov = _needs_union_coverage(prepared.changes, prepared.baseline.roots)
     if use_cov and execution.has_work:
         logger.info("Union pytest run will collect branch coverage with per-test context")
+
+    if _needs_full_suite_collect(prepared.changes):
+        collect_code = _collect_full_suite(logger)
+        if collect_code != 0:
+            print("CI gate failed: full test suite could not be collected.")
+            return collect_code
 
     return _run_gate_finalize(
         prepared.changes,

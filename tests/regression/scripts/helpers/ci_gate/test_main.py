@@ -18,12 +18,16 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 
 import pytest
 
+from scripts.helpers._config import ConfigError
 from scripts.helpers.ci_gate.main import (
+    _collect_full_suite,
+    _needs_full_suite_collect,
     build_ci_gate_plan,
     build_coverage_mapping_errors,
     build_hard_blocking_plan,
@@ -250,6 +254,57 @@ def test_plan_config_change_skips_changed_test_collection(baseline: Baseline) ->
     plan = build_ci_gate_plan(Path("/tmp"), cs, baseline)
     assert plan.full_suite is True
     assert plan.changed_test_nodes == frozenset()
+
+
+def test_new_test_needs_full_suite_collect() -> None:
+    changes = ChangeSet.build(new_test=("tests/smoke/test_new.py",))
+    assert _needs_full_suite_collect(changes) is True
+
+
+def test_modified_test_needs_full_suite_collect() -> None:
+    changes = ChangeSet.build(modified_test=("tests/smoke/test_existing.py",))
+    assert _needs_full_suite_collect(changes) is True
+
+
+def test_deleted_test_needs_full_suite_collect() -> None:
+    changes = ChangeSet.build(del_test=("tests/smoke/test_old.py",))
+    assert _needs_full_suite_collect(changes) is True
+
+
+def test_test_package_init_needs_full_suite_collect() -> None:
+    changes = ChangeSet.build(unscoped_python=("tests/regression/optix/test_pd_agent/__init__.py",))
+    assert _needs_full_suite_collect(changes) is True
+
+
+def test_product_source_skips_full_suite_collect() -> None:
+    changes = ChangeSet.build(modified_source={"optix/serve_plan.py": frozenset({1})})
+    assert _needs_full_suite_collect(changes) is False
+
+
+def test_config_change_skips_extra_full_suite_collect() -> None:
+    changes = ChangeSet.build(config=("pyproject.toml",), new_test=("tests/smoke/test_new.py",))
+    assert _needs_full_suite_collect(changes) is False
+
+
+def test_collect_full_suite_returns_nonzero_on_collection_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail(_targets: tuple[str, ...], *, marker: str | None) -> tuple[str, ...]:
+        raise ConfigError(f"pytest collect-only failed (exit 2) marker={marker}")
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.collect_test_node_ids", _fail)
+    assert _collect_full_suite(logging.getLogger("ci_gate")) == 1
+
+
+def test_collect_full_suite_rejects_empty_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.collect_test_node_ids", lambda *_args, **_kwargs: ())
+    assert _collect_full_suite(logging.getLogger("ci_gate")) == 1
+
+
+def test_collect_full_suite_accepts_collected_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.collect_test_node_ids",
+        lambda *_args, **_kwargs: ("tests/smoke/test_example.py::test_case",),
+    )
+    assert _collect_full_suite(logging.getLogger("ci_gate")) == 0
 
 
 def test_compute_execution_plan_dedupes_changed_and_regression() -> None:

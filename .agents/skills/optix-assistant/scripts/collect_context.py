@@ -21,7 +21,7 @@ import hashlib
 import tomllib
 from pathlib import Path
 
-from common import (
+from optix_assistant_common import (
     read_json,
     write_json,
     load_cluster_topology,

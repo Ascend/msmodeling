@@ -26,7 +26,7 @@
   - 本脚本       决定"怎么进 TOML"（只做机械 dict 操作，不含 schema/业务逻辑）
   - 校验器       决定"写对没有"（$VAR 协议 + JSON 段 + toml 回环；pydantic Settings 可选）
 
-自包含：标准库 + tomlkit + 同目录 common.py（容器序列化/合并与 apply_launch_config
+自包含：标准库 + tomlkit + 同目录 optix_assistant_common.py（容器序列化/合并与 apply_launch_config
 共享同一实现，保证两个写入入口产出完全一致的 canonical 格式）；不 import optix。
 optix 的 pydantic Settings 校验在依赖可用时自动生效（见 --check 的 best-effort 段）。
 
@@ -59,7 +59,7 @@ optix 的 pydantic Settings 校验在依赖可用时自动生效（见 --check �
 
   # JSON-container 结构化写入（推荐，取代 --set-others 手拼 JSON 字符串）：
   #   --set <engine>.command.others.<flag>='{...JSON dict...}'
-  # dict 由脚本经 common 序列化（单引号包裹）并 key 级合并进既有 others，永不畸形。
+  # dict 由脚本经 optix_assistant_common 序列化（单引号包裹）并 key 级合并进既有 others，永不畸形。
   python config_writer.py --config <path> \
     --set 'vllm.command.others.speculative-config={"method": "dflash", "num_speculative_tokens": 3}' \
     --set 'vllm.command.others.additional-config={"enable_cpu_binding": true}'
@@ -81,10 +81,10 @@ import sys
 
 import tomlkit
 
-#: JSON-container 序列化/合并与 apply_launch_config 共享 common.py 实现，保证两个
+#: JSON-container 序列化/合并与 apply_launch_config 共享 optix_assistant_common.py 实现，保证两个
 #: 写入入口产出完全一致的 canonical 格式（单引号包裹 JSON）。自包含声明相应放开：
 #: 容器序列化是跨脚本的机械能力，不是单脚本业务逻辑。
-from common import (
+from optix_assistant_common import (
     CONTAINER_FLAGS,
     bad_json_tokens,
     build_others,
@@ -237,7 +237,7 @@ def set_value(doc, key_path: str, value) -> None:
 def set_others(doc, section: str, text: str) -> None:
     """整体覆盖 [section.command].others。
 
-    经 common.merge_others 规范化一次（容器统一单引号 JSON），与 apply 同源。
+    经 optix_assistant_common.merge_others 规范化一次（容器统一单引号 JSON），与 apply 同源。
     全量覆盖语义：用空 text 可清空；用目标 others 全串可重写。
     """
     cmd = table_or_create(table_or_create(doc, section), "command")
@@ -256,7 +256,7 @@ def set_container(doc, section: str, flag: str, value: dict) -> None:
     """结构化写入一个 JSON-container flag：把 ``value`` dict 合并进
     ``[section.command].others`` 的 ``--flag`` 容器（key 级，new 覆盖旧）。
 
-    与 apply_launch_config 同源（common.build_others + merge_others），所以
+    与 apply_launch_config 同源（optix_assistant_common.build_others + merge_others），所以
     这里永不产生畸形 JSON——dict 经 json.dumps + 单引号序列化。这是取代
     "--set-others 手拼 JSON 字符串"的结构化入口。
     """
@@ -362,7 +362,7 @@ def check_protocol(doc) -> list:
                     f"[{section}.command].others 里的 {var} 无对应 target_field name "
                     f"（大写协议 {varname.lower()} → {var}）或内建变量"
                 )
-        # ② 看起来像 JSON 的 token：$VAR 掩码 + json.loads 核心在 common.bad_json_tokens，
+        # ② 看起来像 JSON 的 token：$VAR 掩码 + json.loads 核心在 optix_assistant_common.bad_json_tokens，
         #    此处只负责带 section 上下文拼装错误（掩码/解析规则单一宿主，勿在此重复实现）
         for tok in bad_json_tokens(others):
             errors.append(
@@ -591,7 +591,7 @@ def main(argv=None) -> int:
                 raise ValueError(f"--set 需 KEY=VALUE: {kv!r}")
             # 结构化容器写入: <engine>.command.others.<flag>=<JSON dict>
             # (如 vllm.command.others.speculative-config='{"method":"dflash"}')
-            # → dict 经 common 序列化+key级合并进 others，永不产生畸形 JSON。
+            # → dict 经 optix_assistant_common 序列化+key级合并进 others，永不产生畸形 JSON。
             parts = key.split(".")
             if parts[:3] == ["vllm_pd", "command", "others"]:
                 raise ValueError("PD service options must use vllm.command.others")

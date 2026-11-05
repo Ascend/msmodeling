@@ -1,7 +1,7 @@
 # scripts/ 脚本归属矩阵
 
 > 本目录采用**平铺结构**（不分子目录），原因：
-> ① 多个脚本依赖同目录导入（`from common import ...`），拆目录即断链；
+> ① 多个脚本依赖同目录导入（`from optix_assistant_common import ...`），拆目录即断链；
 > ② SKILL.md / references/*.md 中所有命令路径均写死 `<SKILL_ROOT>/scripts/<脚本名>`；
 > ③ 脚本升级归属（专属→公共）只改标注，不挪文件。
 >
@@ -25,7 +25,7 @@
 | `collect_context.py` | shared-precheck | run 目录环境与负载事实采集（含 `--input-len/--output-len/--num-requests` + 并发旗标 `--concurrency` 固定 / `--concurrency-min/--concurrency-max` 可调 登记 `benchmark_spec`） | SKILL.md、workflows/agent.md |
 | `check_search_space.py` | shared-precheck | 直接检查 TOML 基础参数和资源可行性，不要求 context 已有搜索空间 | SKILL.md、workflows/agent.md |
 | `apply_launch_config.py` | pso | PSO 模式 preset 命中后应用 env/additional_config（launch_env.sh + unset_env.sh）；agent 模式不用 | pso-mode.md |
-| `common.py` | lib | JSON 读写、模型族识别、target_fields→search_space 转换等共享函数 | 被 4 个脚本 import |
+| `optix_assistant_common.py` | lib | JSON 读写、模型族识别、target_fields→search_space 转换等共享函数 | 被 4 个脚本 import |
 | `estimation.py` | lib | 估算物理量单一宿主（dtype 字节 / per-token KV / 权重总量 / KV 预算 / TP 整除候选） | 被 recommend_params.py 等估算消费者 import |
 | `config_writer.py` | config-write | config.toml 写入执行器（引擎命令/benchmark/搜索参数/固定参数，parse→mutate→serialize→check 薄层） | SKILL.md、pso-mode.md、workflows/agent.md |
 | `recommend_params.py` | pso | 基于模型、硬件和负载的 PSO 参数与范围推荐 | pso-mode.md |

@@ -11,7 +11,7 @@ SCRIPT = SCRIPT_DIR / "config_writer.py"
 
 
 def load_module():
-    # config_writer 以 `from common import ...` 引用同目录模块，需先把 scripts 目录挂上 sys.path
+    # config_writer 以 `from optix_assistant_common import ...` 引用同目录模块，需先把 scripts 目录挂上 sys.path
     if str(SCRIPT_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPT_DIR))
     spec = importlib.util.spec_from_file_location("config_writer", SCRIPT)

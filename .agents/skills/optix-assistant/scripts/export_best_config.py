@@ -22,7 +22,7 @@ import shlex
 from math import isfinite
 from pathlib import Path
 
-from common import read_json, write_json
+from optix_assistant_common import read_json, write_json
 
 
 def _parse_others_flags(others: str):

@@ -40,10 +40,10 @@ import shlex
 import sys
 from pathlib import Path
 
-#: others / JSON-container helpers live in common.py — shared with config_writer
+#: others / JSON-container helpers live in optix_assistant_common.py — shared with config_writer
 #: so a container dict is always serialized the same way (single-quoted JSON) no
 #: matter which entry point writes it.
-from common import build_others, merge_others
+from optix_assistant_common import build_others, merge_others
 
 
 def _load_json(path: Path) -> dict:
