@@ -51,7 +51,6 @@ class AisBenchCommand:
             self.aisbench_command_config.mode,
             "--work-dir",
             self.aisbench_command_config.work_dir,
-            "--debug",
         ]
         if self.aisbench_command_config.others:
             _cmd.extend(shlex.split(self.aisbench_command_config.others))

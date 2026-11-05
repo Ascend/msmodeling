@@ -303,7 +303,6 @@ class TestAisBenchCommand:
         assert "perf" in cmd
         assert "--work-dir" in cmd
         assert "/work" in cmd
-        assert "--debug" in cmd
         assert "--extra-arg" in cmd
         assert "value" in cmd
 
