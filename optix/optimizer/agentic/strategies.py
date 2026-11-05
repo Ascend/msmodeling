@@ -17,7 +17,6 @@
 import json
 import os
 import time
-from copy import deepcopy
 from math import inf, isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -26,10 +25,11 @@ from loguru import logger
 
 from ...config.constant import MULTIHOST_INFER_ENGINE
 
-from ...config.config import OptimizerConfigField, field_to_param
+from ...config.config import field_to_param
 from .candidates import Candidate, SearchResult, TrialResult, TrialFailure
 from .validation import validate_candidate, classify_failure
 from .topology import is_multihost_context
+from .parameters import resolve_execution_fields
 
 
 def compute_slo_violated(perf, fitness_evaluator) -> bool | None:
@@ -147,8 +147,14 @@ class AgentCandidateStrategy:
             from .topology import validate_simulator_topology
 
             validate_simulator_topology(context, scheduler.simulator)
+        if getattr(scheduler, "engine", None) == "vllm_pd":
+            from .pd import validate_simulator
+
+            validate_simulator(context, scheduler.simulator)
+            scheduler.pd_agent_context = context
+            scheduler.pd_archive_root = self.run_dir / "pd_deployments"
         candidates = self._load_candidates()
-        if multihost:
+        if multihost or (context).get("deployment", {}).get("type") == "pd":
             archive = self.run_dir / f"context.round-{self.round_index}.json"
             archive.write_text(json.dumps(context, indent=2, ensure_ascii=False), encoding="utf-8")
         validations = [validate_candidate(context, c.to_dict() if hasattr(c, 'to_dict') else c) for c in candidates]
@@ -249,6 +255,10 @@ class AgentCandidateStrategy:
 
     def _run_trial(self, validation: dict, scheduler, target_field: list, search_space_context: dict | None = None):
         multihost = is_multihost_context(search_space_context)
+        if (search_space_context or {}).get("deployment", {}).get("type") == "pd":
+            scheduler.pd_candidate_identity = {"round": self.round_index, "candidate_id": validation["candidate_id"]}
+            scheduler.simulate_launch_plan = {}
+            scheduler.simulator._optix_pd_launch_plan = {}
         params = validation["params"]
         resolved_field = self._params_to_target_field(params, target_field, search_space_context)
         candidate_id = validation["candidate_id"]
@@ -316,11 +326,20 @@ class AgentCandidateStrategy:
             )
         except Exception as exc:
             logger.warning("Failed to save trial result: {}", exc)
+            if (search_space_context or {}).get("deployment", {}).get("type") == "pd":
+                fitness, error = inf, str(exc)
+                failure = TrialFailure(category="unknown", message=str(exc), suggested_action="inspect_cleanup")
         metadata = {"round_id": self.round_index}
-        if multihost:
+        if multihost or (search_space_context or {}).get("deployment", {}).get("type") == "pd":
             from copy import deepcopy
 
             metadata["launch_plan"] = deepcopy(getattr(scheduler, "simulate_launch_plan", {}))
+            if (search_space_context or {}).get("deployment", {}).get("type") == "pd":
+                # Full script evidence is retained in the immutable attempt archive.
+                plan = metadata["launch_plan"]
+                if plan.get("archive_id"):
+                    plan.pop("files", None)
+                metadata["deployment_proposal"] = deepcopy(search_space_context["deployment"].get("round_manifest"))
             metadata["requested_params"] = dict(params)
             effective = getattr(scheduler, "simulate_run_info", None)
             if effective:
@@ -345,63 +364,7 @@ class AgentCandidateStrategy:
     def _params_to_target_field(
         self, params: dict, target_field: list, search_space_context: dict | None = None
     ) -> list:
-        """Keep configured field contracts and add active-space service fields.
-
-        ``params`` is the full output of validate_candidate: active-space defaults,
-        pinned constants and explicit candidate values have already been resolved.
-        This function deliberately does not implement a second default policy.
-        """
-        space = (search_space_context or {}).get("search_space", {})
-        schema = {item["name"]: item for group in ("parameters", "constants") for item in space.get(group, [])}
-        resolved = []
-        covered_names = set()
-        for field in target_field:
-            active = deepcopy(field)
-            item = schema.get(active.name)
-            if item is not None:
-                # Round-local domains govern tunable fields after TOML is frozen.
-                # Keep configured types, positions and derivation contracts; candidate
-                # validation checks that TOML constants cannot be unfrozen.
-                definition = active.model_dump()
-                definition.update(min=item["min"], max=item["max"])
-                if active.dtype == "enum":
-                    definition["dtype_param"] = item["choices"]
-                if active.constant is None:
-                    definition["constant"] = item.get("constant")
-                active = OptimizerConfigField(**definition)
-            covered_names.add(active.name)
-            if active.name in params:
-                value = params[active.name]
-                if isinstance(value, (list, dict)):
-                    value = json.dumps(value, ensure_ascii=False)
-                active.apply_value(value)
-            resolved.append(active)
-
-        for name, value in params.items():
-            if name in covered_names:
-                continue
-            item = schema.get(name)
-            if item is None:
-                continue  # Candidate validation rejects unregistered names.
-            if isinstance(value, (list, dict)):
-                value = json.dumps(value, ensure_ascii=False)
-            kwargs = {
-                "name": name,
-                "value": value,
-                "dtype": item.get("dtype", "str"),
-                "config_position": item.get("config_position", "run"),
-                "min": item.get("min", 0.0),
-                "max": item.get("max", 1.0),
-                "dtype_param": item.get("choices") if item.get("dtype") == "enum" else item.get("dtype_param"),
-            }
-            if item.get("constant") is not None:
-                kwargs["constant"] = item["constant"]
-            # Invalid field definitions must fail preflight instead of silently
-            # becoming untyped fields with different execution semantics.
-            active = OptimizerConfigField(**kwargs)
-            active.apply_value(value)
-            resolved.append(active)
-        return resolved
+        return resolve_execution_fields(params, target_field, search_space_context)
 
     def _write_results(self, trials, validations=None):
         self.results_path.parent.mkdir(parents=True, exist_ok=True)

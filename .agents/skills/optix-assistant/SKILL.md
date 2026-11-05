@@ -21,6 +21,8 @@ msmodeling optix 寻优的唯一用户入口，覆盖三种意图：
 
 agent 多机混部使用原 `multihost_infer` 插件；进入该场景先读 [多机约定](references/multihost.md)。
 
+agent PD 分离先读 [PD 部署搜索约定](references/pd.md)，使用原 `vllm_pd` 插件。
+
 三种模式共享同一条前置链（见下「共享前置流程」），差异只在执行分支。
 
 ## Agent 决策与参数来源

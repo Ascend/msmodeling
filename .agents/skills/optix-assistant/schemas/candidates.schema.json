@@ -165,7 +165,15 @@
           "params": {
             "type": "object",
             "description": "仅保存实际参数值；未显式赋值的字段采用 search_space 默认值。不得将 value/dtype/config_position 定义对象放入 params。",
-            "additionalProperties": {"type": ["string", "number", "boolean", "array", "object"]}
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "array",
+                "object"
+              ]
+            }
           },
           "rationale": {
             "type": "string",
@@ -182,6 +190,49 @@
           "source": {
             "type": "string",
             "description": "候选来源，缺省为 agent。"
+          },
+          "deployment": {
+            "type": "object",
+            "required": [
+              "nodes"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "minItems": 2,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "source_node",
+                    "role",
+                    "gpu_ids"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_node": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "role": {
+                      "enum": [
+                        "prefill",
+                        "decode"
+                      ]
+                    },
+                    "gpu_ids": {
+                      "type": "array",
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }

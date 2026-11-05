@@ -86,7 +86,18 @@ def load_configured_parameters(context: dict) -> tuple[dict, list[dict]]:
     if not path:
         raise ValueError("context.source.config_toml is required")
     section = _read_engine_config(path, context.get("engine", ""))
-    fields = section.get("target_field")
+    fields = section.get("target_field") or []
+    if (context.get("deployment") or {}).get("type") == "pd":
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+        from optix.optimizer.agentic.pd import validate_snapshot
+
+        validate_snapshot(context)
+        plugin_fields = context["deployment"]["plugin_config"].get("target_field", [])
+        names = {field["name"] for field in plugin_fields}
+        fields = plugin_fields + [field for field in fields if field["name"] not in names]
+        section = {**section, "target_field": fields}
     if not isinstance(fields, list) or not fields:
         raise ValueError(f"No target_field definitions in {path}")
     return section, _schema_from_fields(fields)
@@ -192,21 +203,29 @@ def check_parameters(
             if not separator and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
                 value = tokens[i + 1]
             flags[name.replace("-", "_").lower()] = value
-        spec = json.loads(flags.get("speculative_config", "{}"))
-        if not isinstance(spec, dict):
-            raise ValueError("speculative-config must be a JSON object")
-        values = [spec.get("num_speculative_tokens", 0)]
-        for field in fields:
-            if field["name"].lower() == "num_speculative_tokens":
-                values = [params[field["name"]]] if params is not None else field.get("choices", [field["max"]])
-                break
-        has_spec_base = any(isinstance(spec.get(key), str) and spec[key].strip() for key in ("method", "model"))
-        if any(float(v) > 0 for v in values) and not has_spec_base:
-            error("num_speculative_tokens requires method/model in command.others speculative-config")
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+        from optix.optimizer.agentic.parameters import validate_service_parameters
+
+        effective = {field["name"]: field["default"] for field in fields}
+        effective.update(params or {})
+        validate_service_parameters(context, effective, fields=fields, others=others)
+        # Validate positive speculative domains too, even when the default is OFF.
+        if params is None:
+            for field in fields:
+                if field["name"].lower().removesuffix("_prefill").removesuffix("_decode") == "num_speculative_tokens":
+                    for value in field.get("choices", [field["max"]]):
+                        validate_service_parameters(
+                            context,
+                            {**effective, field["name"]: value},
+                            fields=fields,
+                            others=others,
+                        )
         world = (context.get("constraints") or {}).get("world_size") or (context.get("hardware") or {}).get(
             "world_size"
         )
-        if world and context["engine"] in {"vllm", "mindie"}:
+        if world and context["engine"] in {"vllm", "mindie"} and (context.get("deployment") or {}).get("type") != "pd":
             domains = []
             by_name = {f["name"].lower(): f for f in fields}
             aliases = [("tp", "tensor_parallel_size"), ("dp", "data_parallel_size")]

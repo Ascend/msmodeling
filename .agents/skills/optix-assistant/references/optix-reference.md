@@ -73,8 +73,10 @@ msmodeling optix -e <vllm|mindie> -b <ais_bench|vllm_benchmark> -c <config.toml>
    如 `--speculative-config '{"num_speculative_tokens": $NUM_SPECULATIVE_TOKENS,...}'`）。
 6. serve 命令去重与合并：容器 flag（`--speculative-config`/`--compilation-config`）多处出现
    合并为一个（`others` 为底座、搜索侧键值覆盖）；普通 flag 重复时后出现的值生效；
-   `--speculative-config` 合并后若 `num_speculative_tokens==0` 或缺 `method`/`model`，
-   整个容器被丢弃（= 关闭投机，vLLM 对孤儿容器会启动失败）。
+   `--speculative-config` 合并后仅 `num_speculative_tokens==0` 表示明确关闭投机。
+   缺少必要的 `method`/`model`、非法 γ 或无效 JSON 会直接报错，禁止静默关闭。
+   单机、混部和 PD 预检与执行共用服务参数规划；PD 先分侧、去后缀。
+   部署导出保留实测脚本；候选 γ 与脚本不一致的历史结果必须重测，不能在导出时补齐。
 7. argv[0] 为 `vllm`/`ais_bench` 时，`materialize_command` 按部署 PATH 解析成绝对路径
    （解析细节见"环境与部署"）。
 

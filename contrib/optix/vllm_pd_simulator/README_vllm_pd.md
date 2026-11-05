@@ -129,9 +129,9 @@ PD 分离部署依赖两个 Proxy 负载均衡脚本（来自 [vllm-ascend](http
 
 脚本获取方式（三种，按需选用）：
 
-- **方式一（自动，需外网）**：寻优运行时（Stage 0 生成启动脚本阶段）自动检查，本地缺失则从 vllm-ascend GitHub 仓下载；下载失败但有本地缓存时降级使用缓存。需服务器可连外网。
-- **方式二（手动下载）**：运行 `scripts/pd/download_proxy_scripts.sh`，默认仅下载缺失文件；加 `--download` 强制重新下载并覆盖已有文件；加 `--check` 仅检查存在状态不下载。
-- **方式三（离线上传）**：在可连外网的机器上从 [vllm-ascend/examples/disaggregated_prefill_v1/](https://github.com/vllm-project/vllm-ascend/tree/main/examples/disaggregated_prefill_v1) 下载上述脚本，上传到插件安装目录下的 `scripts/pd/` 子目录。
+- **Agent 环境准备（需外网）**：OptiX Agent 检查实际使用的插件目录，缺失时调用 `scripts/pd/download_proxy_scripts.sh` 并复检；参见 optix-assistant 的 `workflows/environment-preparation.md`。插件本身只检查并提示，不会自动下载。
+- **手动下载**：运行插件目录下的 `scripts/pd/download_proxy_scripts.sh`，默认仅下载缺失文件；加 `--download` 强制重新下载并覆盖已有文件；加 `--check` 仅检查存在状态不下载。需要目标目录可写、GitHub 可访问以及 `wget` 或 `curl`。
+- **离线上传**：在可连外网的机器上从 [vllm-ascend/examples/disaggregated_prefill_v1/](https://github.com/vllm-project/vllm-ascend/tree/main/examples/disaggregated_prefill_v1) 获取与部署环境兼容的两个脚本，上传到控制节点的插件安装目录 `scripts/pd/`，并执行 `--check`。下载脚本使用上游 `main`，其内容可能变化；请记录实际版本或文件 SHA-256。
 
 > **TLS 证书**：默认启用证书验证。如内网环境证书有问题，可通过 `export WGET_OPTS=--no-check-certificate` 或 `export CURL_OPTS=-k` 临时绕过 TLS 验证。
 

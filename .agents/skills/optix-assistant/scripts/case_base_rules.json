@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.0",
+  "description": "案例底座 -> 静态底座的分类与写入规则表。审计器(④)与写入器(③)共用：审计器据此判 category，写入器据此决定携带通道。真源集合不抄字面量，只记 文件+变量名，由脚本现读。",
+  "symbol_sources": {
+    "owned_flags": {
+      "file": "optix/optimizer/pd_adapter.py",
+      "var": "OWNED_FLAGS",
+      "note": "框架占用 flag；写进 [<engine>.command].others 会被硬校验拒绝(ValueError)，因此必须永不自动写入"
+    },
+    "owned_env": {
+      "file": "optix/optimizer/agentic/pd.py",
+      "var": "OWNED_ENV",
+      "note": "框架注入 env；案例里的同名项不算缺口"
+    },
+    "topology_fields": {
+      "file": "optix/optimizer/agentic/pd.py",
+      "var": "TOPOLOGY_FIELDS",
+      "note": "并行拓扑字段，由编排决定，不进底座"
+    },
+    "json_subkey_map": {
+      "file": "optix/serve_plan.py",
+      "var": "JSON_SUBKEY_MAP",
+      "note": "可作为【搜索维度】的 JSON 子键白名单；(容器, 子键) 不在此表内时，该子键只能整容器静态下发"
+    },
+    "benchmark_only_fields": {
+      "file": "optix/serve_plan.py",
+      "var": "BENCHMARK_ONLY_FIELDS",
+      "note": "基准侧字段，永不渲染进 serve 命令"
+    }
+  },
+  "orchestration_flags": [
+    "--data-parallel-size-local",
+    "--data-parallel-start-rank",
+    "--api-server-count",
+    "--distributed-executor-backend",
+    "--prefiller-hosts",
+    "--prefiller-ports",
+    "--decoder-hosts",
+    "--decoder-ports"
+  ],
+  "review_flags": [
+    "--enforce-eager",
+    "--compilation-config",
+    "--async-scheduling",
+    "--speculative-config"
+  ],
+  "env_categories": {
+    "toolchain": {
+      "names": ["LD_LIBRARY_PATH", "PYTHONPATH", "PATH", "PYTHONHASHSEED", "PROMETHEUS_MULTIPROC_DIR"],
+      "note": "工具链/进程环境特定，不搬"
+    },
+    "node_placeholder": {
+      "value_regex": "\\$\\{|xxxx|xxx\\b|nic_name|local_ip|path/to",
+      "note": "值为节点占位符(ip/nic/路径)，随部署变化，不搬"
+    }
+  },
+  "adopt_policy": {
+    "flag": {
+      "when": "case_value 双侧一致或为空",
+      "write_via": "others_token_merge",
+      "cli": "--append-others <engine>=<flag>",
+      "cli_note": "禁止用 --set-others：那是整体覆盖语义，会抹掉底座既有的 --quantization / --speculative-config 等",
+      "never_if": ["owned_flags", "orchestration_flags", "review_flags"]
+    },
+    "flag_with_value": {
+      "when": "case_value 双侧一致",
+      "write_via": "others_token_merge",
+      "cli": "--append-others <engine>=<flag> <value>",
+      "cli_note": "同上；token 级合并保证幂等",
+      "never_if": ["owned_flags", "orchestration_flags", "review_flags"]
+    },
+    "json_container_subkey": {
+      "when": "该 (容器,子键) 在 json_subkey_map 内",
+      "write_via": "role_suffixed_target_field",
+      "manual": false,
+      "role_rule": "子键只出现在单一角色 → 写成 <子键>_<role> 的 target_field；双侧都出现 → 合并进共享 others 容器",
+      "cli_single_role": "--target-field engine=vllm_pd name=<子键>_<role> config_position=run dtype=<bool|int|float|str> value=<案例值>",
+      "cli_both_roles": "--set <engine>.command.others.<容器名去掉前导-->=<JSON dict>（key 级合并）",
+      "requires": "子键在 JSON_SUBKEY_MAP 内；否则不能作为角色/搜索维度，只能整容器静态下发（转人工）",
+      "note": "子键不在 JSON_SUBKEY_MAP 时不能作为搜索维度；此时若仅单角色需要，必须人工改走整容器 str 枚举 target_field"
+    },
+    "json_container_static": {
+      "when": "容器本身缺失或子键不在 json_subkey_map 内",
+      "write_via": "structured_set",
+      "cli": "--set '<engine>.command.others.<容器名去掉前导-->'=<JSON dict>",
+      "merge_semantics": "key 级合并进既有 others",
+      "role_differentiated": {
+        "supported": false,
+        "note": "[<engine>.command].others 为 P/D 共享通道；若 P/D 取值不同：子键在 json_subkey_map 内时按 json_container_subkey 走 role 后缀 target_field（已自动），否则人工改走整容器 str 枚举 target_field"
+      }
+    },
+    "flag_role_split": {
+      "when": "flag ∈ role_split_flags 且案例至少一侧有值",
+      "write_via": "role_suffixed_target_field",
+      "cli": "--target-field engine=vllm_pd name=<FLAG 转大写下划线>_<role> config_position=run dtype=<int|float|str> value=<案例值>",
+      "note": "为必须可按角色区分的 flag 建 role 后缀 target_field（即使案例双侧同值）。共享 others 里的同名字面量保留不动：渲染时 plain flag 去重以后出现的搜索侧为准，底座既有字面量不丢。",
+      "reason": "max-model-len 这类整机容量参数一旦写进共享 others，P/D 就再也不能分侧，且审计会把 D 侧差异按 flag 名归并成 adopted（误判为已生效）"
+    },
+    "env": {
+      "write_via": "toml_dot_path",
+      "path_template_pd": "vllm_pd.env_{role}.{VAR}",
+      "path_template_single": "{engine}.env.{VAR}",
+      "role_sides": ["prefill", "decode"],
+      "value_must_be_string": true,
+      "cli": "--set <path>=<JSON 引号包裹的字符串>",
+      "note": "env 值不是字符串会让整份 PD 配置被 schema 静默拒绝并退回 localhost；写入后必须复解析断言 str"
+    }
+  },
+  "range_policy": {
+    "action": "widen_range",
+    "rule": "new_min=min(案例值, 当前min)；new_max=max(案例值, 当前max)",
+    "preserve_value": true,
+    "cli": "--target-field engine=<tf_engine> name=<字段名> config_position=<原值> dtype=<原值> value=<原值> min=<新min> max=<新max> [dtype_param=<原值>]",
+    "enum_handling": "manual",
+    "requires_optix_root": true
+  },
+  "role_split_flags": [
+    "--max-model-len"
+  ],
+  "needs_review_handling": {
+    "auto_write": false,
+    "gate": "check_base_review.py",
+    "gate_rule": "R0 装配后若仍有未被 base_review_decisions.json 覆盖的 missing/needs_review 项，禁止进入 Round 1：流水线退出码 3，run_pd_round.py 在开跑前也会复检并拒跑",
+    "decisions_file": "<AUDIT_DIR>/out/base_review_decisions.json（R0 结束时复制到 run 目录同名文件）",
+    "decisions_schema": {
+      "decisions": [
+        {"kind": "flag|container_subkey|env", "key": "--additional-config", "verdict": "adopted|not_adopted",
+         "reason": "为什么这么裁决", "owner": "责任人", "decided_at": "YYYY-MM-DD"}
+      ]
+    },
+    "note": "needs_review 项(如 --additional-config / --enforce-eager / --compilation-config)必须由 agent 按方法卡与互斥关系逐条裁决并落盘依据：要么改成可自动装配（登记进 json_subkey_map / 加 role_split_flags），要么在 decisions 文件里写下 verdict+owner+reason。写入器只输出建议命令，不代替裁决。"
+  }
+}

@@ -78,3 +78,27 @@ def test_full_service_can_be_disabled_without_removing_its_section(tmp_path):
     errors, notes = module.validate_settings('[pd_disagg.full_service]\nenabled=true\n')
     assert not notes
     assert errors and "requires CONCURRENCY" in errors[0]
+
+
+def test_pd_role_env_numeric_value_stays_string(tmp_path):
+    # 回归现场：vllm_pd 的 PD 角色 env 表（env_prefill / env_decode）schema 同为
+    # dict[str, str]，VLLM_ENGINE_READY_TIMEOUT_S=30000 曾被数字推断写成 int，
+    # 导致整份 PD 配置被 schema 静默拒绝并退回 localhost。
+    module = load_module()
+    config = tmp_path / "config.toml"
+    config.write_text("[vllm_pd]\n\n[vllm_pd.env_prefill]\n")
+    assert module.main(["--config", str(config), "--set", "vllm_pd.env_prefill.VLLM_ENGINE_READY_TIMEOUT_S=30000"]) == 0
+    doc = tomlkit.parse(config.read_text())
+    value = doc["vllm_pd"]["env_prefill"]["VLLM_ENGINE_READY_TIMEOUT_S"]
+    assert value == "30000"
+    assert isinstance(value, str)
+
+
+def test_pd_role_env_decode_non_numeric_unchanged(tmp_path):
+    # 非数字值（AIV）在 PD 角色 env 表里同样以字符串落盘。
+    module = load_module()
+    config = tmp_path / "config.toml"
+    config.write_text("[vllm_pd]\n\n[vllm_pd.env_decode]\n")
+    assert module.main(["--config", str(config), "--set", "vllm_pd.env_decode.HCCL_OP_EXPANSION_MODE=AIV"]) == 0
+    doc = tomlkit.parse(config.read_text())
+    assert doc["vllm_pd"]["env_decode"]["HCCL_OP_EXPANSION_MODE"] == "AIV"

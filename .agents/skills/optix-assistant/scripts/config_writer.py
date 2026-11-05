@@ -73,6 +73,9 @@ optix 的 pydantic Settings 校验在依赖可用时自动生效（见 --check �
 
 import argparse
 import json
+import os
+import tempfile
+from pathlib import Path
 import re
 import sys
 
@@ -103,11 +106,14 @@ SCHEDULER_CONSUMED_VARS = KNOWN_BUILTIN_VARS
 COMMAND_SECTIONS = ("vllm", "mindie", "vllm_benchmark", "ais_bench")
 #: 可带 target_field 的引擎
 ENGINES = ("vllm", "mindie")
+FIELD_SECTIONS = (*ENGINES, "vllm_pd")
 #: --target-field 允许的字段（键名即 TOML 字段）
 _TF_FIELDS = ("name", "config_position", "dtype", "min", "max", "value", "dtype_param")
 #: command 段中约定为字符串的字段（optix custom_command.py: port: str = ""；config.toml 占位
 #: port = "port"）。coerce 的数字推断不得作用其上，否则纯数字值会被写成 int 导致类型不符。
 _STRING_COMMAND_FIELDS = {"port"}
+#: vllm_pd 的 PD 角色 env 表：schema 同为 dict[str, str]，数字样值必须保持字符串。
+_PD_ROLE_ENV_FIELDS = ("env_prefill", "env_decode")
 
 
 def _is_str_typed_path(parts: list) -> bool:
@@ -116,10 +122,15 @@ def _is_str_typed_path(parts: list) -> bool:
     - command 段的 _STRING_COMMAND_FIELDS（port 等）；
     - <section>.env 段（如 vllm.env.HCCL_BUFFSIZE）：值经 os.environ 下发、
       schema 为 dict[str, str]，数字样值必须保持字符串。
+    - vllm_pd 的 PD 角色 env 表（vllm_pd.env_prefill / vllm_pd.env_decode）：schema 同为
+      dict[str, str]，数字样值（如 VLLM_ENGINE_READY_TIMEOUT_S = 30000）若被推断成 int，
+      PD schema 会静默拒绝该配置并退回 localhost。
     """
     if parts[-1] in _STRING_COMMAND_FIELDS:
         return True
-    return len(parts) >= 3 and parts[0] in COMMAND_SECTIONS and parts[1] == "env"
+    if len(parts) >= 3 and parts[0] in COMMAND_SECTIONS and parts[1] == "env":
+        return True
+    return len(parts) >= 3 and parts[0] == "vllm_pd" and parts[1] in _PD_ROLE_ENV_FIELDS
 
 
 # ---------------------------------------------------------------- IO
@@ -129,8 +140,24 @@ def parse_toml(path: str):
 
 
 def dump_toml(path: str, doc) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(tomlkit.dumps(doc))
+    """Publish only a complete, reparsed TOML while preserving file permissions."""
+    target = Path(path).resolve()
+    content = tomlkit.dumps(doc)
+    tomlkit.parse(content)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if temporary.read_text(encoding="utf-8") != content:
+            raise OSError("Configuration readback differs from the prepared content")
+        temporary.chmod(target.stat().st_mode & 0o777)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- mutate（纯 dict 操作）
@@ -241,6 +268,58 @@ def set_container(doc, section: str, flag: str, value: dict) -> None:
     cmd["others"] = merge_others(existing, build_others({full_flag[2:]: value}))
 
 
+def check_preparation_boundary(run_dir):
+    """Method preparation precedes experiment freezing; never patch a running experiment."""
+    root = Path(run_dir)
+    for name in ("pd_experiment.json", "baseline.json", "pd_controller.json", ".pd_dispatch/pd_controller.json"):
+        if (root / name).exists():
+            raise ValueError("Experiment already frozen or active; prepare a separate configuration and a new run")
+
+
+def prepare_speculation(doc, definition):
+    """Install an explicitly selected method; gamma remains controlled by candidate fields."""
+    if not isinstance(definition, dict) or set(definition) - {"method", "model"}:
+        raise ValueError(
+            "--prepare-speculation accepts only method and optional model; tune gamma through target_field"
+        )
+    if not isinstance(definition.get("method"), str) or not definition["method"].strip():
+        raise ValueError("--prepare-speculation requires an explicit nonempty method selected for the backend version")
+    if "model" in definition and (not isinstance(definition["model"], str) or not definition["model"].strip()):
+        raise ValueError("Speculative model must be a nonempty path when supplied")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+    from optix.serve_plan import _split_container_flags
+    import shlex
+
+    others = str((doc.get("vllm", {}).get("command") or {}).get("others") or "")
+    containers, _ = _split_container_flags(shlex.split(others))
+    previous = containers.get("--speculative-config", {})
+    if previous.get("num_speculative_tokens") not in (None, 0):
+        raise ValueError("Existing static gamma is active; migrate gamma explicitly before preparing a disabled method")
+    for key in ("method", "model"):
+        if previous.get(key) and previous[key] != definition.get(key):
+            raise ValueError(f"Existing speculative {key} conflicts with preparation; do not mix method configurations")
+    # OFF fallback also makes constructor-time command planning safe before fields arrive.
+    # A candidate's gamma overrides this fixed zero through the shared renderer.
+    set_container(doc, "vllm", "speculative-config", {**definition, "num_speculative_tokens": 0})
+
+
+def check_service_semantics(doc):
+    """Use runtime semantics for both main-framework and PD plugin fields."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+    from optix.optimizer.agentic.parameters import validate_service_parameters
+
+    pd = doc.get("vllm_pd", {})
+    if pd.get("vllm_others") or (pd.get("command") or {}).get("others"):
+        raise ValueError("PD service options belong in vllm.command.others, not vllm_pd.vllm_others/command")
+    fields = {}
+    for section in ("vllm", "vllm_pd"):
+        for field in doc.get(section, {}).get("target_field", []):
+            fields[field["name"]] = {**field, "default": field.get("value")}
+    context = {"engine": "vllm", "deployment": {"type": "pd" if pd else "single"}}
+    others = (doc.get("vllm", {}).get("command") or {}).get("others") or ""
+    validate_service_parameters(context, {}, fields=list(fields.values()), others=others)
+
+
 def upsert_target_field(doc, engine: str, updates: dict) -> str:
     """target_field 列表按 name upsert；不存在则 append（保持 [[..]] 块格式）。返回 'added'/'updated'。"""
     table = table_or_create(doc, engine)
@@ -263,7 +342,7 @@ def _iter_others(doc):
 
 def _target_field_names(doc) -> set:
     names = set()
-    for engine in ENGINES:
+    for engine in FIELD_SECTIONS:
         for f in (doc.get(engine) or {}).get("target_field") or []:
             if f.get("name"):
                 names.add(str(f["name"]))
@@ -299,7 +378,7 @@ def check_unwired_params(doc) -> list:
     for _, others in _iter_others(doc):
         refs.update(re.findall(r"\$([A-Z0-9_]+)", others))
     warnings = []
-    for engine in ENGINES:
+    for engine in FIELD_SECTIONS:
         for f in (doc.get(engine) or {}).get("target_field") or []:
             name = str(f.get("name") or "")
             if (
@@ -343,6 +422,10 @@ def validate_settings(content: str) -> tuple:
 def run_checks(content: str, doc) -> bool:
     """确定性门禁：$VAR 协议 + JSON 段 + TOML 回环 +（可选）pydantic Settings。"""
     errors = check_protocol(doc)
+    try:
+        check_service_semantics(doc)
+    except ValueError as exc:
+        errors.append(str(exc))
     warnings = check_unwired_params(doc)
     set_errors, notes = validate_settings(content)
     errors += set_errors
@@ -362,7 +445,7 @@ def run_checks(content: str, doc) -> bool:
 
 
 # ---------------------------------------------------------------- print
-def _print_sections(doc, engines=ENGINES) -> None:
+def _print_sections(doc, engines=FIELD_SECTIONS) -> None:
     print("== 写入后相关段 ==")
     for section in COMMAND_SECTIONS:
         blk = doc.get(section)
@@ -419,8 +502,8 @@ def _parse_target_field(pairs) -> tuple:
         spec[key] = coerce_deep(value)
     engine = spec.pop("engine", None)
     name = spec.pop("name", None)
-    if engine not in ENGINES:
-        raise ValueError(f"--target-field engine 应为 {'/'.join(ENGINES)}，收到 {engine!r}")
+    if engine not in FIELD_SECTIONS:
+        raise ValueError(f"--target-field engine 应为 {'/'.join(FIELD_SECTIONS)}，收到 {engine!r}")
     if not name:
         raise ValueError("--target-field 必须含 name=")
     return engine, str(name), spec
@@ -464,11 +547,22 @@ def main(argv=None) -> int:
         help="按 (engine,name) upsert 一个 target_field 块，可重复；"
         "必填 engine/name，可选 min/max/dtype/value/config_position/dtype_param",
     )
+    ap.add_argument(
+        "--prepare-speculation",
+        metavar="JSON",
+        help="Prepare explicit method/model in vllm.command.others with an OFF fallback; no method inference",
+    )
+    ap.add_argument(
+        "--run-dir", help="Planned run directory; required for --prepare-speculation before experiment freezing"
+    )
     ap.add_argument("--dry-run", action="store_true", help="只预览不写文件")
     ap.add_argument("--check-only", action="store_true", help="只校验不写，错误退出 1")
-    ap.add_argument("--check", action="store_true", help="写完后运行校验，失败退出 1")
+    ap.add_argument("--check", action="store_true", help="发布前运行校验，失败不写入并退出 1")
     ap.add_argument("--print", action="store_true", help="写完后打印相关段")
     args = ap.parse_args(argv)
+
+    if args.prepare_speculation is not None and (not args.run_dir or args.check_only):
+        ap.error("--prepare-speculation requires --run-dir and cannot be combined with --check-only")
 
     # --- 静态校验 CLI 参数 ---
     for ev in args.set_others + args.append_others:
@@ -478,7 +572,8 @@ def main(argv=None) -> int:
             return 2
 
     try:
-        doc = parse_toml(args.config)
+        original = Path(args.config).read_text(encoding="utf-8")
+        doc = tomlkit.parse(original)
     except Exception as e:  # noqa: BLE001
         print(f"✗ TOML 解析失败: {e}")
         return 1
@@ -488,6 +583,8 @@ def main(argv=None) -> int:
         return 0 if run_checks(content, doc) else 1
 
     try:
+        if args.prepare_speculation is not None:
+            check_preparation_boundary(args.run_dir)
         for kv in args.set:
             key, _, value = kv.partition("=")
             if not key:
@@ -496,6 +593,8 @@ def main(argv=None) -> int:
             # (如 vllm.command.others.speculative-config='{"method":"dflash"}')
             # → dict 经 common 序列化+key级合并进 others，永不产生畸形 JSON。
             parts = key.split(".")
+            if parts[:3] == ["vllm_pd", "command", "others"]:
+                raise ValueError("PD service options must use vllm.command.others")
             if len(parts) == 4 and parts[1] == "command" and parts[2] == "others" and parts[0] in ENGINES:
                 flag = parts[3]
                 dict_value = json.loads(value)  # 必须整体是一个 JSON object
@@ -515,6 +614,9 @@ def main(argv=None) -> int:
             engine, name, spec = _parse_target_field(pairs)
             action = upsert_target_field(doc, engine, {"name": name, **spec})
             print(f"{'✓ 更新' if action == 'updated' else '✓ 新增'} target_field: [{engine}] {name}")
+        if args.prepare_speculation is not None:
+            prepare_speculation(doc, json.loads(args.prepare_speculation))
+        check_service_semantics(doc)
     except ValueError as e:
         print(f"✗ {e}")
         return 2
@@ -540,8 +642,18 @@ def main(argv=None) -> int:
             return 0 if ok else 1
         return 0
 
-    with open(args.config, "r", encoding="utf-8") as f:
-        original = f.read()
+    if args.check and not run_checks(content, doc):
+        return 1
+    if args.prepare_speculation is not None:
+        try:
+            check_preparation_boundary(args.run_dir)
+        except ValueError as exc:
+            print(f"✗ {exc}")
+            return 2
+
+    if Path(args.config).read_text(encoding="utf-8") != original:
+        print("✗ Configuration changed during preparation; refusing to overwrite it")
+        return 2
     backup = args.config + ".bak"
     with open(backup, "w", encoding="utf-8") as f:
         f.write(original)
@@ -549,11 +661,6 @@ def main(argv=None) -> int:
     dump_toml(args.config, doc)
     print(f"✓ 已写入 {args.config}")
 
-    if args.check:
-        ok = run_checks(content, doc)
-        if args.print:
-            _print_sections(doc)
-        return 0 if ok else 1
     if args.print:
         _print_sections(doc)
     return 0

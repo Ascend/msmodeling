@@ -211,6 +211,7 @@ def main():
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--run-id", default="")
     parser.add_argument("--engine", default=None)
+    parser.add_argument("--deployment", choices=["single", "pd"], default="single")
     parser.add_argument(
         "--benchmark",
         default=None,
@@ -303,7 +304,7 @@ def main():
         parser.error(f"Cannot read config.toml: {exc}")
     engine = engine or str(config.get("framework", "vllm")).lower()
     parsed = _parse_config_toml(cfg_path, engine)
-    if not parsed.get("target_fields"):
+    if not parsed.get("target_fields") and args.deployment != "pd":
         parser.error(f"No target_field definitions for {engine} in {cfg_path}")
     source = {
         "config_toml": str(cfg_path),
@@ -311,8 +312,52 @@ def main():
         "optimizer_strategy": config.get("optimizer_strategy", "pso"),
     }
 
-    topology = load_cluster_topology(args.cluster_config or None)
+    pd_config = None
     deployment = {}
+    if args.deployment == "pd":
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+        from optix.optimizer.agentic.pd import (
+            configuration_fingerprint,
+            device_inventory,
+            load_plugin_config,
+            resource_nodes,
+        )
+
+        if engine != "vllm":
+            parser.error("PD deployment uses the vllm framework and -e vllm_pd execution engine")
+        try:
+            pd_config = load_plugin_config(cfg_path)
+            inventory = device_inventory(resource_nodes(pd_config))
+        except (ImportError, ValueError) as exc:
+            parser.error(str(exc))
+        if args.cluster_config:
+            parser.error("PD configuration uses --config-toml, not --cluster-config")
+        actual_size = len(inventory)
+        if args.world_size is not None and args.world_size != actual_size:
+            parser.error("--world-size conflicts with the PD device inventory")
+        world_size = actual_size
+        args.num_nodes = len({host for host, _ in inventory})
+        deployment = {
+            "type": "pd",
+            "config_sha256": configuration_fingerprint(cfg_path),
+            "plugin_config": pd_config.model_dump(mode="json"),
+            "device_inventory": [list(device) for device in sorted(inventory)],
+        }
+        for manifest_path in Path(args.run_dir).glob("deployment.round-*.json"):
+            manifest = read_json(manifest_path)
+            if Path(manifest["config_toml"]).resolve() == cfg_path:
+                if manifest["config_sha256"] != deployment["config_sha256"]:
+                    parser.error("PD round configuration differs from its generated manifest")
+                deployment["round_manifest"] = manifest
+                break
+        plugin_fields = [field.model_dump(mode="json") for field in pd_config.target_field]
+        names = {field["name"] for field in plugin_fields}
+        parsed["target_fields"] = plugin_fields + [
+            field for field in parsed["target_fields"] if field["name"] not in names
+        ]
+    topology = load_cluster_topology(args.cluster_config or None) if pd_config is None else {"configured": False}
     if topology["configured"]:
         if not topology["ok"]:
             parser.error(topology["error"])
@@ -397,8 +442,9 @@ def main():
     }
     # PSO preset 通道：命中 presets 目录时写入 knowledge.vendor_preset，
     # 供 apply_launch_config 应用 env/additional_config（Round 0 不建搜索空间，
-    # preset params 不进 search_space）。agent 模式不注入：vendor_preset 的唯一
-    # 消费者 apply_launch_config 是 PSO 专用，agent 模式没有消费方。
+    # preset params 不进 search_space）。agent 模式不注入。
+    if pd_config is not None:
+        context["constraints"] = {"world_size": world_size, "expressions": []}
     if source["optimizer_strategy"] != "agent":
         context = _inject_vendor_preset(context)
     # --- Append remaining fields ------------------------------------------
@@ -429,6 +475,27 @@ def main():
     if deployment:
         context["deployment"] = deployment
     # -----------------------------------------------------------------------
+    if pd_config is not None:
+        experiment_path = Path(args.run_dir) / "pd_experiment.json"
+        if experiment_path.exists():
+            original = read_json(experiment_path)
+            allowed = {tuple(device) for device in original["deployment"]["device_inventory"]}
+            if not inventory <= allowed:
+                parser.error("PD deployment exceeds the experiment device inventory")
+            for key in ("model", "benchmark", "benchmark_spec", "model_info"):
+                if context.get(key) != original.get(key):
+                    parser.error(f"PD {key} differs from the experiment; start a separate run")
+            previous_path = Path(args.run_dir) / "context.json"
+            if previous_path.exists():
+                previous = read_json(previous_path)
+                for key in ("search_space", "target"):
+                    if key in previous:
+                        context[key] = previous[key]
+                replay_space = deployment.get("round_manifest", {}).get("replay_search_space")
+                if replay_space is not None:
+                    context["search_space"] = replay_space
+        else:
+            write_json(experiment_path, context)
     write_json(Path(args.run_dir) / "context.json", context)
 
 

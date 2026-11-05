@@ -311,7 +311,7 @@ def _probe_supported_flags(engine: str) -> set[str]:
     return flags
 
 
-def check_run_entry_flags(fields: list[dict], engine: str) -> list[str]:
+def check_run_entry_flags(fields: list[dict], engine: str, *, pd: bool = False) -> list[str]:
     """config_position=run 的空间条目（变量与常量都可能进最终命令）映射出的
     --flag 必须在引擎运行时支持的 CLI 列表里；探测不到引擎二进制时跳过。
     """
@@ -326,7 +326,14 @@ def check_run_entry_flags(fields: list[dict], engine: str) -> list[str]:
     for item in fields:
         if item.get("config_position") != "run":
             continue
-        flag = param_to_cli_flag(item["name"])
+        name = item["name"]
+        if pd:
+            from optix.optimizer.agentic.pd import split_role, TOPOLOGY_FIELDS
+
+            name, _ = split_role(name)
+            if name in TOPOLOGY_FIELDS:
+                continue
+        flag = param_to_cli_flag(name)
         if flag not in supported:
             errs.append(f"{item['name']}: --{flag} 不在当前 {engine} 运行时支持的 CLI 列表里")
     return errs
@@ -450,7 +457,12 @@ def validate_round(data: dict, run_dir: Path, round_no: int) -> None:
                 raise ValueError(f"{base['name']}: execution search_space must pin choices/default to TOML constant")
         elif item.get("default") != constant or item.get("min") != constant or item.get("max") != constant:
             raise ValueError(f"{base['name']}: execution search_space must pin min/max/default to TOML constant")
-    flag_errors = check_run_entry_flags(fields, str(context.get("engine") or "vllm"))
+    engine = str(context.get("engine") or "vllm")
+    flag_errors = (
+        check_run_entry_flags(fields, engine, pd=True)
+        if (context.get("deployment") or {}).get("type") == "pd"
+        else check_run_entry_flags(fields, engine)
+    )
     if flag_errors:
         raise ValueError("; ".join(flag_errors))
     errors = [
@@ -513,6 +525,16 @@ def validate_round(data: dict, run_dir: Path, round_no: int) -> None:
             raise ValueError("; ".join(errors))
         resolved = strategy._params_to_target_field(validation["params"], target_fields, context)
         position = field_to_param(tuple(resolved))
+        if (context.get("deployment") or {}).get("type") == "pd":
+            from types import SimpleNamespace
+            from optix.optimizer.agentic.pd import load_plugin_config
+            from optix.optimizer.pd_adapter import prepare_pd_fields
+
+            simulator = SimpleNamespace(
+                config=load_plugin_config(context["source"]["config_toml"]),
+                vllm_others=section.get("command", {}).get("others", ""),
+            )
+            prepare_pd_fields(simulator, tuple(resolved))
         if (context.get("deployment") or {}).get("type") == "multihost":
             from types import SimpleNamespace
             from common import load_cluster_topology

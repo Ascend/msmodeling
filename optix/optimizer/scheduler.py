@@ -103,6 +103,10 @@ class Scheduler:
         self.backup_iter = 0
         self.simulate_run_info = None
         self.simulate_launch_plan = {}
+        self.pd_agent_context = None
+        self.pd_archive_root = Path(".")
+        self.pd_trial_purpose = "search"
+        self._pd_budget_deadline = None
         self.performance_index = None
         self._error_info = None
         self.last_outcome: Optional[RunOutcome] = None
@@ -255,6 +259,11 @@ class Scheduler:
         return None
 
     def _new_case_id(self) -> str:
+        self._pd_budget_deadline = None
+        if getattr(self, "engine", None) == "vllm_pd":
+            self.simulate_launch_plan = {}
+            self.simulator._optix_pd_launch_plan = {}
+            self._pd_launch_sequence = 0
         allocator = getattr(self.data_storage, "next_case_id", None)
         if callable(allocator):
             case_id = allocator()
@@ -451,10 +460,32 @@ class Scheduler:
                 self.simulator.bak_path = self.current_back_path
                 self.benchmark.bak_path = self.current_back_path
 
+    def _check_workflow_time(self):
+        root = getattr(self, "pd_workflow_root", None)
+        if root is None and self.engine == "vllm_pd" and self.pd_agent_context is not None:
+            root = self.pd_archive_root.parent
+        if root is not None:
+            from .agentic.pd_state import (
+                workflow_seconds_remaining,
+                WorkflowBudgetExceeded,
+            )
+
+            key = (str(root), self.pd_trial_purpose)
+            cached = self._pd_budget_deadline
+            if cached is not None and cached[0] == key:
+                seconds = cached[1] - time.monotonic()
+            else:
+                seconds, safe = workflow_seconds_remaining(root, self.pd_trial_purpose, cacheable=True)
+                if seconds is not None and safe:
+                    self._pd_budget_deadline = (key, time.monotonic() + seconds)
+            if seconds is not None and seconds <= 0:
+                raise WorkflowBudgetExceeded("PD workflow time budget exhausted")
+
     def wait_simulate(self):
         start_time = time.time()
         for _ in range(self.wait_time):
             time.sleep(1)
+            self._check_workflow_time()
             elapsed = time.time() - start_time
             context = self._create_check_context(elapsed)
             result = self.service_checks.run(ServiceHookPoint.STARTUP_POLLING, context)
@@ -505,12 +536,42 @@ class Scheduler:
         )
 
     def run_simulate(self, params: np.ndarray, params_field: tuple[OptimizerConfigField]):
+        self._pd_budget_deadline = None
         self.simulate_launch_plan = {}
+        if self.engine == "vllm":
+            from ..serve_plan import validate_service_positions
+
+            validate_service_positions(self.simulate_run_info or ())
         if isinstance(self.benchmark, SupportsPrepare):
             self.benchmark.prepare()
         logger.debug("starting simulator subprocess")
         if self.engine == MULTIHOST_INFER_ENGINE:
             self.simulate_launch_plan = run_multihost_trial(self.simulator, tuple(self.simulate_run_info))
+        elif self.engine == "vllm_pd" and getattr(self, "pd_agent_context", None) is not None:
+            from .pd_adapter import run_pd_trial
+            from .agentic.pd_execution import trial_identity
+
+            self._pd_launch_sequence = getattr(self, "_pd_launch_sequence", 0) + 1
+            identity = trial_identity(
+                self.pd_agent_context,
+                self.pd_trial_purpose,
+                self.current_case_id,
+                getattr(self, "pd_candidate_identity", None),
+                launch_attempt=self._pd_launch_sequence,
+            )
+
+            self.simulate_launch_plan = {}
+            try:
+                self.simulate_launch_plan = run_pd_trial(
+                    self.simulator,
+                    tuple(self.simulate_run_info),
+                    self.pd_archive_root / identity["archive_id"],
+                    self.pd_agent_context,
+                    purpose=getattr(self, "pd_trial_purpose", "search"),
+                    identity=identity,
+                )
+            finally:
+                self.simulate_launch_plan = getattr(self.simulator, "_optix_pd_launch_plan", {})
         else:
             self.simulator.run(tuple(self.simulate_run_info))
         logger.debug("waiting for simulator startup")
@@ -548,6 +609,7 @@ class Scheduler:
     def _monitor_benchmark_only(self) -> None:
         start_time = time.time()
         for _ in range(get_settings().particles_time_out):
+            self._check_workflow_time()
             elapsed = time.time() - start_time
             context = self._create_check_context(elapsed)
             benchmark_result = self.benchmark_checks.run(BenchmarkHookPoint.RUNTIME_MONITOR, context)
@@ -568,6 +630,7 @@ class Scheduler:
 
         start_time = time.time()
         for _ in range(get_settings().particles_time_out):
+            self._check_workflow_time()
             elapsed = time.time() - start_time
             context = self._create_check_context(elapsed)
             service_result = self.service_checks.run(ServiceHookPoint.RUNTIME_MONITOR, context)
@@ -650,6 +713,16 @@ class Scheduler:
     def stop_target_server(self, del_log: bool = False):
         self.simulator.stop(del_log)
         self.benchmark.stop(del_log)
+        if self.engine == "vllm_pd" and getattr(self, "pd_agent_context", None) is not None:
+            import json
+            from .pd_adapter import verify_saved_shutdown
+
+            plan = getattr(self.simulator, "_optix_pd_launch_plan", {})
+            if plan.get("nodes"):
+                verify_saved_shutdown(plan)
+                archive = self.simulator._optix_pd_archive
+                (archive / "deployment.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+                (self.pd_archive_root / "latest.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
 
     def _persist_trial_log(self, candidate_id: str, run_dir):
         """Copy per-trial service/benchmark logs before del_log cleanup (issue 2.8)."""
@@ -697,6 +770,33 @@ class Scheduler:
             if not self.first_duration:
                 self.first_duration = duration
         self._finalize_report_only_time_saving(self.performance_index, duration)
+        if self.engine == "vllm_pd" and getattr(self, "pd_agent_context", None) is not None:
+            import json
+            from .agentic.pd_state import search_summary
+            from math import isfinite
+
+            plan = getattr(self.simulator, "_optix_pd_launch_plan", {})
+            if plan:
+                from .agentic.pd_execution import validate_result_identity
+
+                validate_result_identity(plan, self.current_case_id, candidate_id, self.simulator._optix_pd_archive)
+                plan.update(
+                    finished_at=time.time(),
+                    outcome="failed"
+                    if self.error_info
+                    or (plan.get("purpose") == "search" and not isfinite(float(kwargs.get("fitness", float("inf")))))
+                    else "measured",
+                    error=str(self.error_info) if self.error_info else None,
+                    fitness=kwargs.get("fitness"),
+                    candidate_id=candidate_id if candidate_id is not None else plan.get("candidate_id"),
+                    duration=duration,
+                )
+                archive = self.simulator._optix_pd_archive
+                (archive / "deployment.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+                (self.pd_archive_root.parent / "pd_search_summary.json").write_text(
+                    json.dumps(search_summary(self.pd_archive_root.parent), indent=2),
+                    encoding="utf-8",
+                )
         real_evaluation = True
         if REAL_EVALUATION in kwargs:
             real_evaluation = kwargs.pop(REAL_EVALUATION)
@@ -783,6 +883,7 @@ class Scheduler:
         and exposed as the evaluation result.
         """
         for pass_number in range(2, self.benchmark_run_count + 1):
+            self._check_workflow_time()
             self.benchmark.stop()
             self.benchmark_pass = pass_number
             is_final_pass = pass_number == self.benchmark_run_count

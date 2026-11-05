@@ -401,13 +401,18 @@ class CustomProcess:
         logger.debug("subprocess Popen cwd={} env_keys={}", self.work_path, len(self.env))
         self.env.setdefault("PYTHONUNBUFFERED", "1")
         try:
+            phase_launch = getattr(self, "_optix_phase_launch", None)
+            command = phase_launch.prepare(self.command) if phase_launch else self.command
             self.process = subprocess.Popen(
-                self.command,
+                command,
                 env=self.env,
                 stdout=self.run_log_fp,
                 stderr=subprocess.STDOUT,
                 cwd=self.work_path,
+                **({"start_new_session": True} if phase_launch else {}),
             )
+            if phase_launch:
+                phase_launch.started(self.process)
             self.process_stage = ProcessState(stage=Stage.start)
         except OSError as e:
             close_file_fp(self.run_log_fp)

@@ -77,6 +77,8 @@ _JSON_SUBKEY_MAP = {
     "num_speculative_tokens": ("speculative-config", "num_speculative_tokens"),
     "speculative_enforce_eager": ("speculative-config", "enforce_eager"),
     # vLLM Ascend MoE 开关：官方只支持经 --additional-config 下发
+    "enable_cpu_binding": ("additional-config", "enable_cpu_binding"),
+    "recompute_scheduler_enable": ("additional-config", "recompute_scheduler_enable"),
     "enable_shared_expert_dp": ("additional-config", "enable_shared_expert_dp"),
     "multistream_overlap_shared_expert": ("additional-config", "multistream_overlap_shared_expert"),
 }
@@ -171,82 +173,45 @@ def render_serve_command(
     params, _ = _split_export_params(params, parameter_metadata)
     cmd = ["vllm", "serve", model, "--served-model-name", served_name, "--host", str(host), "--port", str(port)]
 
-    # 1. Merge container flags: fixed(others) dict is the base, search sub-keys
-    #    override (same precedence as custom_command). Plain fixed flags stay
-    #    for the dedupe pass at the end.
-    containers: dict = {}
-    plain: list = []
-    fixed_plain: list = []
+    import sys
+    from types import SimpleNamespace
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+    from optix.serve_plan import render_serve_flags
+
+    tokens = []
     for entry in fixed_flags or []:
-        flag = entry.get("flag", "")
-        value = entry.get("value")
-        cname = flag.lstrip("-")
-        if cname in _CONTAINER_FLAGS and isinstance(value, str):
-            try:
-                import json as _json
+        tokens.append(entry["flag"])
+        if entry.get("value") is not None:
+            tokens.append(str(entry["value"]))
+    fields = []
+    for name, value in params.items():
+        if isinstance(value, (dict, list)):
+            import json
 
-                containers.setdefault(cname, {}).update(_json.loads(value))
-            except (ValueError, TypeError):
-                fixed_plain.append(entry)  # 畸形容器值保持原样输出
-        else:
-            fixed_plain.append(entry)
+            value = json.dumps(value)
+        fields.append(SimpleNamespace(name=name, value=value))
+    return cmd + render_serve_flags(fields, shlex.join(tokens))
 
-    for name, value in (params or {}).items():
-        if name.lower() in _BENCHMARK_ONLY:
-            continue
-        if value is None or value == "":
-            continue
-        if name in _JSON_SUBKEY_MAP:
-            flag, key = _JSON_SUBKEY_MAP[name]
-            # 若 value 是 JSON 字符串（如 "[1,6,12]"）解析回数组
-            if isinstance(value, str):
-                try:
-                    import json as _json
 
-                    value = _json.loads(value)
-                except (ValueError, TypeError):
-                    pass
-            containers.setdefault(flag, {})[key] = value
-        else:
-            plain.append((name, value))
+def _check_measured_speculation(script, params, role=None):
+    """A historical ineffective candidate cannot become a valid export by repair."""
+    import sys
 
-    # Container atomicity: num_speculative_tokens==0 means
-    # speculation OFF -> drop the whole container; a merged speculative-config
-    # without method/model is an orphan -> drop too (legal for every model).
-    for flag, sub in list(containers.items()):
-        if flag == "speculative-config":
-            ns = sub.get("num_speculative_tokens")
-            if ns == 0 or not (sub.get("method") or sub.get("model")):
-                containers.pop(flag, None)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+    from optix.serve_plan import validate_measured_speculation
 
-    for flag, sub in sorted(containers.items()):
-        import json as _json
+    expected = params.get("num_speculative_tokens")
+    container = params.get("speculative_config")
+    if role:
+        expected = params.get("num_speculative_tokens_" + role, expected)
+        container = params.get("speculative_config_" + role, container)
+    if container is not None:
+        import json
 
-        cmd.extend([f"--{flag}", _json.dumps(sub, ensure_ascii=False)])
-
-    # 2. Plain search flags
-    for name, value in plain:
-        flag = f"--{_param_to_flag(name)}"
-        if isinstance(value, bool):
-            if value:
-                cmd.append(flag)
-        else:
-            cmd.extend([flag, str(value)])
-
-    # 3. Remaining fixed config.toml others flags (dedupe vs search)
-    search_flag_names = {f"--{_param_to_flag(n)}" for n, _ in plain}
-    search_flag_names.update(f"--{f}" for f in containers)
-    for entry in fixed_plain:
-        flag = entry.get("flag", "")
-        value = entry.get("value")
-        if flag in search_flag_names:
-            continue
-        if value is not None:
-            cmd.extend([flag, str(value)])
-        else:
-            cmd.append(flag)
-
-    return cmd
+        container = json.loads(container) if isinstance(container, str) else container
+        expected = expected if expected is not None else container.get("num_speculative_tokens")
+    validate_measured_speculation(script, expected)
 
 
 def _export_multihost_snapshot(run_dir: Path, context: dict, best: dict, parameter_metadata: dict) -> None:
@@ -262,6 +227,8 @@ def _export_multihost_snapshot(run_dir: Path, context: dict, best: dict, paramet
         or not all(isinstance(s, str) and s.strip() for s in plan.values())
     ):
         raise ValueError("Winning multihost trial has no complete measured launch scripts; rerun the trial")
+    for script in plan.values():
+        _check_measured_speculation(script, best.get("params", {}))
     directory = run_dir / "best_deployment"
     directory.mkdir(exist_ok=True)
     for name, script in plan.items():
@@ -346,6 +313,131 @@ def _is_optimization_trial(trial: dict, types: dict | None, candidates_path: Pat
     return kind == "optimization"
 
 
+def _export_pd_snapshot(run_dir: Path, context: dict, best: dict, parameter_metadata: dict) -> None:
+    """Export the complete winning deployment, without importing the runtime plugin."""
+    import hashlib
+
+    plan = (best.get("metadata") or {}).get("launch_plan") or {}
+    files = plan.get("files")
+    nodes = plan.get("nodes")
+    if files is None and plan.get("archive_id"):
+        archive_id = plan["archive_id"]
+        if not isinstance(archive_id, str) or Path(archive_id).name != archive_id or archive_id in {".", ".."}:
+            raise ValueError("Invalid PD archive identity")
+        archive_root = (run_dir / "pd_deployments").resolve()
+        archive = (archive_root / archive_id / "deployment.json").resolve()
+        if not archive.is_relative_to(archive_root):
+            raise ValueError("PD archive escapes deployment directory")
+        recorded = read_json(archive)
+        for key in ("archive_id", "candidate_id", "case_id", "config_sha256", "layout"):
+            if recorded.get(key) != plan.get(key):
+                raise ValueError(f"PD archive {key} does not match winning trial")
+        files = recorded.get("files")
+    if not isinstance(files, dict) or not isinstance(nodes, list) or not nodes:
+        raise ValueError("Winning PD trial has no measured deployment snapshot")
+    if {node.get("role") for node in nodes} != {"prefill", "decode", "proxy"}:
+        raise ValueError("Winning PD snapshot must include P, D and proxy nodes")
+    dependencies = {"load_balance_proxy_server_example.py", "load_balance_proxy_layerwise_server_example.py"}
+    required = dependencies | {node.get("script", "") for node in nodes}
+    if not required <= set(files):
+        raise ValueError("Winning PD snapshot is missing node scripts or proxy dependencies")
+    for name, content in files.items():
+        if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\\" in name:
+            raise ValueError("Unsafe PD deployment artifact name")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Empty PD deployment artifact")
+    if any("<%" in files[node["script"]] for node in nodes):
+        raise ValueError("PD node scripts contain unresolved template tags")
+    config_text = plan.get("config_toml")
+    expected = (context.get("deployment") or {}).get("config_sha256")
+    if not isinstance(config_text, str) or hashlib.sha256(config_text.encode()).hexdigest() != expected:
+        raise ValueError("Winning PD configuration is missing or does not match its context")
+    verification = {"status": "pending"}
+    summary_path = run_dir / "pd_search_summary.json"
+    if summary_path.exists():
+        candidate_verification = read_json(summary_path).get("verification", {})
+        if (
+            candidate_verification.get("status") == "verified"
+            and candidate_verification.get("winner_config_sha256") == expected
+            and candidate_verification.get("winner_params") == best.get("params")
+            and candidate_verification.get("benchmark_spec") == context.get("benchmark_spec")
+        ):
+            verification = candidate_verification
+    for node in nodes:
+        if node.get("role") in {"prefill", "decode"}:
+            _check_measured_speculation(files[node["script"]], best.get("params", {}), node["role"])
+    directory = run_dir / "best_deployment"
+    if directory.is_symlink():
+        raise ValueError("Deployment output directory must not be a symlink")
+    directory.mkdir(exist_ok=True)
+    # The plugin's generic guide describes a different output directory and
+    # benchmark. Generate instructions for this archived deployment instead.
+    export_files = {name: content for name, content in files.items() if name != "pd-result-reproduction.md"}
+    for name, content in export_files.items():
+        target = directory / name
+        if target.is_symlink():
+            raise ValueError("Deployment output file must not be a symlink")
+        target.write_text(content, encoding="utf-8")
+        if name.endswith(".sh"):
+            target.chmod(0o755)
+    target_config = directory / "config.toml"
+    if target_config.is_symlink():
+        raise ValueError("Deployment configuration output must not be a symlink")
+    target_config.write_text(config_text, encoding="utf-8")
+    readme = directory / "README.md"
+    if readme.is_symlink():
+        raise ValueError("Deployment README must not be a symlink")
+    lines = [
+        "# PD 部署说明",
+        "",
+        "以下节点与脚本来自胜出 trial 的部署快照。将所列脚本及依赖复制到各节点的目标目录。",
+        "",
+        "| 角色 | 主机 | 端口 | 脚本 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for node in nodes:
+        lines.append(
+            f"| {node.get('role')} | {node.get('ssh_ip', node.get('node_config', {}).get('ssh_ip'))} | {node.get('port')} | {node.get('script')} |"
+        )
+    lines.extend(
+        [
+            "",
+            f"目标目录：{plan['remote_dir']}",
+            "",
+            "按节点执行对应 P、D 脚本并确认服务就绪，再启动 proxy 脚本。",
+            "停止及健康检查请参照归档的 stop_pd_process.sh、check_pd_process.sh，执行前检查脚本中的节点和路径。",
+            "复测使用原实验记录的 benchmark 和 workload；请参照该次实验配置执行，基线和胜出方案均应独立复测。",
+            "",
+        ]
+    )
+    readme.write_text("\n".join(lines), encoding="utf-8")
+    manifest = {
+        "deployment": "pd",
+        "source_ref": best["source_ref"],
+        "config_sha256": expected,
+        "config": "best_deployment/config.toml",
+        "layout": plan["layout"],
+        "nodes": nodes,
+        "files": {name: "best_deployment/" + name for name in sorted(export_files)},
+        "remote_dir": plan["remote_dir"],
+        "verification": verification,
+        "instructions": "请参阅 best_deployment/README.md，按节点复制文件、启动并复测。",
+    }
+    write_json(run_dir / "serve_command_pd.json", manifest)
+    write_json(
+        run_dir / "optimizer_config_handoff.json",
+        {
+            "source": "optix-assistant",
+            "recommended_params": best.get("params", {}),
+            "parameter_metadata": parameter_metadata,
+            "fitness": best["fitness"],
+            "performance": best.get("performance"),
+            "deployment": manifest,
+            "selection": best["selection_policy"],
+        },
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export the best agent optimizer result.")
     parser.add_argument("--run-dir", required=True)
@@ -373,6 +465,11 @@ def main():
                     trials.append(trial)
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         parser.exit(1, f"Cannot classify trial results: {exc}\n")
+    trials = [
+        trial
+        for trial in trials
+        if ((trial.get("metadata") or {}).get("deployment_proposal") or {}).get("purpose", "search") == "search"
+    ]
     if not trials:
         raise SystemExit(
             "No successful optimization trial results found "
@@ -407,6 +504,8 @@ def main():
             "（老 run 无按轮归档，导出使用的是当前 context，可能与获胜轮定义不一致）。",
             file=_sys.stderr,
         )
+        if (read_json(fallback).get("deployment") or {}).get("type") == "pd":
+            parser.exit(1, "PD export requires the winning round context archive\n")
         context_path = fallback
     try:
         context = read_json(context_path)
@@ -415,6 +514,13 @@ def main():
         parser.exit(1, f"Cannot load winning context {context_path.name}: {exc}\n")
     best["trial_count"] = len(trials)
     best["round_count"] = len(round_numbers)
+    if (context.get("deployment") or {}).get("type") == "pd":
+        try:
+            _export_pd_snapshot(run_dir, context, best, parameter_metadata)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            parser.exit(1, f"Cannot export PD snapshot: {exc}\n")
+        write_json(run_dir / "best_result.json", best)
+        return
     if (context.get("deployment") or {}).get("type") == "multihost":
         try:
             _export_multihost_snapshot(run_dir, context, best, parameter_metadata)

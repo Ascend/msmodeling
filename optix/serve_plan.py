@@ -6,6 +6,7 @@ models nor a live vLLM installation. Planning never changes trial parameters.
 
 import json
 import shlex
+import math
 
 MAX_REQUEST_NUM = 1e6
 
@@ -36,7 +37,16 @@ JSON_SUBKEY_MAP = {
     "speculative_enforce_eager": ("speculative-config", "enforce_eager"),
     # vLLM Ascend MoE 开关：官方只支持经 --additional-config 下发
     "enable_shared_expert_dp": ("additional-config", "enable_shared_expert_dp"),
-    "multistream_overlap_shared_expert": ("additional-config", "multistream_overlap_shared_expert"),
+    # CPU 亲和绑定：官方 PD 案例 P/D 两侧都带（additional-config 子键，双侧同值 → 走共享容器合并）
+    "enable_cpu_binding": ("additional-config", "enable_cpu_binding"),
+    "multistream_overlap_shared_expert": (
+        "additional-config",
+        "multistream_overlap_shared_expert",
+    ),
+    # PD 解码侧调度器保活开关：官方 PD 案例只在 D 节点经 --additional-config 下发
+    # （P 节点 kv_producer 侧被忽略并告警改回 false），因此按角色后缀 target_field
+    # （recompute_scheduler_enable_decode）承载，不能写进 P/D 共享的 others。
+    "recompute_scheduler_enable": ("additional-config", "recompute_scheduler_enable"),
 }
 
 #: Benchmark-only env fields consumed by the benchmark command's
@@ -107,7 +117,11 @@ def _field_to_cli_flag(name: str, value) -> list[str]:
 #: search-side value (e.g. num_speculative_tokens) in favour of the `others` dict.
 #: MUST list every container used by JSON_SUBKEY_MAP, otherwise the sub-key renders as
 #: a duplicate flag and `_dedupe_plain_flags` silently keeps only the last dict.
-CONTAINER_FLAGS = ("--speculative-config", "--compilation-config", "--additional-config")
+CONTAINER_FLAGS = (
+    "--speculative-config",
+    "--compilation-config",
+    "--additional-config",
+)
 
 
 def _split_container_flags(flags: list) -> tuple[dict, list]:
@@ -124,13 +138,18 @@ def _split_container_flags(flags: list) -> tuple[dict, list]:
     i = 0
     while i < len(flags):
         token = flags[i]
-        if token in CONTAINER_FLAGS and i + 1 < len(flags):
+        option, separator, inline = token.partition("=")
+        option = option.replace("_", "-")
+        if option in CONTAINER_FLAGS:
+            raw = inline if separator else flags[i + 1] if i + 1 < len(flags) else None
             try:
-                containers.setdefault(token, {}).update(json.loads(flags[i + 1]))
-            except (ValueError, TypeError):
-                # malformed container value — keep as-is
-                plain.extend([token, flags[i + 1]])
-            i += 2
+                value = json.loads(raw)
+                if not isinstance(value, dict):
+                    raise ValueError("expected a JSON object")
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"{option} requires a valid JSON object") from exc
+            containers.setdefault(option, {}).update(value)
+            i += 1 if separator else 2
             continue
         plain.append(token)
         i += 1
@@ -167,6 +186,57 @@ def _dedupe_plain_flags(flags: list) -> list:
     return result
 
 
+def validate_service_positions(fields):
+    """Known vLLM service options must reach CLI/JSON, never an inert environment variable."""
+    for field in fields:
+        name = field.name.removesuffix("_prefill").removesuffix("_decode").lower()
+        if getattr(field, "config_position", "run") == "env" and (
+            name in JSON_SUBKEY_MAP or name in {"speculative_config", "gpu_memory_utilization"}
+        ):
+            raise ValueError(f"{field.name}: service configuration requires config_position=run, not env")
+
+
+def _speculative_token_count(count):
+    if count is None:
+        return None
+    try:
+        number = float(count)
+        if isinstance(count, bool) or not math.isfinite(number) or number < 0 or not number.is_integer():
+            raise ValueError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("speculative-config num_speculative_tokens must be a nonnegative integer") from exc
+    return int(number)
+
+
+def validate_speculative_config(config: dict) -> bool:
+    """Return whether speculation is enabled; reject incomplete intent, never drop it."""
+    if _speculative_token_count(config.get("num_speculative_tokens")) == 0:
+        return False
+    if not any(isinstance(config.get(key), str) and config[key].strip() for key in ("method", "model")):
+        raise ValueError(
+            "speculative-config requires method/model; prepare the method configuration before enabling positive num_speculative_tokens"
+        )
+    return True
+
+
+def validate_measured_speculation(script: str, expected) -> None:
+    """Check archived command evidence without repairing or rewriting it."""
+    if expected is None:
+        return
+    expected = _speculative_token_count(expected)
+    tokens = shlex.split(script, comments=True)
+    containers, _ = _split_container_flags(tokens)
+    config = containers.get("--speculative-config")
+    enabled = config is not None and validate_speculative_config(config)
+    if float(expected) > 0:
+        if not enabled or float(config.get("num_speculative_tokens", -1)) != float(expected):
+            raise ValueError(
+                "Measured script does not match requested num_speculative_tokens; rerun with a complete speculative-config"
+            )
+    elif enabled:
+        raise ValueError("Measured script enables speculation although the candidate requested OFF")
+
+
 def render_serve_flags(fields=(), others: str = "", *, base_flags: list | None = None) -> list[str]:
     """Render run-position candidate fields plus ``others`` into a deduped serve argv tail.
 
@@ -181,12 +251,16 @@ def render_serve_flags(fields=(), others: str = "", *, base_flags: list | None =
     override (e.g. a legacy env-var → flag mapping kept for back-compat); they
     are prepended to the search flags so the dedupe keeps the search value.
     """
+    fields = tuple(fields or ())
+    validate_service_positions(fields)
     search_flags: list = list(base_flags or [])
     for field in fields or ():
         name = getattr(field, "name", "")
         value = getattr(field, "value", None)
         if not name:
             continue
+        if name.endswith(("_prefill", "_decode")):
+            raise ValueError(f"{name}: role suffix must be resolved by the PD adapter before serve planning")
         if name.upper() in BENCHMARK_ONLY_FIELDS | TOPOLOGY_ONLY_FIELDS:
             # CONCURRENCY / REQUESTRATE feed the benchmark process via
             # $CONCURRENCY / $REQUESTRATE env placeholders; they are not
@@ -208,17 +282,8 @@ def render_serve_flags(fields=(), others: str = "", *, base_flags: list | None =
     for flag in sorted(set(others_containers) | set(search_containers)):
         merged = dict(others_containers.get(flag, {}))
         merged.update(search_containers.get(flag, {}))
-        if flag == "--speculative-config":
-            # vLLM SpeculativeConfig contract: the container is atomic —
-            # method/model and num_speculative_tokens must coexist. A search
-            # value of num_speculative_tokens==0 means "speculation OFF"
-            # (O2b off-option): drop the whole container so the command has
-            # no speculative-config at all (legal for every model). A merged
-            # dict without method/model is an orphan container the assembly
-            # layer should have prevented; skip it rather than crash vLLM serve.
-            ns = merged.get("num_speculative_tokens")
-            if ns == 0 or not (merged.get("method") or merged.get("model")):
-                continue
+        if flag == "--speculative-config" and not validate_speculative_config(merged):
+            continue  # Explicit gamma=0 is the only supported disable operation.
         rendered.extend([flag, json.dumps(merged)])
 
     # Plain flags: dedupe with the search-side value winning over `others`

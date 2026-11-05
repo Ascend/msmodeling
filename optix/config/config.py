@@ -65,7 +65,7 @@ class PerformanceConfig(BaseModel):
     time_per_output_token: MetricAlgorithm = MetricAlgorithm(metric="TPOT", algorithm="average")
 
 
-dtype_func = {"int": int, "float": float, "str": str}
+dtype_func = {"int": int, "float": float, "str": str, "bool": bool}
 
 
 class ErrorSeverity(Enum):

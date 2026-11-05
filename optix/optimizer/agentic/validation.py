@@ -627,6 +627,10 @@ def validate_candidate(context: Dict[str, Any], candidate: Dict[str, Any]) -> Di
         errors.append("Topology facts belong in context.hardware, not search_space")
     try:
         validate_topology_snapshot(context)
+        if (context.get("deployment") or {}).get("type") == "pd":
+            from .pd import validate_snapshot
+
+            validate_snapshot(context)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         errors.append(str(exc))
 
@@ -723,9 +727,38 @@ def validate_candidate(context: Dict[str, Any], candidate: Dict[str, Any]) -> Di
             errors.append(f"Constraint failed: {expr.replace('$', '')} ({exc})")
 
     # 6. Combo safety checks
-    combo_errors, combo_warnings = check_combo_safety(full_params, context)
+    if (context.get("deployment") or {}).get("type") == "pd":
+        from .pd import merge_role_params, validate_resources
+
+        try:
+            validate_resources(context["deployment"]["plugin_config"], full_params)
+            manifest = context["deployment"].get("round_manifest")
+            if manifest:
+                if candidate.get("candidate_id", candidate.get("id")) != manifest["candidate_id"]:
+                    errors.append("PD candidate does not match its generated deployment manifest")
+                for name, value in manifest["params"].items():
+                    if name not in full_params or not _values_equal(full_params[name], value):
+                        errors.append(f"PD parameter {name} changed after deployment configuration generation")
+        except (ValueError, KeyError, TypeError) as exc:
+            errors.append(str(exc))
+        combo_errors, combo_warnings = [], []
+        for role in ("prefill", "decode"):
+            role_params = merge_role_params(full_params, role)
+            role_errors, role_warnings = check_combo_safety(role_params, context)
+            combo_errors.extend(f"{role}: {error}" for error in role_errors)
+            combo_warnings.extend(f"{role}: {warning}" for warning in role_warnings)
+    else:
+        combo_errors, combo_warnings = check_combo_safety(full_params, context)
     errors.extend(combo_errors)
     warnings.extend(combo_warnings)
+
+    # Semantic service validation uses the same planner as runtime launch.
+    from .parameters import validate_service_parameters
+
+    try:
+        validate_service_parameters(context, full_params)
+    except (OSError, ValueError, TypeError) as exc:
+        errors.append(str(exc))
 
     # 7. Runtime CLI support check — only candidate-explicit params
     supported_flags = context.get("_supported_cli_flags")
@@ -734,7 +767,15 @@ def validate_candidate(context: Dict[str, Any], candidate: Dict[str, Any]) -> Di
             value = params.get(name)
             if value is None or value == "":
                 continue
-            flag = _param_to_cli_flag(name)
+            flag_name = name
+            if (context.get("deployment") or {}).get("type") == "pd":
+                from .pd import split_role, TOPOLOGY_FIELDS
+
+                flag_name, _ = split_role(name)
+                item = schema.get(name, {})
+                if item.get("config_position", "run") != "run" or flag_name in TOPOLOGY_FIELDS:
+                    continue
+            flag = _param_to_cli_flag(flag_name)
             if flag not in supported_flags:
                 errors.append(
                     f"{name}: --{flag} is not supported by the current {context.get('engine', 'vllm')} runtime"

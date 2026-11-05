@@ -90,6 +90,25 @@ def test_moe_switches_render_into_additional_config():
     assert "--seed" in argv
 
 
+def test_additional_config_search_fields_merge_into_one_container():
+    module = load_module()
+    argv = module.render_serve_command(
+        "model-path",
+        "served",
+        "127.0.0.1",
+        "8000",
+        params={"enable_cpu_binding": False, "recompute_scheduler_enable": True},
+        fixed_flags=[{"flag": "--additional-config", "value": '{"enable_cpu_binding": true, "keep": 7}'}],
+    )
+    assert "--enable-cpu-binding" not in argv
+    assert "--recompute-scheduler-enable" not in argv
+    assert _container_value(argv, "--additional-config") == {
+        "enable_cpu_binding": False,
+        "recompute_scheduler_enable": True,
+        "keep": 7,
+    }
+
+
 def test_speculative_container_merge_and_atomicity():
     # 既有语义回归：固定底座 method/model + 搜索侧 num_speculative_tokens 合并；
     # num_speculative_tokens==0 整体丢弃投机容器。

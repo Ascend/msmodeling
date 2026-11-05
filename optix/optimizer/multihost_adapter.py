@@ -8,7 +8,13 @@ from loguru import logger
 
 from ..config.config import OptimizerConfigField
 from .agentic.topology import validate_parallel_placement
-from ..serve_plan import BENCHMARK_ONLY_FIELDS, TOPOLOGY_ONLY_FIELDS, param_to_cli_flag, render_serve_flags
+from ..serve_plan import (
+    validate_service_positions,
+    BENCHMARK_ONLY_FIELDS,
+    TOPOLOGY_ONLY_FIELDS,
+    param_to_cli_flag,
+    render_serve_flags,
+)
 
 _ARGS_ENV = "OPTIX_AGENT_SERVE_ARGS"
 _CAPACITY_FLAGS = {
@@ -69,6 +75,7 @@ def prepare_multihost_fields(simulator, fields):
     """
     if any(field.config_position not in {"run", "env"} for field in fields):
         raise ValueError("multihost fields require config_position=run or env")
+    validate_service_positions(fields)
     env_fields = [field for field in fields if field.config_position == "env"]
     run_fields = [field for field in fields if field.config_position == "run"]
     for field in run_fields:

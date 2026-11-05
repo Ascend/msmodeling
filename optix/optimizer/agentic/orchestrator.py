@@ -22,6 +22,7 @@
 """
 
 import json
+from math import isfinite
 from pathlib import Path
 
 from loguru import logger
@@ -61,11 +62,59 @@ class AgentOptimizer:
         return max(self.config.convergence_rounds, 1)
 
     def run(self) -> None:
+        if getattr(self.pso.scheduler, "engine", None) == "vllm_pd":
+            from .pd import controller_session
+
+            with controller_session(self.run_dir):
+                self._run()
+        else:
+            self._run()
+
+    def _run(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         completed_rounds, global_best_fitness = self._scan_completed_rounds()
         context = self._load_multihost_context()
+        if getattr(self.pso.scheduler, "engine", None) == "vllm_pd":
+            from .pd import validate_simulator
+
+            context = self._load_search_space_context()
+            validate_simulator(context, self.pso.scheduler.simulator)
+            context["pd_budget"] = {
+                "max_trials": self.config.max_trials,
+                "time_limit_seconds": self.config.time_limit_minutes * 60
+                if self.config.time_limit_minutes > 0
+                else None,
+            }
+            self.pso.scheduler.pd_agent_context = context
+            purpose = context.get("deployment", {}).get("round_manifest", {}).get("purpose", "search")
+            self.pso.scheduler.pd_trial_purpose = "bootstrap" if purpose == "bootstrap" else "baseline"
+            self.pso.scheduler.pd_archive_root = self.run_dir / "pd_deployments"
+            manifest = context.get("deployment", {}).get("round_manifest", {})
+            self.pso.scheduler.pd_candidate_identity = {
+                "round": manifest.get("round", 0),
+                "candidate_id": manifest.get("candidate_id", "bootstrap") if purpose == "bootstrap" else "baseline",
+            }
         self._ensure_baseline()
+        if getattr(self.pso.scheduler, "pd_trial_purpose", None) == "bootstrap":
+            return
+        if getattr(self.pso.scheduler, "engine", None) == "vllm_pd" and (self.run_dir / "pd_workflow.json").exists():
+            from .pd_state import freeze_instance_specs
+
+            baseline_path = self.run_dir / "baseline.json"
+            try:
+                saved = json.loads(baseline_path.read_text(encoding="utf-8"))
+                layout = saved["pd_launch_plan"]["layout"]
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise ValueError(
+                    f"PD workflow baseline checkpoint {baseline_path} is missing or invalid; "
+                    "preserve evidence and repair before resuming"
+                ) from exc
+            freeze_instance_specs(self.run_dir, layout)
         fixed_target = self._pin_concurrency()
+        if getattr(self.pso.scheduler, "engine", None) == "vllm_pd":
+            self.pso.scheduler.pd_trial_purpose = (
+                context.get("deployment", {}).get("round_manifest", {}).get("purpose", "search")
+            )
         if context is None:
             context = self._load_search_space_context()
         self._run_rounds(completed_rounds, global_best_fitness, fixed_target, context)
@@ -117,7 +166,11 @@ class AgentOptimizer:
                         len(trials),
                     )
             except Exception as exc:
-                logger.warning("Failed to parse round {} from trials during resume scan: {}", r, exc)
+                logger.warning(
+                    "Failed to parse round {} from trials during resume scan: {}",
+                    r,
+                    exc,
+                )
 
         if completed_rounds:
             logger.info(
@@ -133,21 +186,49 @@ class AgentOptimizer:
     # ------------------------------------------------------------------ #
     def _ensure_baseline(self) -> None:
         baseline_path = self.run_dir / "baseline.json"
-        if baseline_path.exists():
+        pd = getattr(self.pso.scheduler, "engine", None) == "vllm_pd"
+        bootstrap = pd and self.pso.scheduler.pd_trial_purpose == "bootstrap"
+        if bootstrap:
+            self.pso._baseline_from_checkpoint = False
+        if baseline_path.exists() and not bootstrap:
             try:
                 saved = json.loads(baseline_path.read_text(encoding="utf-8"))
+                if pd:
+                    self._validate_pd_baseline(saved)
+                    if not isinstance(saved.get("pd_launch_plan"), dict) or not isinstance(
+                        saved["pd_launch_plan"].get("layout"), dict
+                    ):
+                        raise ValueError("PD baseline must contain a launch layout")
                 self.pso.default_res = PerformanceIndex(**saved.get("performance", {}))
                 self.pso.default_fitness = saved.get("fitness", float("inf"))
-                logger.info("Skipping baseline — loaded checkpoint (fitness={})", self.pso.default_fitness)
+                logger.info(
+                    "Skipping baseline — loaded checkpoint (fitness={})",
+                    self.pso.default_fitness,
+                )
                 # Still need simulator/benchmark data fields set up,
                 # but skip the actual baseline run
                 self.pso._baseline_from_checkpoint = True
             except Exception as exc:
                 logger.warning("Failed to load baseline checkpoint: {}, re-running", exc)
                 self.pso._baseline_from_checkpoint = False
+                if pd:
+                    raise ValueError(
+                        "Invalid PD baseline checkpoint; preserve evidence and repair before resuming"
+                    ) from exc
 
         with logger.contextualize(stage=LogStage.BASELINE.value):
             self.pso.prepare_plugin()
+
+        if pd:
+            self._validate_pd_baseline(
+                {
+                    "fitness": self.pso.default_fitness,
+                    "performance": self.pso.default_res.model_dump(mode="json") if self.pso.default_res else {},
+                    "pd_context": self.pso.scheduler.pd_agent_context,
+                }
+            )
+        if bootstrap:
+            return
 
         # Save baseline checkpoint for future runs
         if not baseline_path.exists() and getattr(self.pso, "default_res", None) is not None:
@@ -157,6 +238,17 @@ class AgentOptimizer:
                     json.dumps(
                         {
                             "fitness": getattr(self.pso, "default_fitness", float("inf")),
+                            **(
+                                {
+                                    "pd_context": self.pso.scheduler.pd_agent_context,
+                                    "pd_launch_plan": self.pso.scheduler.simulate_launch_plan,
+                                    "pd_parameters": {
+                                        field.name: field.value for field in self.pso.scheduler.simulate_run_info
+                                    },
+                                }
+                                if getattr(self.pso.scheduler, "engine", None) == "vllm_pd"
+                                else {}
+                            ),
                             "performance": {
                                 "generate_speed": getattr(perf, "generate_speed", None),
                                 "time_to_first_token": getattr(perf, "time_to_first_token", None),
@@ -171,6 +263,35 @@ class AgentOptimizer:
                 )
             except Exception as exc:
                 logger.warning("Failed to write baseline checkpoint {}: {}", baseline_path, exc)
+                if pd:
+                    raise
+
+    def _validate_pd_baseline(self, saved):
+        performance = saved.get("performance", {})
+        required = (
+            "throughput",
+            "time_to_first_token",
+            "time_per_output_token",
+            "success_rate",
+        )
+        if not isfinite(float(saved.get("fitness", float("inf")))):
+            raise ValueError("PD baseline fitness must be finite")
+        if any(
+            isinstance(performance.get(k), bool)
+            or not isinstance(performance.get(k), (int, float))
+            or not isfinite(performance[k])
+            for k in required
+        ):
+            raise ValueError("PD baseline metrics must be finite numbers")
+        if performance["throughput"] <= 0 or not 0 < performance["success_rate"] <= 1:
+            raise ValueError("PD baseline must contain successful measured requests")
+        if any(performance[k] < 0 for k in ("time_to_first_token", "time_per_output_token")):
+            raise ValueError("PD baseline latency cannot be negative")
+        original = saved.get("pd_context", {})
+        current = self.pso.scheduler.pd_agent_context
+        for key in ("model", "benchmark", "benchmark_spec", "model_info"):
+            if original.get(key) != current.get(key):
+                raise ValueError(f"PD baseline {key} differs from experiment")
 
     # ------------------------------------------------------------------ #
     # Concurrency/request-rate pinning, shared with PSO run_plugin
@@ -180,7 +301,9 @@ class AgentOptimizer:
 
         O7: calibration=true 时并发维度被钉死为 max、候选并发值失效，通过回调显式告警。
         """
-        from ...optimizer.optimizer import adapter_target_field  # 延迟 import，避免顶层连带加载 pandas
+        from ...optimizer.optimizer import (
+            adapter_target_field,
+        )  # 延迟 import，避免顶层连带加载 pandas
 
         with adapter_target_field(self.pso, on_pin_concurrency=self._warn_concurrency_pinned):
             # with 内取引用 = 钉死后的 deepcopy 副本；退出后属性虽恢复，副本仍有效
@@ -228,8 +351,20 @@ class AgentOptimizer:
     def _run_rounds(self, completed_rounds, global_best_fitness, fixed_target, context) -> None:
         no_improvement_streak = 0
 
+        rounds = range(1, self._max_rounds + 1)
+        if getattr(self.pso.scheduler, "engine", None) == "vllm_pd":
+            from .pd import positive_integer
+
+            manifest = context.get("deployment", {}).get("round_manifest")
+            if manifest:
+                if "round" not in manifest:
+                    raise ValueError("PD round_manifest is missing required round")
+                selected_round = positive_integer(manifest["round"], "PD manifest round")
+                if manifest.get("purpose", "search") == "search" and selected_round > self._max_rounds:
+                    raise ValueError("PD experiment search round budget exhausted")
+                rounds = (selected_round,)
         with logger.contextualize(stage=LogStage.SEARCH.value):
-            for round_index in range(1, self._max_rounds + 1):
+            for round_index in rounds:
                 # Skip already-completed rounds
                 if round_index in completed_rounds:
                     logger.info("Round {} already complete — skipping", round_index)
@@ -259,6 +394,11 @@ class AgentOptimizer:
                 round_best = result.best_fitness
                 logger.info("Round {} complete: best_fitness={}", round_index, round_best)
 
+                if getattr(self.pso.scheduler, "engine", None) == "vllm_pd":
+                    # A PD controller owns one frozen deployment; the Skill restarts
+                    # OptiX with a new configuration for the next candidate.
+                    break
+
                 # Convergence check (only counts newly-executed rounds)
                 if round_best < float("inf"):
                     improvement = (
@@ -272,7 +412,10 @@ class AgentOptimizer:
                             global_best_fitness = round_best
                     else:
                         no_improvement_streak += 1
-                        logger.info("No significant improvement for {} consecutive rounds", no_improvement_streak)
+                        logger.info(
+                            "No significant improvement for {} consecutive rounds",
+                            no_improvement_streak,
+                        )
 
                 if no_improvement_streak >= self._convergence_rounds:
                     # Dual-gate convergence: trend AND search-space coverage.

@@ -22,6 +22,8 @@
 
 `--run-dir` 统一传 `<项目根>/.agent_optimizer/runs/<run_id>`。
 
+PD 分离场景先读 [PD 部署搜索约定](../references/pd.md)，其跨轮布局、预算和复测约定优先于本文通用收敛说明。
+
 ## 目标
 
 用 AI agent 驱动服务化参数调优。Agent 负责读上下文、生成候选、分析结果和决策下轮方向；Python 脚本负责确定性的校验、执行、摘要汇总和结果导出。

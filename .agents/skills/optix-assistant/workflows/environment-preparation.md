@@ -30,6 +30,29 @@ config.toml 字段参考见 `../references/optix-reference.md`，benchmark 工�
    - 装完验证：`msmodeling --help` 无报错即可。
    - 无法安装（无网络且无离线包等）时报告原因并停止，不得绕过。
 
+### PD 代理脚本准备（仅 `vllm_pd`，阻塞项）
+
+在控制进程所在机器、首次部署或生成 PD 启动脚本前，Agent 必须检查实际加载的
+`vllm_pd_simulator` 插件目录中的两个代理脚本。使用启动 OptiX 的同一 Python 环境定位目录，
+不要假设当前源码目录就是已安装插件；插件初始化只提示缺失，不会自行下载。Agent 在缺失时
+自动运行插件附带的下载脚本，再重新检查，成功后才能继续：
+
+```bash
+PD_PROXY_DIR="$(python -c 'import importlib.util; from pathlib import Path; s = importlib.util.find_spec("vllm_pd_simulator"); assert s and s.origin, "vllm_pd_simulator is not installed"; print(Path(s.origin).resolve().parent / "scripts" / "pd")')" || exit 1
+bash "$PD_PROXY_DIR/download_proxy_scripts.sh" --check || {
+  bash "$PD_PROXY_DIR/download_proxy_scripts.sh" &&
+    bash "$PD_PROXY_DIR/download_proxy_scripts.sh" --check
+} || exit 1
+sha256sum "$PD_PROXY_DIR/load_balance_proxy_server_example.py" \
+  "$PD_PROXY_DIR/load_balance_proxy_layerwise_server_example.py"
+```
+
+默认下载只补缺失文件，不覆盖已有文件；不要使用 `--download` 强制覆盖。下载需要
+控制节点可访问 GitHub、安装 `wget` 或 `curl`，且插件脚本目录可写。插件或下载脚本不存在、
+目录不可写、网络不可用或复检失败时，报告原因并停止 PD 部署；可由用户提供与实际 vLLM /
+vLLM-ascend 版本兼容的离线脚本后重检。下载源为上游 `main`，可能变化；记录实际文件及其
+SHA-256，检查与部署环境的兼容性，禁止宣称已固定版本。归档和最佳配置导出仍需两个代理文件。
+
 ### benchmark 工具可执行性与隔离安装（阻塞项）
 
 1. **可执行性检查**：如果当前这台机器就是跑 trial 的机器，先在一个不带 msmodeling
@@ -144,12 +167,43 @@ config.toml 字段参考见 `../references/optix-reference.md`，benchmark 工�
 
    - 汇总环境配置、运行节、拟采用的案例参数、固定项及未采用项的原因。用户确认值与
      冻结项优先；案例建议不自动覆盖。写入前沿用已确认信息，仅缺项或约束变更需要确认。
+   - **案例底座自动装配（强制，先于逐条手写）**：案例收集（步骤 4）与方法核对完成后，
+     先用流水线把案例里**可自动采用**的条目一次性写进底座，再只处理残余项。四段流程、
+     规则表判据、转人工边界与实测验收见 `../references/case-base-automation.md`。
+
+     ```bash
+     SRC=<基准/冻结 config.toml 绝对路径> \
+     NEW=<新底座 config.toml 绝对路径> \
+     bash <SKILL_ROOT>/scripts/run_casebase_pipeline.sh                            # 干跑，先出缺口清单
+     SRC=... NEW=... APPLY=1 bash <SKILL_ROOT>/scripts/run_casebase_pipeline.sh    # 写入（先 .bak，写后自检）
+     ```
+
+     默认使用当前 `python3`，可用 `PY=` 指定选定环境；仅显式指定 `CT=` 时使用 Docker。已有目标默认拒绝覆盖，确需覆盖时设置 `FORCE_COPY=1`。
+     干跑不创建或覆盖目标 TOML，写入通过临时文件完成并验证后发布。
+     产物默认落 `<repo>/case_base_out/out/`（`AUDIT_DIR=` 可覆盖）：`case_base_raw.json`、
+     `base_coverage.json`、`base_apply_plan.json`（逐条 argv/reason/verify 断言/manual 清单）、
+     `base_coverage.after.json`。退出码：`0` 干跑完成或写入+自检通过；`1` 写后自检失败；
+     `2` 参数/路径/冻结契约错误。`auto_actions` 覆盖 flag 并入、PD 角色 env 落位与区间缺口；
+     `manual`（`needs_review`）**不自动写**，必须逐条裁决并落盘依据，写入器只给建议命令。
+     装配完成后重跑 `--check-only`，再执行下列写入。
    - 用 `config_writer.py --config <config.toml绝对路径> --set ...` 写基础配置，
      `--target-field ...` 登记参数，`--append-others` 或结构化路径写固定 flags。
      范围须有方法卡、配置或实测依据；只有单个数值参考时用 `min=max=value`，不自行扩展档位。
-   - 采用投机方法时，用 `python <SKILL_ROOT>/scripts/config_writer.py --config <config.toml绝对路径> --set '<engine>.command.others.speculative-config={"method":"<method>","model":"<草稿路径>"}'`
-     登记实际需要的 method/model；无需草稿模型时省略 model。可调子键通过 `target_field`
-     登记；投机 eager 使用 `speculative_enforce_eager`。首次 TOML 基线所需配置必须完整。
+   - 首次准备 MTP/投机搜索时，Agent 必须先依据模型架构、实际后端版本、方法卡和已验证案例确定
+     `method`，需要草稿模型时确定 `model` 路径；模型名或 `use_mtp=true` 不能代替方法选择。
+     使用 `config_writer.py --config <基础配置> --run-dir <计划run目录> --prepare-speculation
+     '{"method":"<已确认方法>","model":"<必要时的草稿路径>"}'` 结构化准备；无需 model 时省略。
+     脚本检查、合并并原子发布配置，保留量化等既有 flags，固定写入 γ=0 的关闭兜底，保证候选字段
+     尚未注入时也不会误开启。实际 γ 只由 `target_field`/候选调整，覆盖该兜底，不维护第二个可调 γ。
+     可在同次调用通过 `--target-field` 登记已确定范围，初始 γ=0；单机/混部用 `engine=vllm`，
+     PD 两侧用 `engine=vllm_pd name=num_speculative_tokens_prefill/decode`。投机 eager 使用
+     `speculative_enforce_eager`，其通道为 run。脚本不推断 method，也不替 Agent 验证后端是否支持该方法。
+   - 准备须在实验冻结前完成；已有 `pd_experiment.json`、`baseline.json` 或运行锁时拒绝原地补写。
+     若实验中途才引入 MTP，先复制基础配置到新路径，按新 run 准备，不修改原实验或混用旧基线。
+     缺 method 的正数 γ 预检失败后，按上述准备流程修复；禁止换 γ 重试或忽略错误继续压测。
+   - 内置 vLLM 的显存利用率必须声明为 `config_position=run`，PD 参数可带角色后缀；
+     `GPU_MEMORY_UTILIZATION` 不是本工具支持的 vLLM 环境变量入口，误设 env 会被共享语义检查拒绝。
+     MindIE 和自定义插件的通道按各自契约处理，不自动迁移已有配置。
    - 随后用 `config_preflight.py --config <config.toml绝对路径> --engine <engine> --benchmark <benchmark>`
      携带步骤 3 已确认的 SLO、预算及 `--set-agent-mode` 旗标写入运行配置，捕获 run-id。
      这里的集中写入由多个脚本调用完成；每个调用失败均须修正后继续。**禁止手写 TOML**。
