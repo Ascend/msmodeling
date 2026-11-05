@@ -14,6 +14,7 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
+import logging
 import unittest
 
 import pytest
@@ -23,7 +24,12 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
-from tensor_cast.layers.parallel_linear import ColumnParallelLinear, RowParallelLinear, get_qparam_shard_dim
+from tensor_cast.layers.parallel_linear import (
+    ColumnParallelLinear,
+    InvalidHeadParallelismError,
+    RowParallelLinear,
+    get_qparam_shard_dim,
+)
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
 from tensor_cast.model_config import MlaConfig, ModelConfig, ParallelConfig, QuantConfig, WordEmbeddingTPMode
 from tensor_cast.parallel_group import ParallelGroup
@@ -46,6 +52,33 @@ def _make_parallel_group(world_size: int) -> ParallelGroup:
         rank_groups=[list(range(world_size))],
         global_world_size=world_size,
     )
+
+
+@pytest.mark.parametrize(
+    ("wrapper_cls", "head_num", "tp_size", "kwargs", "message"),
+    [
+        (RowParallelLinear, 3, 2, {}, "RowParallelLinear requires head_num=3 to be divisible by tp_size=2"),
+        (ColumnParallelLinear, 3, 2, {}, "ColumnParallelLinear requires head_num=3 to be divisible by tp_size=2"),
+        (
+            ColumnParallelLinear,
+            3,
+            4,
+            {"is_replicable": True},
+            "ColumnParallelLinear replication requires tp_size=4 to be divisible by head_num=3",
+        ),
+    ],
+)
+def test_invalid_head_parallelism_warns_and_raises(wrapper_cls, head_num, tp_size, kwargs, message, caplog):
+    group = _make_parallel_group(tp_size)
+    linear = torch.nn.Linear(12, 12, bias=False, device="meta")
+
+    with caplog.at_level(logging.WARNING, logger="tensor_cast.layers.parallel_linear"):
+        with pytest.raises(InvalidHeadParallelismError, match=message):
+            wrapper_cls(linear, group, group, head_num=head_num, **kwargs)
+
+    assert [record.message for record in caplog.records if record.name == "tensor_cast.layers.parallel_linear"] == [
+        message
+    ]
 
 
 class TestGetQparamShardDim(unittest.TestCase):

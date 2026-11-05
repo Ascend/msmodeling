@@ -14,6 +14,7 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
+import logging
 import unittest
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -27,6 +28,7 @@ from serving_cast.service.optimizer_summary import OptimizerSummary
 from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData, UnsupportedPPConfigurationError
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
+from tensor_cast.layers.parallel_linear import InvalidHeadParallelismError
 from tests.helpers.model_assets import vendored_model_config_path
 
 from .test_common import SimpleArgs
@@ -54,6 +56,22 @@ class RuntimeErrorExecutor:
                 raise BrokenProcessPool
 
         return BrokenResultIterator()
+
+
+def test_invalid_head_candidate_is_skipped_without_error_log(caplog):
+    args = SimpleArgs()
+    task_runner = ParallelRunner(args)
+    user_config = UserInputConfig.from_args(args)
+
+    with patch(
+        "serving_cast.parallel_runner.ModelRunner",
+        side_effect=InvalidHeadParallelismError("head_num=3 cannot be sharded over tp_size=2"),
+    ):
+        assert task_runner._get_model_runnner(user_config) is None
+
+    assert not any(
+        record.levelno >= logging.ERROR and record.name == "serving_cast.parallel_runner" for record in caplog.records
+    )
 
 
 class TestTaskRunner(unittest.TestCase):

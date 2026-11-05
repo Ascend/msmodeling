@@ -32,6 +32,7 @@ from tensor_cast import config
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
+from tensor_cast.layers.parallel_linear import InvalidHeadParallelismError
 from .service.optimizer_factory import OptimizerFactory
 from .service.optimizer_summary import OptimizerSummary
 from .service.pd_ratio_throughput_optimizer import PDRatioThroughputOptimizer
@@ -287,6 +288,9 @@ class ParallelRunner:
         model_runner = None
         try:
             model_runner = ModelRunner(user_input)
+        except InvalidHeadParallelismError:
+            # The layer already warned about the incompatible TP candidate.
+            return None
         except UnsupportedPPConfigurationError as exc:
             pp_size = getattr(user_input, "pp_size", 1)
             if pp_size > 1:

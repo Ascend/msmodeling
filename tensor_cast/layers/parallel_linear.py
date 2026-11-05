@@ -14,6 +14,7 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
+import logging
 import math
 from typing import Optional, Union
 
@@ -25,6 +26,12 @@ from ..quantize_utils import LinearQuantType
 from ..utils import exact_division
 from .quant_linear import QuantLinearBase
 from .utils import get_partial_sharded, ModelWrapperBase
+
+logger = logging.getLogger(__name__)
+
+
+class InvalidHeadParallelismError(ValueError):
+    """The attention head count is incompatible with tensor parallelism."""
 
 
 def replace_with_sharded_tensor(
@@ -99,7 +106,10 @@ class RowParallelLinear(ParallelLinearBase):
         if head_num is None:
             self.in_features_per_partition = math.ceil(self.in_features / self.tp_size)
         else:
-            assert head_num % self.tp_size == 0
+            if head_num % self.tp_size != 0:
+                message = f"RowParallelLinear requires head_num={head_num} to be divisible by tp_size={self.tp_size}"
+                logger.warning(message)
+                raise InvalidHeadParallelismError(message)
             self.in_features_per_partition = self.in_features // self.tp_size
 
         self.out_features_per_partition = self.out_features
@@ -223,10 +233,21 @@ class ColumnParallelLinear(ParallelLinearBase):
         else:
             head_size = exact_division(self.out_features, head_num)
             if is_replicable and head_num < self.tp_size:
-                assert self.tp_size % head_num == 0
+                if self.tp_size % head_num != 0:
+                    message = (
+                        f"ColumnParallelLinear replication requires tp_size={self.tp_size} "
+                        f"to be divisible by head_num={head_num}"
+                    )
+                    logger.warning(message)
+                    raise InvalidHeadParallelismError(message)
                 self.out_features_per_partition = head_size
             else:
-                assert head_num % self.tp_size == 0
+                if head_num % self.tp_size != 0:
+                    message = (
+                        f"ColumnParallelLinear requires head_num={head_num} to be divisible by tp_size={self.tp_size}"
+                    )
+                    logger.warning(message)
+                    raise InvalidHeadParallelismError(message)
                 self.out_features_per_partition = self.out_features // self.tp_size
 
         self.head_num = head_num
