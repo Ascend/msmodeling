@@ -223,16 +223,18 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 #### 示例
 
 ```bash
-# offload 开/关配对（固定并发，对比 ΔTPOT）
+# offload 开/关配对（固定并发，对比 ΔTPOT；长上下文 offload 走 PD 分离的 Decode 相位）
 msmodeling inference throughput-optimizer zai-org/GLM-5.2 \
-  --device ATLAS_800_A3_752T_128G_DIE --num-devices 32 --tp-sizes 8 --ep-sizes 4 \
+  --device ATLAS_800_A3_752T_128G_DIE --num-devices 32 --tp-sizes 4 \
   --input-length 80000 --output-length 2048 --batch-range 10 10 \
+  --disagg --tpot-limit 200 \
   --enable-decode-kv-offload --decode-offload-buffer-multiplier 2.0 --decode-offload-hit-rate 0.85
 ```
 
 #### 说明与约束
 
 - 稀疏窗口 top-k 从模型 checkpoint config 解析（GLM-5.2 `index_topk=2048`），不是 CLI 参数；config 未声明时开启 Decode offload 会被拒绝。
+- 长上下文（如 80K）Decode offload 场景请使用 `--disagg` 并指定 `--tpot-limit`（示例中 200 为演示值，batch 10 / 80K 的仿真 TPOT 约 151 ms，按实际 SLO 调整）。聚合模式的 Prefill wave 要求单次 forward 覆盖 wave 内全部 token，A3 上 80K 级输入的激活内存即超出设备余量，所有候选 OOM 导致无结果（与是否开启 offload 无关）；聚合模式下也不支持把 `--max-batched-tokens` 压到小于单请求输入长度来规避（开启 offload 时会被显式拒绝）。
 - host 链路带宽取 DeviceProfile（A3 = 70 GB/s/die/方向理论峰值）；带宽档位敏感性需 profile 变体。
 - Prefill 层级 offload 的 B/I 使用代码默认（`B=2`、`I=0`）。
 

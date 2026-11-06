@@ -223,16 +223,18 @@ Models the memory and transfer costs of KV cache offloading (Decode sparse/Prefi
 #### Example
 
 ```bash
-# Offload on/off pair (fixed concurrency, compare delta TPOT)
+# Offload on/off pair (fixed concurrency, compare delta TPOT; long-context offload runs the Decode phase of PD disaggregation)
 msmodeling inference throughput-optimizer zai-org/GLM-5.2 \
-  --device ATLAS_800_A3_752T_128G_DIE --num-devices 32 --tp-sizes 8 --ep-sizes 4 \
+  --device ATLAS_800_A3_752T_128G_DIE --num-devices 32 --tp-sizes 4 \
   --input-length 80000 --output-length 2048 --batch-range 10 10 \
+  --disagg --tpot-limit 200 \
   --enable-decode-kv-offload --decode-offload-buffer-multiplier 2.0 --decode-offload-hit-rate 0.85
 ```
 
 #### Notes and Constraints
 
 - The sparse window top-k is resolved from the model checkpoint config (GLM-5.2 `index_topk=2048`) and is not a CLI flag. Enabling Decode offload is rejected when the config declares none.
+- For long-context (e.g. 80K) Decode offload scenarios, use `--disagg` with a `--tpot-limit` (200 in the example is a demo value; the simulated TPOT at batch 10 / 80K is about 151 ms — adjust it to your actual SLO). The aggregation-mode Prefill wave requires a single forward pass to cover all tokens in the wave; at 80K-scale inputs on A3 the activation memory alone exceeds the device budget, so every candidate OOMs and no result is produced (regardless of whether offload is enabled). Shrinking `--max-batched-tokens` below the per-request input length is also not a workaround in aggregation mode (explicitly rejected when offload is enabled).
 - The host link bandwidth comes from the DeviceProfile (A3 = 70 GB/s/die/direction theoretical peak). Bandwidth-tier sensitivity requires profile variants.
 - Prefill layerwise offload uses code-level defaults for B/I (`B=2`, `I=0`).
 
