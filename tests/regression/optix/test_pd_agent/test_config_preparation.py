@@ -197,3 +197,103 @@ def test_pd_prepared_base_reaches_both_role_scripts(tmp_path):
             text = script.read_text(encoding="utf-8")
             validate_measured_speculation(text, 1 if prefill else 3)
             assert "--gpu-memory-utilization " + ("0.85" if prefill else "0.9") in text
+
+
+def test_single_service_env_placeholder_preflight():
+    field = {"name": "GPU_MEMORY_UTILIZATION", "config_position": "env", "default": 0.8}
+    context = {"engine": "vllm", "deployment": {"type": "single"}}
+    validate_service_parameters(
+        context,
+        {"GPU_MEMORY_UTILIZATION": 0.9},
+        fields=[field],
+        others="--gpu-memory-utilization $GPU_MEMORY_UTILIZATION",
+    )
+    with pytest.raises(ValueError, match="config_position=run"):
+        validate_service_parameters(context, {}, fields=[field], others="--other $GPU_MEMORY_UTILIZATION")
+    with pytest.raises(ValueError, match="config_position=run"):
+        validate_service_parameters(
+            {"engine": "vllm", "deployment": {"type": "pd"}},
+            {},
+            fields=[field],
+            others="--gpu-memory-utilization $GPU_MEMORY_UTILIZATION",
+        )
+
+
+def test_single_json_subkey_placeholder_preflight():
+    field = {"name": "num_speculative_tokens", "config_position": "env", "default": 2}
+    context = {"engine": "vllm", "deployment": {"type": "single"}}
+    validate_service_parameters(
+        context,
+        {},
+        fields=[field],
+        others="""--speculative-config '{"method":"mtp","num_speculative_tokens":$NUM_SPECULATIVE_TOKENS}'""",
+    )
+    with pytest.raises(ValueError, match="config_position=run"):
+        validate_service_parameters(
+            context,
+            {},
+            fields=[field],
+            others="""--speculative-config '{"method":"mtp","other":$NUM_SPECULATIVE_TOKENS}'""",
+        )
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_single_bool_env_placeholder_preflight_matches_runtime(value):
+    field = {"name": "speculative_enforce_eager", "config_position": "env", "default": value}
+    others = """--speculative-config '{"method":"mtp","enforce_eager":$SPECULATIVE_ENFORCE_EAGER}'"""
+    validate_service_parameters(
+        {"engine": "vllm", "deployment": {"type": "single"}},
+        {"speculative_enforce_eager": value},
+        fields=[field],
+        others=others,
+    )
+
+
+def test_single_multiple_json_env_fields_preflight_and_runtime():
+    from optix.config.custom_command import VllmCommand, VllmCommandConfig
+
+    fields = [
+        S(name="enable_cpu_binding", config_position="env", value=True),
+        S(name="multistream_overlap_shared_expert", config_position="env", value=False),
+    ]
+    others = """--additional-config '{"enable_cpu_binding":$ENABLE_CPU_BINDING,"multistream_overlap_shared_expert":$MULTISTREAM_OVERLAP_SHARED_EXPERT}'"""
+    definitions = [{"name": f.name, "config_position": f.config_position, "default": f.value} for f in fields]
+    context = {"engine": "vllm", "deployment": {"type": "single"}}
+    validate_service_positions(iter(fields), others=others)
+    validate_service_parameters(context, {}, fields=definitions, others=others)
+    cmd = VllmCommand(VllmCommandConfig(others=others), env_fields=fields).command
+    assert json.loads(cmd[cmd.index("--additional-config") + 1]) == {
+        "enable_cpu_binding": True,
+        "multistream_overlap_shared_expert": False,
+    }
+
+
+def test_multiple_json_placeholders_reject_wrong_bindings_and_unknown_names():
+    fields = [
+        S(name="enable_cpu_binding", config_position="env"),
+        S(name="multistream_overlap_shared_expert", config_position="env"),
+    ]
+    swapped = """--additional-config '{"enable_cpu_binding":$MULTISTREAM_OVERLAP_SHARED_EXPERT,"multistream_overlap_shared_expert":$ENABLE_CPU_BINDING}'"""
+    unknown = """--additional-config '{"enable_cpu_binding":$ENABLE_CPU_BINDING,"other":$UNKNOWN}'"""
+    for others in (swapped, unknown):
+        with pytest.raises(ValueError, match="config_position=run"):
+            validate_service_positions(fields, others=others)
+
+
+@pytest.mark.parametrize("deployment", ["single", "pd"])
+def test_null_candidate_does_not_become_literal_none_or_default(monkeypatch, deployment):
+    from optix import serve_plan
+    from optix.optimizer.agentic import pd
+
+    rendered = []
+    monkeypatch.setattr(serve_plan, "render_serve_flags", lambda fields, others: rendered.append(others))
+    monkeypatch.setattr(pd, "render_pd_role_flags", lambda fields, role, others: rendered.append(others))
+    fields = [{"name": "CUSTOM", "config_position": "env", "default": "fallback"}]
+    validate_service_parameters(
+        {"engine": "vllm", "deployment": {"type": deployment}},
+        {"CUSTOM": None},
+        fields=fields,
+        others="--some-option $CUSTOM",
+    )
+    assert rendered
+    assert all("$CUSTOM" in others and "None" not in others and "fallback" not in others for others in rendered)

@@ -87,7 +87,7 @@ def validate_service_parameters(context, params, *, fields=None, others=None):
     """Plan effective service fields for preflight using the runtime renderer."""
     import re
     from types import SimpleNamespace
-    from ...serve_plan import render_serve_flags, validate_service_positions
+    from ...serve_plan import render_serve_flags, substitute_service_placeholders, validate_service_positions
     from .pd import render_pd_role_flags
 
     if context.get("engine") == "mindie":
@@ -100,7 +100,6 @@ def validate_service_parameters(context, params, *, fields=None, others=None):
         name = item["name"]
         value = params.get(name, item.get("default"))
         position = item.get("config_position", "run")
-        validate_service_positions([SimpleNamespace(name=name, config_position=position)])
         if position == "run" and value is not None:
             if isinstance(value, (dict, list)):
                 value = json.dumps(value)
@@ -117,13 +116,27 @@ def validate_service_parameters(context, params, *, fields=None, others=None):
                 config = tomllib.load(stream)
             section = config.get(context.get("engine", "vllm"), {})
             others = section.get("command", {}).get("others", "") or ""
-    substitutions = {name.upper(): str(value) for name, value in params.items()}
-    others = re.sub(
-        r"\$([A-Za-z_][A-Za-z0-9_]*)",
-        lambda match: substitutions.get(match[1], match[0]),
-        others,
-    )
-    if context.get("deployment", {}).get("type") == "pd":
+    is_pd = context.get("deployment", {}).get("type") == "pd"
+    position_fields = [
+        SimpleNamespace(name=item["name"], config_position=item.get("config_position", "run")) for item in fields
+    ]
+    validate_service_positions(position_fields, others=None if is_pd else others)
+    substitutions = {}
+    for item in fields:
+        value = params.get(item["name"], item.get("default"))
+        if value is not None:
+            substitutions[item["name"].upper()] = value
+    substitutions.update({name.upper(): value for name, value in params.items() if value is not None})
+    if is_pd:
+        others = re.sub(
+            r"\$([A-Za-z_][A-Za-z0-9_]*)",
+            lambda match: str(substitutions[match[1]]) if match[1] in substitutions else match[0],
+            others,
+        )
+    else:
+        values = [SimpleNamespace(name=name, value=value) for name, value in substitutions.items()]
+        others = substitute_service_placeholders(others, values)
+    if is_pd:
         for role in ("prefill", "decode"):
             try:
                 render_pd_role_flags(resolved, role, others)

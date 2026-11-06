@@ -7,6 +7,7 @@ models nor a live vLLM installation. Planning never changes trial parameters.
 import json
 import shlex
 import math
+import re
 
 MAX_REQUEST_NUM = 1e6
 
@@ -186,14 +187,100 @@ def _dedupe_plain_flags(flags: list) -> list:
     return result
 
 
-def validate_service_positions(fields):
-    """Known vLLM service options must reach CLI/JSON, never an inert environment variable."""
+def _placeholder_is_wired(field, others, declared_names):
+    """Require the placeholder to feed its own service option, not an unrelated flag."""
+    name = field.name
+    base = name.lower()
+    marker = 918273645
+    variable = re.compile(r"(?<![A-Z0-9_])\$" + re.escape(name.upper()) + r"(?![A-Z0-9_])")
+    try:
+        tokens = shlex.split(others)
+    except ValueError:
+        return False
+    expected, key = JSON_SUBKEY_MAP.get(base, (param_to_cli_flag(base), None))
+    expected = "--" + expected
+    for index, token in enumerate(tokens):
+        option, separator, inline = token.partition("=")
+        if option.replace("_", "-") != expected:
+            continue
+        raw = inline if separator else tokens[index + 1] if index + 1 < len(tokens) else ""
+        if not variable.search(raw):
+            continue
+        if key is None:
+            return bool(variable.fullmatch(raw))
+        try:
+            placeholders = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+            masked = placeholders.sub(
+                lambda match: str(marker)
+                if match.group(1) == name.upper()
+                else "0"
+                if match.group(1) in declared_names
+                else match.group(0),
+                raw,
+            )
+            data = json.loads(masked)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get(key) in (marker, str(marker)):
+            return True
+    return False
+
+
+def validate_service_positions(fields, *, others=None):
+    """Reject service env fields unless single-host others explicitly consumes them."""
+    fields = tuple(fields)
+    declared_names = {field.name.upper() for field in fields}
     for field in fields:
         name = field.name.removesuffix("_prefill").removesuffix("_decode").lower()
         if getattr(field, "config_position", "run") == "env" and (
             name in JSON_SUBKEY_MAP or name in {"speculative_config", "gpu_memory_utilization"}
         ):
+            if others is not None and _placeholder_is_wired(field, others, declared_names):
+                continue
             raise ValueError(f"{field.name}: service configuration requires config_position=run, not env")
+
+
+def substitute_service_placeholders(others, fields):
+    """Resolve token values before parsing JSON, preserving shell argument boundaries."""
+    values = {field.name.upper(): field.value for field in fields if getattr(field, "value", None) is not None}
+    pattern = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+    tokens = shlex.split(others or "")
+    result = []
+    container_value = False
+    for token in tokens:
+        option, separator, inline = token.partition("=")
+        is_container = option.replace("_", "-") in CONTAINER_FLAGS
+        is_json = container_value or bool(is_container and separator)
+
+        def replace(match):
+            if match.group(1) not in values:
+                return match.group(0)
+            value = values[match.group(1)]
+            if not is_json:
+                return str(value)
+            # Determine whether the placeholder is inside a JSON string, honoring escapes.
+            prefix = token[: match.start()]
+            in_string = False
+            escaped = False
+            for char in prefix:
+                if escaped:
+                    escaped = False
+                elif char == "\\" and in_string:
+                    escaped = True
+                elif char == '"':
+                    in_string = not in_string
+            if in_string:
+                return json.dumps(str(value), ensure_ascii=False)[1:-1]
+            if match.group(1).lower() in JSON_SUBKEY_MAP and isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (ValueError, TypeError):
+                    pass  # Keep values that are not JSON as strings, as in the run path.
+            return json.dumps(value, ensure_ascii=False)
+
+        result.append(pattern.sub(replace, token))
+        container_value = is_container and not separator
+    return shlex.join(result)
 
 
 def _speculative_token_count(count):

@@ -1180,3 +1180,22 @@ class TestMindieSimulatorConfigPermissions(unittest.TestCase):
         mode = config_path.stat().st_mode & 0o777
         assert mode == 0o640, f"expected 0o640, got {oct(mode)}"
         assert json.loads(config_path.read_text(encoding="utf-8")) == {"a": 1}
+
+
+def test_single_simulator_uses_updated_env_candidate_in_command():
+    from optix.config.config import OptimizerConfigField, VllmConfig
+    from optix.config.custom_command import VllmCommandConfig
+    from optix.optimizer.plugins.simulate import VllmSimulator
+
+    field = OptimizerConfigField(name="GPU_MEMORY_UTILIZATION", config_position="env", value=0.8, min=0.5, max=1.0)
+    config = VllmConfig(
+        command=VllmCommandConfig(others="--gpu-memory-utilization $GPU_MEMORY_UTILIZATION"),
+        target_field=[field],
+    )
+    with patch("optix.deploy_env.shutil.which", return_value="/usr/bin/vllm"):
+        simulator = VllmSimulator(config)
+        assert simulator.command[simulator.command.index("--gpu-memory-utilization") + 1] == "0.8"
+        field.value = 0.9
+        simulator.set_env_fields([field])
+        simulator.update_command()
+        assert simulator.command[simulator.command.index("--gpu-memory-utilization") + 1] == "0.9"

@@ -335,6 +335,7 @@ class VllmSimulator(SimulatorInterface):
         self.env.update(self.config.env)
 
         self._resolved_field = ()  # set later via set_resolved_field(); consumed by update_command
+        self._env_fields = tuple(f for f in self.config.target_field if f.config_position == "env")
         self.update_command()
 
     @property
@@ -510,8 +511,11 @@ class VllmSimulator(SimulatorInterface):
                     ", ".join(missing),
                 )
 
+    def set_env_fields(self, fields) -> None:
+        self._env_fields = tuple(fields)
+
     def update_command(self) -> None:
-        cmd = VllmCommand(self.config.command, self._resolved_field)
+        cmd = VllmCommand(self.config.command, self._resolved_field, self._env_fields)
         raw_command = cmd.command
         self.command = materialize_command(raw_command, self.env, self._runtime_ctx, cwd=self.work_path)
         logger.info("vLLM launch command (final): {}", " ".join(self.command))

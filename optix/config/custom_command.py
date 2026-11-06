@@ -27,6 +27,7 @@ from ..serve_plan import (
     _split_container_flags as _split_container_flags,
     param_to_cli_flag as param_to_cli_flag,
     render_serve_flags,
+    substitute_service_placeholders,
 )
 
 
@@ -127,9 +128,10 @@ class VllmCommandConfig(BaseModel):
 
 
 class VllmCommand:
-    def __init__(self, command_config: VllmCommandConfig, resolved_field: list = None):
+    def __init__(self, command_config: VllmCommandConfig, resolved_field: list = None, env_fields=()):
         self.command_config = command_config
         self._resolved_field = resolved_field or []
+        self._env_fields = env_fields
 
     @property
     def command(self):
@@ -148,5 +150,6 @@ class VllmCommand:
         # Dynamic flags from resolved_field (run-type candidate fields passed via
         # the constructor) merged with `others` — see render_serve_flags for the
         # precedence/dedupe rules, shared with external simulator plugins.
-        cmd.extend(render_serve_flags(self._resolved_field, self.command_config.others))
+        others = substitute_service_placeholders(self.command_config.others, self._env_fields)
+        cmd.extend(render_serve_flags(self._resolved_field, others))
         return cmd

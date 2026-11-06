@@ -233,3 +233,15 @@ nic_name="eth0"
     finally:
         if sim.run_log_fp is not None:
             os.close(sim.run_log_fp)
+
+
+def test_multihost_env_service_field_remains_unsupported():
+    from types import SimpleNamespace
+    from optix.optimizer.multihost_adapter import prepare_multihost_fields
+
+    simulator = SimpleNamespace(
+        config=SimpleNamespace(command=SimpleNamespace(others="--gpu-memory-utilization $GPU_MEMORY_UTILIZATION"))
+    )
+    env_field = field("GPU_MEMORY_UTILIZATION", 0.9, "env")
+    with pytest.raises(ValueError, match="config_position=run"):
+        prepare_multihost_fields(simulator, [env_field])

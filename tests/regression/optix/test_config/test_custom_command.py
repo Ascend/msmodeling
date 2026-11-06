@@ -367,3 +367,72 @@ class TestResolveMindieArgv:
         env = {"MIES_INSTALL_PATH": str(custom_root), "PATH": "/usr/bin"}
         argv = resolve_mindie_argv(env)
         assert str(custom_daemon) in argv[0]
+
+
+def test_env_placeholder_renders_candidate_value():
+    config = VllmCommandConfig(others="--gpu-memory-utilization $GPU_MEMORY_UTILIZATION")
+    fields = [SimpleNamespace(name="GPU_MEMORY_UTILIZATION", value=0.9, config_position="env")]
+    cmd = VllmCommand(config, env_fields=fields).command
+    assert cmd[cmd.index("--gpu-memory-utilization") + 1] == "0.9"
+
+
+def test_env_placeholder_in_json_is_resolved_before_container_merge():
+    config = VllmCommandConfig(
+        others="""--speculative-config '{"method":"mtp","num_speculative_tokens":$NUM_SPECULATIVE_TOKENS}'"""
+    )
+    fields = [SimpleNamespace(name="NUM_SPECULATIVE_TOKENS", value=3, config_position="env")]
+    cmd = VllmCommand(config, env_fields=fields).command
+    assert _container_dict(cmd, "--speculative-config") == {"method": "mtp", "num_speculative_tokens": 3}
+
+
+def test_env_placeholder_value_is_not_split_into_extra_options():
+    config = VllmCommandConfig(others="--some-option $CUSTOM")
+    fields = [SimpleNamespace(name="CUSTOM", value="one --other two", config_position="env")]
+    cmd = VllmCommand(config, env_fields=fields).command
+    assert cmd[cmd.index("--some-option") + 1] == "one --other two"
+    assert "--other" not in cmd
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_json_env_bool_is_encoded_as_json_literal(value):
+    config = VllmCommandConfig(
+        others="""--speculative-config '{"method":"mtp","enforce_eager":$SPECULATIVE_ENFORCE_EAGER}'"""
+    )
+    fields = [SimpleNamespace(name="SPECULATIVE_ENFORCE_EAGER", value=value, config_position="env")]
+    cmd = VllmCommand(config, env_fields=fields).command
+    assert _container_dict(cmd, "--speculative-config") == {"method": "mtp", "enforce_eager": value}
+
+
+@pytest.mark.parametrize("quoted", [True, False])
+def test_json_env_string_is_escaped(quoted):
+    placeholder = '"$CUDAGRAPH_MODE"' if quoted else "$CUDAGRAPH_MODE"
+    config = VllmCommandConfig(
+        others="--compilation-config " + __import__("shlex").quote('{"cudagraph_mode":' + placeholder + '}')
+    )
+    fields = [SimpleNamespace(name="CUDAGRAPH_MODE", value='FULL "TEST"', config_position="env")]
+    cmd = VllmCommand(config, env_fields=fields).command
+    assert _container_dict(cmd, "--compilation-config") == {"cudagraph_mode": 'FULL "TEST"'}
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "flag", "key", "expected"),
+    [
+        ("enable_cpu_binding", "true", "--additional-config", "enable_cpu_binding", True),
+        ("enable_cpu_binding", "false", "--additional-config", "enable_cpu_binding", False),
+        ("cudagraph_capture_sizes", "[1,6,12]", "--compilation-config", "cudagraph_capture_sizes", [1, 6, 12]),
+        ("num_speculative_tokens", "3", "--speculative-config", "num_speculative_tokens", 3),
+        ("cudagraph_mode", "FULL_DECODE_ONLY", "--compilation-config", "cudagraph_mode", "FULL_DECODE_ONLY"),
+    ],
+)
+def test_json_env_subkey_matches_run_value_type(name, value, flag, key, expected):
+    from optix.serve_plan import render_serve_flags
+    import shlex
+
+    base = '"method":"mtp",' if flag == "--speculative-config" else ""
+    others = flag + " " + shlex.quote("{" + base + '"' + key + '":$' + name.upper() + "}")
+    env_field = SimpleNamespace(name=name, value=value, config_position="env")
+    env_cmd = VllmCommand(VllmCommandConfig(others=others), env_fields=[env_field]).command
+    fixed = flag + " " + shlex.quote('{"method":"mtp"}') if flag == "--speculative-config" else ""
+    run_cmd = render_serve_flags([SimpleNamespace(name=name, value=value, config_position="run")], fixed)
+    assert _container_dict(env_cmd, flag)[key] == expected
+    assert _container_dict(run_cmd, flag)[key] == expected

@@ -541,7 +541,10 @@ class Scheduler:
         if self.engine == "vllm":
             from ..serve_plan import validate_service_positions
 
-            validate_service_positions(self.simulate_run_info or ())
+            simulator = getattr(self, "simulator", None)
+            config = getattr(simulator, "config", None)
+            command = getattr(config, "command", None)
+            validate_service_positions(self.simulate_run_info or (), others=getattr(command, "others", None))
         if isinstance(self.benchmark, SupportsPrepare):
             self.benchmark.prepare()
         logger.debug("starting simulator subprocess")
@@ -832,6 +835,9 @@ class Scheduler:
                 set_resolved_field(run_fields)
             else:
                 self.simulator._resolved_field = run_fields
+            set_env_fields = getattr(self.simulator, "set_env_fields", None)
+            if callable(set_env_fields):
+                set_env_fields(f for f in params_field if getattr(f, "config_position", "") == "env")
             self.simulator.update_command()
         if isinstance(self.benchmark, SupportsDataField):
             self.benchmark.data_field = params_field

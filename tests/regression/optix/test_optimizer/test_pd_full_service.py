@@ -62,6 +62,9 @@ def pd_plugin(pytestconfig):
     }
     with pytest.MonkeyPatch.context() as context:
         context.syspath_prepend(str(plugin_root))
+        # These tests exercise deployment planning and mock remote execution.
+        context.setitem(sys.modules, "fabric", SimpleNamespace(Config=MagicMock(), Connection=MagicMock()))
+        context.setitem(sys.modules, "invoke.exceptions", SimpleNamespace(CommandTimedOut=TimeoutError))
         try:
             pytest.importorskip("vllm_pd_simulator", reason="PD plugin is not available", exc_type=ModuleNotFoundError)
             yield SimpleNamespace(
