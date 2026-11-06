@@ -66,11 +66,11 @@ scripts/
    `{MSMODELING_CACHE}/test_map/{MSMODELING_TEST_BASE_BRANCH}/test_map.json`
    (e.g. `.msmodeling_cache/test_map/poc/AiClusterHub/test_map.json`). Different base branches never share one file.
 3. If that cache file is missing or corrupt → download with a **30s** socket timeout. URL:
-   `https://mindstudio-pr.obs.cn-north-4.myhuaweicloud.com/msmodeling/sync/{MSMODELING_TEST_BASE_BRANCH}/test_map.json`
+   `https://gitcode.com/api/v5/repos/eveyin1/msmodeling_pr/raw/test_map.json?ref=test-map/{MSMODELING_TEST_BASE_BRANCH}`
 4. Download writes via `*.tmp` then replaces; failure deletes the tmp. A killed process may leave a stale `*.tmp` (safe to delete).
 5. HTTP errors (404, …), timeout, or network failure → **exit non-zero** (no silent full-suite fallback).
 
-Wrong `MSMODELING_TEST_BASE_BRANCH` → wrong OBS path → usually 404.
+Wrong `MSMODELING_TEST_BASE_BRANCH` → wrong `test-map/{branch}` ref → usually 404.
 
 **Cache lifecycle:** downloads are kept for reuse. There is no TTL. To force refresh, delete the branch directory under `{MSMODELING_CACHE}/test_map/` (or the whole `.msmodeling_cache/`). Corrupt JSON is detected and re-downloaded automatically.
 
@@ -91,7 +91,7 @@ With no env vars, that path should:
 3. Download `master`'s map into `.msmodeling_cache/test_map/master/test_map.json` when needed.
 4. Run the CI gate.
 
-If OBS is unreachable, set `MSMODELING_TEST_MAP_PATH` to a local map, or use `--suite full` intentionally.
+If the download host is unreachable, set `MSMODELING_TEST_MAP_PATH` to a local map, or use `--suite full` intentionally.
 
 ## Entry scripts
 
@@ -137,7 +137,8 @@ MSMODELING_WHEEL_OUTPUT_DIR=/tmp/wheels bash scripts/build.sh
 - Collection/config changes and still-existing product sources without an old-map watcher fall back to a full rebuild; map-irrelevant changes only advance `built_from_commit`.
 - Pytest collection is reused by execution and coverage conversion; sync does not run a second full `--collect-only`.
 - Pid-scoped temp branch `msmodeling-sync/<pid>`; restored & deleted on exit, SIGINT/SIGTERM, `--watch`, and `atexit`.
-- **OBS upload/download external**: sync writes local file only. CI wrapper upload after success; compile jobs download before `run_ci_gate.sh`. Freshness via `built_from_commit`.
+- **Artifact upload is separate**: sync writes the local file only. The external publisher pushes `test-map/{branch}`; compile jobs download before `run_ci_gate.sh`. Freshness via `built_from_commit`.
+- The download URL above is `eveyin1/msmodeling_pr`, not OBS. `MSMODELING_TEST_MAP_URL_TEMPLATE` may select another HTTP(S) URL with one `{branch}`, no credentials, and a host on the allowlist.
 
 ## nightly (`run_nightly.sh`)
 
@@ -163,7 +164,7 @@ Defaults below come from [`scripts/defaults.env`](defaults.env) (not shipped in 
 | `MSMODELING_TEST_MAP_PATH` | ci_gate (auto-download if missing) | `{MSMODELING_CACHE}/test_map/{base_branch}/test_map.json` | gate, nightly, sync, `build.py test` | External test_map JSON path |
 | `MSMODELING_TEST_MAP_TARGET_BRANCH` | Optional | `MSMODELING_TEST_BASE_BRANCH` | sync | Sync target (e.g. `develop`) |
 | `MSMODELING_TEST_MAP_SYNC_INTERVAL` | Optional | `60` | sync `--watch` | Poll interval (seconds) |
-| `MSMODELING_TEST_BASE_BRANCH` | Optional | `master` | ci_gate, sync, download URL | Merge-base branch; OBS path segment + cache subdirectory for test_map |
+| `MSMODELING_TEST_BASE_BRANCH` | Optional | `master` | ci_gate, sync, download URL | Merge-base branch; `test-map/{branch}` ref and cache subdirectory for test_map |
 | `MSMODELING_TEST_LINE_THRESHOLD` | Optional | `80` | nightly | Whole-repository line coverage threshold (%) |
 | `MSMODELING_TEST_DIFF_LINE_THRESHOLD` | Optional | `80` | ci_gate | Added/modified executable function-body coverage threshold (%); `except` branches are included |
 | `MSMODELING_TEST_BRANCH_THRESHOLD` | Optional | `40` | nightly | Branch coverage threshold (%) |
@@ -192,7 +193,7 @@ Defaults below come from [`scripts/defaults.env`](defaults.env) (not shipped in 
 |--------|--------|
 | Wrong `MSMODELING_TEST_BASE_BRANCH` | Merge-base against wrong ref; test_map download 404 → gate aborts |
 | Point `MSMODELING_TEST_MAP_PATH` at stale/missing/corrupt file | Warning + branch-scoped re-download when not a valid JSON object |
-| Keep an old file under `test_map/{branch}/` after OBS refresh | Reused until you delete that cache path (no TTL) |
+| Keep an old file under `test_map/{branch}/` after the published map changes | Reused until you delete that cache path (no TTL) |
 | Unset `UV_INDEX_URL` / `HF_ENDPOINT` | Uses `defaults.env`; slow or broken mirrors → sync / Hub failures |
 | `--suite ci_gate` when you meant full | Incremental vs base branch only; empty local diffs schedule no pytest |
 | `--suite full` when you meant gate | Runs entire `tests/` (still excludes npu/nightly/network via addopts) — much slower |

@@ -17,8 +17,9 @@
 """Hardcoded defaults for unpublished ``scripts/`` tooling.
 
 Process env defaults (UV / HF / base branch / cache) live in
-``scripts/defaults.env``. Test-map path layout and OBS URL template are
-Python constants here — not environment variables.
+``scripts/defaults.env``. Test-map path layout and the default download URL are
+Python constants here. The URL template and its host allowlist may be overridden
+at runtime; see :func:`build_test_map_url`.
 
 ``scripts/defaults.env`` grammar (must match ``scripts/lib/common.sh``):
 
@@ -30,17 +31,20 @@ Python constants here — not environment variables.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Final
+from urllib.parse import quote, urlsplit
 
 _DEFAULTS_ENV: Final = Path(__file__).resolve().parent.parent / "defaults.env"
 _PYTEST_XDIST_ARGS: Final = ("-n", "auto", "--dist", "worksteal")
 
-# Not env vars — internal layout / OBS contract only.
+# Not env vars — internal layout. ``{branch}`` is the source branch name.
 _TEST_MAP_FILENAME: Final = "test_map.json"
 _TEST_MAP_URL_TEMPLATE: Final = (
-    "https://mindstudio-pr.obs.cn-north-4.myhuaweicloud.com/msmodeling/sync/{branch}/test_map.json"
+    "https://gitcode.com/api/v5/repos/eveyin1/msmodeling_pr/raw/test_map.json?ref=test-map/{branch}"
 )
+_TEST_MAP_ALLOWED_HOSTS: Final = frozenset({"gitcode.com"})
 
 # Keys applied as process env defaults (setdefault). Keep in sync with common.sh.
 _DEFAULT_ENV_KEYS: Final = frozenset(
@@ -92,12 +96,43 @@ DEFAULT_MSMODELING_CACHE: Final = _DEFAULTS["MSMODELING_CACHE"]
 PYTEST_XDIST_ARGS: Final = _PYTEST_XDIST_ARGS
 
 
+def _validate_test_map_template(template: str) -> None:
+    """Validate the URL template independently from a concrete branch name."""
+    if template.count("{branch}") != 1:
+        raise ValueError("MSMODELING_TEST_MAP_URL_TEMPLATE must contain one {branch} placeholder")
+    try:
+        url = template.format(branch="branch")
+    except (KeyError, ValueError) as exc:
+        raise ValueError("MSMODELING_TEST_MAP_URL_TEMPLATE contains an invalid placeholder") from exc
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("MSMODELING_TEST_MAP_URL_TEMPLATE must produce an HTTP(S) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Credentials are not allowed in MSMODELING_TEST_MAP_URL_TEMPLATE")
+
+
+def _allowed_test_map_hosts() -> frozenset[str]:
+    raw = os.environ.get("MSMODELING_TEST_MAP_ALLOWED_HOSTS")
+    if raw is None:
+        return _TEST_MAP_ALLOWED_HOSTS
+    hosts = frozenset(host.strip().lower() for host in raw.split(",") if host.strip())
+    if not hosts:
+        raise ValueError("MSMODELING_TEST_MAP_ALLOWED_HOSTS must contain at least one hostname")
+    return hosts
+
+
 def build_test_map_url(base_branch: str) -> str:
-    """Return the OBS test_map URL for *base_branch* (may contain ``/``)."""
+    """Return the validated test_map download URL for *base_branch*."""
     branch = base_branch.strip().lstrip("/")
     if not branch:
         raise ValueError("base_branch must be non-empty")
-    return _TEST_MAP_URL_TEMPLATE.format(branch=branch)
+    template = os.environ.get("MSMODELING_TEST_MAP_URL_TEMPLATE", _TEST_MAP_URL_TEMPLATE).strip()
+    _validate_test_map_template(template)
+    url = template.format(branch=quote(branch, safe="/"))
+    hostname = urlsplit(url).hostname
+    if hostname is None or hostname.lower() not in _allowed_test_map_hosts():
+        raise ValueError(f"test_map URL host {hostname!r} is not allowed")
+    return url
 
 
 def default_test_map_path(*, cache_dir: str | Path | None = None, base_branch: str) -> Path:
