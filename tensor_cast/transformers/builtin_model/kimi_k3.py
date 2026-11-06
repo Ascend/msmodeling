@@ -2112,6 +2112,15 @@ def _make_k3_mla_prolog_hook(original_compute_mla_prolog):
     return _patched_compute_mla_prolog
 
 
+# Marker attribute stamped on the transformers dynamic remote modules
+# (``modeling_kimi_k3`` / ``modeling_kimi_linear``) once the class-level
+# monkey-patches in ``_patch_model_classes_for_kimi_k3`` have been applied.
+# See ``_K25_MODULE_PATCH_MARKER`` in kimi_k25.py for the full rationale
+# (Issue #596): a process-level boolean cannot detect transformers
+# re-executing the remote modeling files into fresh module objects.
+_K3_MODULE_PATCH_MARKER = "_tensor_cast_kimi_k3_patched"
+
+
 def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
     """Monkey-patch remote model classes before model instantiation.
 
@@ -2168,6 +2177,43 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
             _patched_resolve._tensor_cast_patched = True
             transformers.dynamic_module_utils.resolve_trust_remote_code = _patched_resolve
+
+    # ----------------------------------------------------------------
+    # Re-patch guard (Issue #596)
+    # ----------------------------------------------------------------
+    # transformers keys remote modules by content hash and may re-execute
+    # modeling_kimi_k3.py / modeling_kimi_linear.py in the same worker,
+    # producing NEW module objects whose classes lose every monkey-patch
+    # applied to their predecessors.  A process-level boolean cannot detect
+    # that.  Resolve the current remote modules and skip only when ALL of
+    # them still carry the patch marker; otherwise re-run the full
+    # (idempotent) patch pass against the new classes.  Process-level
+    # installs below (``_install_mla_prolog_op``, ModelRunner accounting,
+    # ...) keep their own one-shot guards.
+    # ----------------------------------------------------------------
+    remote_module_names = None
+    try:
+        probe_cls = _get_k3_class_from_source(
+            "modeling_kimi_k3.KimiK3ForConditionalGeneration",
+            effective_model_id,
+            "auto",
+        )
+        k3_module_name = probe_cls.__module__
+        package_prefix, separator, _ = k3_module_name.rpartition(".")
+        linear_module_name = f"{package_prefix}.modeling_kimi_linear" if separator else "modeling_kimi_linear"
+        remote_module_names = (k3_module_name, linear_module_name)
+        if all(getattr(sys.modules.get(name), _K3_MODULE_PATCH_MARKER, False) for name in remote_module_names):
+            return False
+    except Exception:
+        # Resolution failed — fall through and let the per-patch blocks
+        # below surface/report the problem exactly as before.
+        remote_module_names = None
+
+    # Tracks exceptions swallowed by the per-patch blocks below.  The module
+    # marker is stamped only when NO block swallowed an exception, so a
+    # partially-applied pass is retried on the next entry instead of being
+    # permanently cached (Issue #596 review; same rule as Kimi-K2.5).
+    partial_failure = False
 
     # =================================================================
     # KimiK3ForConditionalGeneration.forward — filter TC kwargs
@@ -2231,6 +2277,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 VL forward: {e}")
+        partial_failure = True
 
     # =================================================================
     # _merge_input_ids_with_image_features — meta device stub
@@ -2294,6 +2341,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 merge_input_ids: {e}")
+        partial_failure = True
 
     # =================================================================
     # MoonViT3dEncoder — register tensor_cast attention backend
@@ -2416,6 +2464,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 visual encoder: {e}")
+        partial_failure = True
 
     # =================================================================
     # KimiDeltaAttention.forward → decomposed linear_attn_* sub-ops
@@ -2653,6 +2702,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 KimiDeltaAttention: {e}")
+        partial_failure = True
 
     # =================================================================
     # KimiLinearModel._update_linear_attn_mask — meta tensor fix
@@ -2697,6 +2747,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 _update_linear_attn_mask: {e}")
+        partial_failure = True
 
     # =================================================================
     # KimiSparseMoeBlock.forward/moe_infer — stub for graph tracing
@@ -2729,6 +2780,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 KimiSparseMoeBlock: {e}")
+        partial_failure = True
 
     # =================================================================
     # KimiMoEGate.forward — deterministic routing for simulation
@@ -2760,6 +2812,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 KimiMoEGate: {e}")
+        partial_failure = True
 
     # =================================================================
     # KimiMLAAttention — position_embeddings resolution + output gate
@@ -3057,6 +3110,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 KimiDecoderLayer AttnRes: {e}")
+        partial_failure = True
 
     # =================================================================
     # KimiDynamicCache — compatibility stub
@@ -3133,6 +3187,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 MoonVision3dPatchEmbed: {e}")
+        partial_failure = True
 
     # =================================================================
     # SituAndMul direct-mode + MLP forward patch
@@ -3213,6 +3268,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 SituAndMul/MLP forward: {e}")
+        partial_failure = True
 
     # =================================================================
     # Monkey-patch module-level _apply_attn_res
@@ -3264,6 +3320,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 
     except Exception as e:
         logger.warning(f"Could not patch K3 module-level _apply_attn_res: {e}")
+        partial_failure = True
 
     # =================================================================
     # KimiLinearModel.__init__ — inject identity rotary_emb shim
@@ -3312,6 +3369,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             logger.info("Patched KimiLinearModel.__init__ for MTP rotary_emb shim.")
     except Exception as e:
         logger.warning(f"Could not patch K3 KimiLinearModel for MTP shim: {e}")
+        partial_failure = True
 
     # =================================================================
     # ModelWrapper.forward — add output_intermediate_hidden_states for MTP
@@ -3428,6 +3486,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             logger.info("Patched ModelWrapper.forward for K3 MTP.")
     except Exception as e:
         logger.warning(f"Could not patch ModelWrapper.forward for K3 MTP: {e}")
+        partial_failure = True
 
     # =================================================================
     # KimiLinearForCausalLM.forward — PP side-channel + bypass lm_head
@@ -3550,6 +3609,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             logger.info("Patched KimiLinearForCausalLM.forward for K3 PP side-channel.")
     except Exception as e:
         logger.warning(f"Could not patch K3 KimiLinearForCausalLM.forward for PP: {e}")
+        partial_failure = True
 
     # =================================================================
     # KDA state memory accounting (recurrent_states + conv_states)
@@ -3644,6 +3704,18 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             logger.info("Patched ModelRunner/ModelRunnerMetrics for K3 KDA state memory accounting.")
     except Exception as e:
         logger.warning(f"Could not patch ModelRunner for K3 KDA state accounting: {e}")
+        partial_failure = True
+
+    # Stamp the marker on the remote module objects only when every patch
+    # block completed without swallowing an exception.  On partial failure the
+    # modules stay unmarked, so the next entry point retries the full pass
+    # (all patches are idempotent via ``_original_*`` / ``_patched_*`` checks)
+    # instead of permanently caching a half-patched module (Issue #596 review).
+    if remote_module_names is not None and not partial_failure:
+        for name in remote_module_names:
+            module = sys.modules.get(name)
+            if module is not None:
+                setattr(module, _K3_MODULE_PATCH_MARKER, True)
 
     return patched
 
@@ -3651,8 +3723,6 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
 # ============================================================
 # Orchestrator: hf_config_patch_method entry point
 # ============================================================
-
-_patched_kimi_k3 = False
 
 
 def _hf_config_patch_for_kimi_k3(config, model_id=None):
@@ -3662,8 +3732,9 @@ def _hf_config_patch_for_kimi_k3(config, model_id=None):
     the HuggingFace model is instantiated.
 
     Config-level patches run for every new config instance.
-    Class-level patches run once per process, guarded by
-    ``_patched_kimi_k3`` to avoid redundant work.
+    Class-level patches are self-guarded per remote module object and are
+    re-applied whenever transformers re-executes the remote modeling files
+    in this process (Issue #596).
 
     Class-level patches use ``_get_k3_class_from_source`` with ``"auto"``
     mode so they work under both HF and ModelScope remote sources without
@@ -3676,15 +3747,10 @@ def _hf_config_patch_for_kimi_k3(config, model_id=None):
     # Config-level patches (always run for every new config)
     config_patched = _patch_hf_config_for_kimi_k3(config)
 
-    # Class-level patches (run once per process, requires model_id)
-    global _patched_kimi_k3
-    if _patched_kimi_k3:
-        return
-
+    # Class-level patches (self-guarded per remote module, requires model_id)
     classes_patched = _patch_model_classes_for_kimi_k3(config, model_id)
 
     if config_patched or classes_patched:
-        _patched_kimi_k3 = True
         logger.info("Patched transformers environment for Kimi-K3")
 
 

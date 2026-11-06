@@ -203,6 +203,24 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
                 f"Kimi K2.5 sibling module {qualified_module!r} does not define {class_name!r}"
             ) from error
 
+    # ----------------------------------------------------------------
+    # Re-patch guard (Issue #596)
+    # ----------------------------------------------------------------
+    # Skip only when EVERY remote module that receives class patches below
+    # still carries the patch marker.  When transformers re-executes the
+    # remote modeling files in this worker, the fresh module objects lack
+    # the marker and the full patch pass re-runs against the new classes.
+    remote_module_names = tuple(f"{dynamic_package}.{name}" for name in _K25_REMOTE_MODULE_NAMES)
+    if all(getattr(sys.modules.get(name), _K25_MODULE_PATCH_MARKER, False) for name in remote_module_names):
+        return False
+
+    # Tracks exceptions swallowed by the patch blocks below.  The module
+    # marker is stamped only when NO block swallowed an exception: marking a
+    # partially-patched module would permanently cache the half-applied state
+    # (the guard above would short-circuit every later call) and reproduce
+    # the Issue #596 symptoms with no chance of recovery.
+    partial_failure = False
+
     try:
         # ----------------------------------------------------------------
         # Patch 4: Filter KimiK25ForConditionalGeneration.forward kwargs
@@ -327,6 +345,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
 
     except Exception as e:
         logger.warning(f"Could not patch remote VL / attention class attributes: {e}")
+        partial_failure = True
 
     try:
         # ----------------------------------------------------------------
@@ -1045,6 +1064,18 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         raise
     except Exception as e:
         logger.warning(f"Could not patch remote modules: {e}")
+        partial_failure = True
+
+    # Stamp the marker on the remote module objects only when every patch
+    # block completed without swallowing an exception.  On partial failure the
+    # modules stay unmarked, so the next entry point retries the full pass
+    # (all patches are idempotent via ``_original_*`` / ``_patched_*`` checks)
+    # instead of permanently caching a half-patched module (Issue #596 review).
+    if not partial_failure:
+        for name in remote_module_names:
+            module = sys.modules.get(name)
+            if module is not None:
+                setattr(module, _K25_MODULE_PATCH_MARKER, True)
 
     return patched
 
@@ -1096,7 +1127,21 @@ def _shard_lm_head_for_kimi_vl(model):
             model._replace_module(name, parallel_module)
 
 
-_patched_kimi_k25 = False
+# Marker attribute stamped on the transformers dynamic remote modules
+# (``modeling_kimi_k25`` / ``modeling_deepseek``) once the class-level
+# monkey-patches in ``_patch_model_classes_for_kimi_k25`` have been applied.
+#
+# WHY not a process-level boolean: transformers keys remote modules by
+# content hash and may re-execute the modeling files inside the same worker,
+# producing NEW module objects whose classes lose every monkey-patch applied
+# to their predecessors.  A boolean cannot detect that (Issue #596: nightly
+# failures with ``KeyError: 'tensor_cast'`` / missing ``position_embeddings``
+# after the patches were washed away and never re-applied).  Guarding on the
+# module objects themselves makes re-execution observable and triggers a
+# re-patch; all patches are idempotent (``_original_*`` existence checks),
+# so re-applying them is safe.
+_K25_MODULE_PATCH_MARKER = "_tensor_cast_kimi_k25_patched"
+_K25_REMOTE_MODULE_NAMES = ("modeling_kimi_k25", "modeling_deepseek")
 _shard_model_patched = False
 
 
@@ -1240,10 +1285,12 @@ def _hf_config_patch_for_kimi_k25(config, model_id=None):
       *object* and MUST execute for every new config instance, even
       when class-level monkey-patches have already been applied.
 
-    * **Class-level patches** (run once):  model-class monkey-patching,
-      ``shard_model`` wrapping, ``resize_image`` patching.  These
-      modify global state (module attributes / function references)
-      and are guarded by ``_patched_kimi_k25`` to avoid redundant work.
+    * **Class-level patches** (self-guarded per remote module object):
+      model-class monkey-patching, ``shard_model`` wrapping,
+      ``resize_image`` patching.  The model-class patches are re-applied
+      whenever transformers re-executes the remote modeling files in this
+      process (Issue #596); the ``shard_model`` / ``resize_image`` wrappers
+      patch TensorCast's own modules and carry their own one-shot guards.
     """
     import logging
 
@@ -1259,14 +1306,13 @@ def _hf_config_patch_for_kimi_k25(config, model_id=None):
     config_patched = _patch_hf_config_for_kimi_k25(config)
 
     # ----------------------------------------------------------------
-    # Phases 2-4 – class-level / global patches (run once per process)
+    # Phases 2-4 – class-level / global patches.
     # ----------------------------------------------------------------
-    # These modify module-level state (monkey-patches, function
-    # references, etc.).  They are idempotent but expensive, so we
-    # guard them with a global flag.
-    global _patched_kimi_k25
-    if _patched_kimi_k25:
-        return
+    # Phase 2 self-guards on the remote module objects (Issue #596): when
+    # transformers re-executes the remote modeling files in this worker,
+    # the fresh modules lack the patch marker and are re-patched there.
+    # Phases 3-4 patch TensorCast's own modules and are one-shot via their
+    # own guards, so re-invoking them here is cheap.
 
     # Phase 2 – model class monkey-patches (requires model_id).
     classes_patched = _patch_model_classes_for_kimi_k25(config, model_id)
@@ -1278,7 +1324,6 @@ def _hf_config_patch_for_kimi_k25(config, model_id=None):
     _patch_resize_image_for_kimi_k25(model_id)
 
     if config_patched or classes_patched:
-        _patched_kimi_k25 = True
         logger.info("Patched transformers environment for Kimi-K2.5")
 
 

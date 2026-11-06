@@ -45,14 +45,9 @@ def _run_kimi_k2_case(
     num_mtp_tokens: int = 0,
     parallel: ParallelContext = ParallelContext(),
 ):
-    if model_name in {"moonshotai/Kimi-K2.5", "moonshotai/Kimi-K2.6"}:
-        # TensorCast supports one model per process. Pytest intentionally
-        # exercises both compatible model ids in one worker, so reset only
-        # the process-level remote-class patch guard to emulate separate CLI runs.
-        import tensor_cast.transformers.builtin_model.kimi_k25 as kimi_k25
-
-        kimi_k25._patched_kimi_k25 = False
-
+    # Kimi K2.5/K2.6 class patches self-guard per remote module object
+    # (Issue #596): re-executed remote modules are re-patched automatically,
+    # so no process-level guard reset is needed between model ids.
     profile = DiagnosticsRunProfile(
         schema_version="1",
         model_name=model_name,

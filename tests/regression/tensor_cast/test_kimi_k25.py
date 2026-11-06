@@ -497,7 +497,6 @@ class TestKimiK25Patches(unittest.TestCase):
         """Reset global patch state before each test."""
         import tensor_cast.transformers.builtin_model.kimi_k25 as _km
 
-        _km._patched_kimi_k25 = False
         _km._shard_model_patched = False
 
     # ------------------------------------------------------------------
@@ -513,27 +512,50 @@ class TestKimiK25Patches(unittest.TestCase):
 
         self.assertIsNone(_hf_config_patch_for_kimi_k25(_Fake()))
 
-    def test_hf_config_patch_guard_already_patched(self):
-        """Guard: second call is a no-op."""
+    def test_hf_config_patch_delegates_and_self_guards_on_second_call(self):
+        """Issue #596: the orchestrator always delegates to the class patcher;
+        the patcher self-guards on already-patched remote module objects.
+        """
+        from unittest.mock import patch
+
         import tensor_cast.transformers.builtin_model.kimi_k25 as _km
-        from tensor_cast.transformers.builtin_model.kimi_k25 import _hf_config_patch_for_kimi_k25
 
-        _saved = _km._patched_kimi_k25
+        class _Kimi:
+            model_type = "kimi_k25"
+            hidden_size = 7168
+            intermediate_size = 18432
+            num_attention_heads = 64
+            num_key_value_heads = 64
+            num_hidden_layers = 61
+            vocab_size = 163840
+
+        _, restore = self._install_kimi_model_wrapper_patch()
         try:
-            _km._patched_kimi_k25 = True
+            seen = []
+            real_patch = _km._patch_model_classes_for_kimi_k25
 
-            class _Kimi:
-                model_type = "kimi_k25"
-                hidden_size = 7168
-                intermediate_size = 18432
-                num_attention_heads = 64
-                num_key_value_heads = 64
-                num_hidden_layers = 61
-                vocab_size = 163840
+            def _spy(config, model_id):
+                seen.append(model_id)
+                return real_patch(config, model_id)
 
-            self.assertIsNone(_hf_config_patch_for_kimi_k25(_Kimi(), model_id=None))
+            # Phases 3/4 are mocked out: they patch TensorCast's own modules
+            # (one-shot, unrelated to Issue #596) and must not leak state.
+            with (
+                patch(
+                    "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+                    side_effect=self._fake_get_class,
+                ),
+                patch.object(_km, "_patch_model_classes_for_kimi_k25", side_effect=_spy),
+                patch.object(_km, "_patch_shard_model_for_kimi_vl"),
+                patch.object(_km, "_patch_resize_image_for_kimi_k25"),
+            ):
+                self.assertIsNone(_km._hf_config_patch_for_kimi_k25(_Kimi(), model_id="moonshotai/Kimi-K2.5"))
+
+            # The orchestrator delegated exactly once; the self-guard turned
+            # the call into a no-op because the fake modules are marked.
+            self.assertEqual(seen, ["moonshotai/Kimi-K2.5"])
         finally:
-            _km._patched_kimi_k25 = _saved
+            restore()
 
     # ------------------------------------------------------------------
     # _patch_model_classes_for_kimi_k25
@@ -676,7 +698,7 @@ class TestKimiK25Patches(unittest.TestCase):
             _ig.resize_image = _orig
             _km._resize_image_patched = False
 
-    def _install_kimi_model_wrapper_patch(self):
+    def _install_kimi_model_wrapper_patch(self, dynamic_package="transformers_modules.test_kimi_k25_hash"):
         import sys
         import types
         from unittest.mock import patch
@@ -703,7 +725,6 @@ class TestKimiK25Patches(unittest.TestCase):
         class _FakeVisionRemote(_FakeRemote):
             pass
 
-        dynamic_package = "transformers_modules.test_kimi_k25_hash"
         kimi_module_name = f"{dynamic_package}.modeling_kimi_k25"
         deepseek_module_name = f"{dynamic_package}.modeling_deepseek"
         _FakeVLRemote.__module__ = kimi_module_name
@@ -764,7 +785,116 @@ class TestKimiK25Patches(unittest.TestCase):
             _restore_model_wrapper()
             raise
         self._fake_kimi_vl_class = _FakeVLRemote
+        self._fake_get_class = _fake_get_class
+        self._fake_module_names = (kimi_module_name, deepseek_module_name)
         return ModelWrapper, _restore_model_wrapper
+
+    def test_patch_model_classes_reapplied_after_remote_module_reexecution(self):
+        """Issue #596: when transformers re-executes the remote modeling files
+        (fresh module objects in the same worker), the class patches must be
+        re-applied; already-patched module objects are skipped.
+        """
+        import sys
+        from unittest.mock import patch
+
+        import tensor_cast.transformers.builtin_model.kimi_k25 as _km
+        from tensor_cast.transformers.builtin_model.kimi_k25 import _patch_model_classes_for_kimi_k25
+
+        class _KimiConfig:
+            model_type = "kimi_k25"
+
+        _, restore_first = self._install_kimi_model_wrapper_patch()
+        try:
+            kimi_module_name, deepseek_module_name = self._fake_module_names
+            kimi_module = sys.modules[kimi_module_name]
+            deepseek_module = sys.modules[deepseek_module_name]
+
+            # First pass stamped both remote module objects.
+            self.assertTrue(getattr(kimi_module, _km._K25_MODULE_PATCH_MARKER, False))
+            self.assertTrue(getattr(deepseek_module, _km._K25_MODULE_PATCH_MARKER, False))
+            self.assertIn("tensor_cast", deepseek_module.ATTENTION_CLASSES)
+
+            # Second pass over the SAME module objects is a no-op.
+            with patch(
+                "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+                side_effect=self._fake_get_class,
+            ):
+                self.assertFalse(_patch_model_classes_for_kimi_k25(_KimiConfig(), "moonshotai/Kimi-K2.5"))
+        finally:
+            restore_first()
+
+        # Simulate transformers re-executing the remote files: a brand-new
+        # dynamic package whose module objects are fresh (pristine classes,
+        # ATTENTION_CLASSES without 'tensor_cast').  The harness asserts the
+        # patch call returned True, i.e. the fresh modules were re-patched.
+        _, restore_second = self._install_kimi_model_wrapper_patch(
+            dynamic_package="transformers_modules.test_kimi_k25_hash2"
+        )
+        try:
+            kimi_module2 = sys.modules["transformers_modules.test_kimi_k25_hash2.modeling_kimi_k25"]
+            deepseek_module2 = sys.modules["transformers_modules.test_kimi_k25_hash2.modeling_deepseek"]
+
+            self.assertTrue(getattr(kimi_module2, _km._K25_MODULE_PATCH_MARKER, False))
+            self.assertTrue(getattr(deepseek_module2, _km._K25_MODULE_PATCH_MARKER, False))
+            self.assertIn("tensor_cast", deepseek_module2.ATTENTION_CLASSES)
+            self.assertTrue(hasattr(kimi_module2.KimiK25ForConditionalGeneration, "_original_vl_forward"))
+            self.assertTrue(hasattr(deepseek_module2.DeepseekV3DecoderLayer, "_original_decoder_forward"))
+        finally:
+            restore_second()
+
+    def test_patch_model_classes_not_marked_after_partial_failure(self):
+        """Issue #596 review: when a patch block swallows an exception, the
+        remote modules must stay unmarked so the next entry point retries the
+        full (idempotent) pass instead of permanently caching a half-patched
+        module.
+        """
+        import sys
+        from unittest.mock import patch
+
+        import tensor_cast.transformers.builtin_model.kimi_k25 as _km
+        from tensor_cast.transformers.builtin_model.kimi_k25 import _patch_model_classes_for_kimi_k25
+
+        class _KimiConfig:
+            model_type = "kimi_k25"
+
+        _, restore = self._install_kimi_model_wrapper_patch()
+        try:
+            kimi_module_name, deepseek_module_name = self._fake_module_names
+            kimi_module = sys.modules[kimi_module_name]
+            deepseek_module = sys.modules[deepseek_module_name]
+            self.assertTrue(getattr(kimi_module, _km._K25_MODULE_PATCH_MARKER, False))
+            self.assertTrue(getattr(deepseek_module, _km._K25_MODULE_PATCH_MARKER, False))
+
+            # Simulate fresh (unmarked) module objects plus a failing patch
+            # block: ATTENTION_CLASSES without 'sdpa'/'eager' makes Patch 10
+            # raise ValueError, which the big try/except swallows.
+            delattr(kimi_module, _km._K25_MODULE_PATCH_MARKER)
+            delattr(deepseek_module, _km._K25_MODULE_PATCH_MARKER)
+            saved_attention_classes = deepseek_module.ATTENTION_CLASSES
+            deepseek_module.ATTENTION_CLASSES = {}
+            try:
+                with patch(
+                    "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+                    side_effect=self._fake_get_class,
+                ):
+                    self.assertTrue(_patch_model_classes_for_kimi_k25(_KimiConfig(), "moonshotai/Kimi-K2.5"))
+                    # Partial failure: nothing is stamped, no permanent caching.
+                    self.assertFalse(getattr(kimi_module, _km._K25_MODULE_PATCH_MARKER, False))
+                    self.assertFalse(getattr(deepseek_module, _km._K25_MODULE_PATCH_MARKER, False))
+                    # The next entry retries the full pass instead of no-op.
+                    self.assertTrue(_patch_model_classes_for_kimi_k25(_KimiConfig(), "moonshotai/Kimi-K2.5"))
+                    self.assertFalse(getattr(deepseek_module, _km._K25_MODULE_PATCH_MARKER, False))
+                    # Heal the failure: the retry completes and stamps.
+                    deepseek_module.ATTENTION_CLASSES = saved_attention_classes
+                    self.assertTrue(_patch_model_classes_for_kimi_k25(_KimiConfig(), "moonshotai/Kimi-K2.5"))
+                    self.assertTrue(getattr(kimi_module, _km._K25_MODULE_PATCH_MARKER, False))
+                    self.assertTrue(getattr(deepseek_module, _km._K25_MODULE_PATCH_MARKER, False))
+                    # Fully patched modules short-circuit again.
+                    self.assertFalse(_patch_model_classes_for_kimi_k25(_KimiConfig(), "moonshotai/Kimi-K2.5"))
+            finally:
+                deepseek_module.ATTENTION_CLASSES = saved_attention_classes
+        finally:
+            restore()
 
     def test_merge_meta_inputs_without_image_features_uses_text_hidden_size(self):
         """Text-only capture must not call ``Tensor.to`` on ``sum([])``'s integer zero."""
