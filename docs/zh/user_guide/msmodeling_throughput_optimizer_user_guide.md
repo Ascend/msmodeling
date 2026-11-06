@@ -5,6 +5,8 @@
 吞吐优化器（throughput optimizer）是一款在 SLO（Service Level Objective，服务级别目标）约束下优化吞吐量的工具。它会在指定的 SLO 约束（例如对 TTFT、TPOT 的上限）下自动搜索最优模型配置（并行策略、批大小），以最大化 token 吞吐量。
 本文适用于需要评估大模型服务部署方案、模型服务吞吐、并行策略和 SLO 约束配置的开发者、性能工程师和容量规划人员。开始前请先完成《[msModeling 安装指南](../install_guide/msmodeling_install_guide.md)》中的环境搭建，并确认目标模型配置可被加载。
 
+本文使用 Python 模块入口 `python -m cli.inference.throughput_optimizer`；安装后也可使用 `msmodeling inference throughput-optimizer`，二者调用同一实现并接受相同参数。
+
 ## 2 主要场景
 
 吞吐优化器可用于硬件规划、SLO 约束下的吞吐寻优、PD 分离部署设计，以及反推「满足目标 QPS 所需最少卡数」的容量规划。按部署形态划分，主要支持以下五类场景：
@@ -16,6 +18,8 @@
 | PD 配比 | 需要规划 Prefill 与 Decode 实例数量比例 | `--enable-optimize-prefill-decode-ratio`、`--prefill-devices-per-instance`、`--decode-devices-per-instance` |
 | KV Cache Offload | 需要评估 KV Cache 卸载（Decode 稀疏 / Prefill 层级）后的 TTFT、TPOT 与并发上限变化 | `--enable-decode-kv-offload`、`--enable-prefill-kv-offload` |
 | 容量规划 | 已知目标 QPS 与 SLO，需要反推最少卡数 | `--target-qps`（可叠加以上任一模式的参数） |
+
+按评估目标选择模式：评估 P/D 同实例部署的整体吞吐，使用 PD 混部；分别评估两个阶段的处理能力，使用 PD 分离；进一步规划 P/D 实例数量比例，使用 PD 配比。同一实例可使用多个设备，并不限定为单台物理机器。
 
 上述任一场景均可叠加 `--speculative-method {dflash,dspark}` 启用投机解码（MTP 建议使用统一接口 `--speculative-method mtp`），详见 [2.2 叠加投机解码](#叠加投机解码dflash--dspark)。
 
@@ -185,11 +189,11 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 
 ### 2.3 PD 配比场景
 
-PD 配比模式可独立优化 Prefill 与 Decode 阶段，再合并结果以找到使系统吞吐量最大的最优 Prefill / Decode 实例配比。该模式尤其适用于 Prefill 与 Decode 实例可独立扩缩的 PD 分离服务架构。
+PD 配比模式分别优化 Prefill 与 Decode 阶段，再根据单实例处理能力计算理论实例配比。当总设备预算可容纳两个阶段时，工具分配整数实例数，并按分配后的 Balanced QPS 对候选方案排序。该模式适用于 Prefill 与 Decode 实例可独立扩缩的 PD 分离服务架构；推荐结果限定于所配置的单实例规模和搜索范围。
 
 #### 前置条件
 
-启用 PD 配比需提供：
+未设置 `--target-qps` 时，启用 PD 配比需提供以下参数；设置 `--target-qps` 时可同时省略两个单实例设备数参数，自动搜索实例规模（见 2.5）：
 
 - `--enable-optimize-prefill-decode-ratio`：启用 PD 配比模式
 - `--prefill-devices-per-instance`：每个 Prefill 实例的设备数
@@ -214,7 +218,193 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 #### 约束
 
 - `--enable-optimize-prefill-decode-ratio` 不能与 `--disagg` 同时使用
-- 启用 PD 配比时，必须同时指定 `--prefill-devices-per-instance` 与 `--decode-devices-per-instance`
+- `--prefill-devices-per-instance` 与 `--decode-devices-per-instance` 必须成对指定；仅在设置 `--target-qps` 时允许同时省略，不能只指定其中一个。
+
+#### 实践案例与结果分析
+
+##### DeepSeek-V4-Flash PD 配比优化
+
+###### 案例目标
+
+本案例使用 Hugging Face 模型 ID `deepseek-ai/DeepSeek-V4-Flash`，为单个 Prefill 实例和单个 Decode 实例分别配置 16 个 A3 die，并针对输入长度 `2048`、输出长度 `512` 的请求计算 P/D 实例配比。`2000 ms` 和 `50 ms` 分别是本次仿真搜索的 TTFT 和 TPOT 筛选上限。
+
+使用远端模型 ID 时，可能需要访问远端配置；Transformers 回退到 `trust_remote_code=True` 时，还可能执行远端 Python 代码。生产环境建议使用指向已审查本地模型仓库的绝对路径。以下结果均为 TensorCast 仿真估算，Prefill TTFT 包含候选批次内部的波次等待，但不包含外部请求排队、分词、网关、Prefill/Decode 阶段间的 KV 传输、网络抖动和尾时延，不能作为生产环境端到端 SLO 的验收结果。
+
+| 配置项 | 取值 |
+| --- | --- |
+| 目标设备 | `ATLAS_800_A3_752T_128G_DIE` |
+| Prefill / Decode 实例规模 | 16 die / 16 die |
+| 输入 / 输出长度 | 2048 / 512 token |
+| TTFT / TPOT 仿真筛选上限 | 2000 ms / 50 ms |
+| 线性层 / KV cache 量化 | `W8A8_DYNAMIC` / `DISABLED` |
+| 负载假设 | 固定长度生成；prefix cache 命中率为 `0`；MTP 关闭；每个 DP 副本的 Prefill token 预算显式设置为 `8192` |
+| 每个 die 的预留显存 | 10 GB |
+
+`W8A8_DYNAMIC` 表示本例假设模型已按目标 A3 部署方案完成 W8A8 转换，不表示远端原始权重的原生精度。实际评估时应使用与部署一致的量化配置；`--quantize-attention-action DISABLED` 表示不量化 KV cache。
+
+`--max-batched-tokens 8192` 将每个 DP 副本的 serving token 预算固定为 `8192`。输入长度为 `2048` 时，每个副本在一个 Prefill 调度步骤中最多处理 4 个完整请求，其余请求在后续步骤中处理。实际评估时应使用与 serving engine 一致的预算。
+
+当前 CLI 使用 `--num-devices` 校验候选范围并计算实例数。本例设置为 `32`，对应一个 16-die Prefill 实例和一个 16-die Decode 实例；两个阶段仍以 `--prefill-devices-per-instance 16` 和 `--decode-devices-per-instance 16` 指定的单实例规模独立搜索。实际评估时，应将该值替换为目标集群的设备预算。
+
+`--jobs 8` 将每个 Prefill/Decode 阶段的并行搜索任务数限制为 8；两个阶段同时执行，因此整体最多并行运行 16 个搜索任务。该参数不改变目标实例的设备数。完整优化命令一次搜索 `TP={2,4}`、`EP={8,16}`、`MOE-DP={1,2}` 和 `Batch=1–128`，由工具直接比较候选配置，无需用户预先判断并固定并行策略。
+
+###### 首次运行验证（可选）
+
+完整优化命令涉及多维候选搜索，会在宿主机上启动多个仿真进程；CPU 和内存开销随并发任务数、模型和编译过程变化，运行时间还受模型缓存和下载影响。表中的设备显存及 `--reserved-memory-gb` 均描述目标设备，不是宿主机内存要求。
+
+首次运行可先执行以下命令：保持模型、负载、实例规模、量化和 `--jobs 8` 不变，仅将候选限定为 `TP=2`、`EP=16`、`MOE-DP=1`、`Batch=1`，验证模型加载、编译和 P/D 仿真路径。该配置仅用于环境验证，不是推荐部署策略，也不是完整搜索的前置筛选步骤；环境已验证时可直接执行后续完整命令。
+
+```bash
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V4-Flash \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --num-devices 32 \
+    --input-length 2048 \
+    --output-length 512 \
+    --enable-optimize-prefill-decode-ratio \
+    --prefill-devices-per-instance 16 \
+    --decode-devices-per-instance 16 \
+    --ttft-limit 2000 \
+    --tpot-limit 50 \
+    --tp-sizes 2 \
+    --ep-sizes 16 \
+    --moe-dp-sizes 1 \
+    --batch-range 1 1 \
+    --max-batched-tokens 8192 \
+    --reserved-memory-gb 10 \
+    --quantize-linear-action W8A8_DYNAMIC \
+    --quantize-attention-action DISABLED \
+    --compile \
+    --jobs 8 \
+    --log-level info
+```
+
+检查输出是否包含 Prefill、Decode 结果及 `Overall Best Configuration`。本次验证只覆盖上述固定候选，不能替代完整搜索；下文的性能数据来自完整命令，不适用于本命令。
+
+###### 完整优化命令
+
+```bash
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V4-Flash \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --num-devices 32 \
+    --input-length 2048 \
+    --output-length 512 \
+    --enable-optimize-prefill-decode-ratio \
+    --prefill-devices-per-instance 16 \
+    --decode-devices-per-instance 16 \
+    --ttft-limit 2000 \
+    --tpot-limit 50 \
+    --tp-sizes 2 4 \
+    --ep-sizes 8 16 \
+    --moe-dp-sizes 1 2 \
+    --batch-range 1 128 \
+    --max-batched-tokens 8192 \
+    --reserved-memory-gb 10 \
+    --quantize-linear-action W8A8_DYNAMIC \
+    --quantize-attention-action DISABLED \
+    --compile \
+    --jobs 8 \
+    --log-level info
+```
+
+搜索器会过滤不满足实例规模约束的组合。例如，每个实例有 16 个 die 时，`EP=16, MOE-DP=2` 不满足 `16 % (EP × MOE-DP) == 0`，不会进入执行阶段。
+
+###### 关键输出（已截断）
+
+```text
+Input Configuration:
+  Model: deepseek-ai/DeepSeek-V4-Flash
+  Devices: 32 ATLAS_800_A3_752T_128G_DIE
+  Prefill Devices Per Instance: 16
+  Decode Devices Per Instance: 16
+  TTFT Limits: 2000.0 ms
+  TPOT Limits: None ms
+  ...
+
+Overall Best Configuration:
+  PD Ratio: 1.04 (P Instance:D Instance)
+  Prefill QPS: 34.55 req/s  (TTFT: 1852.45 ms, Parallel: TP=2 | PP=1 | DP=8 | EP=16 | MOE-TP=1 | MOE-DP=1, Batch: 12, Concurrency: 96)
+  Decode QPS:  35.99 req/s  (TPOT: 41.76 ms, Parallel: TP=2 | PP=1 | DP=8 | EP=16 | MOE-TP=1 | MOE-DP=1, Batch: 96, Concurrency: 768)
+  P Instances: 1 (16 devices)
+  D Instances: 1 (16 devices)
+  Allocated Prefill QPS: 34.55 req/s
+  Allocated Decode QPS:  35.99 req/s
+  Balanced QPS: 34.55 req/s
+  Devices Used: 32/32
+  ...
+```
+
+###### 结果分析
+
+1. Prefill 的 `TTFT=1852.45 ms` 小于 `2000 ms`，Decode 的 `TPOT=41.76 ms` 小于 `50 ms`，两个阶段的指标均未超过本例设置的仿真筛选上限。当前版本在 PD 配比最终汇总的 `Input Configuration` 中显示 `TPOT Limits: None ms`；Decode 阶段仍按命令中的 `--tpot-limit 50` 筛选候选。判断约束是否满足时，应同时核对命令参数、Decode 阶段日志和最终 TPOT。该 TTFT 是包含批内波次等待的请求加权平均值，不代表每个请求或尾时延均满足 `2000 ms` 的端到端约束。
+2. 推荐分配为 `1P + 1D`，共使用 `32/32` 个 die。分配后的 Prefill 和 Decode 处理能力分别为 `34.55 req/s` 和 `35.99 req/s`，因此集群均衡吞吐 `Balanced QPS` 为 `34.55 req/s`，受 Prefill 限制。单独增加 Decode 并发不会提高该值。本次返回的并发不代表达到相同吞吐所需的最小并发。
+3. Prefill TTFT 比 `2000 ms` 上限低 `147.55 ms`（约 `7.38%`）；Decode TPOT 比 `50 ms` 上限低 `8.24 ms`（约 `16.48%`）。这些仿真余量不能证明生产时延余量充分。部署前应使用实际服务负载重新检查 TTFT、TPOT、尾时延与显存余量。
+
+###### 结果深入解读
+
+1. `Batch` 与 `Concurrency` 不是同一概念。PD 配比模式按 `Concurrency = Batch × DP` 计算总并发，Prefill 并发为 `12 × 8 = 96`，Decode 并发为 `96 × 8 = 768`。
+2. 每个实例使用的设备数由 `TP × DP × PP` 决定：Prefill 和 Decode 均为 `2 × 8 × 1 = 16` die，且均使用 `EP=16, MOE-TP=1, MOE-DP=1`。MoE 并行复用实例内的设备，不会在设备数上再乘以 EP。
+3. 本例将候选批次的请求视为同时到达，TTFT 按各波次的累计完成时间及请求数加权平均；Prefill QPS 则按全部请求完成的阶段总时长计算。每个 DP 副本分 `3` 轮处理 `12` 个请求，每轮 `4` 个。由该候选日志中的 Prefill token 吞吐（`Output Throughput: 70755.84 token/s`）和总输入量 `96 × 2048 token` 可反推阶段时长约为 `2778.68 ms`。三轮请求数相同，其累计完成时间的平均值为 TTFT，不能将平均 TTFT 作为 QPS 的分母。以下按舍入值计算：
+
+   ```text
+   P TTFT ≈ (926.23 + 1852.45 + 2778.68) / 3 = 1852.45 ms
+   P QPS ≈ 96 / 2778.68 × 1000 = 34.55 req/s
+   D QPS ≈ 768 / (41.76 × 511) × 1000 = 35.99 req/s
+   PD Ratio = D QPS / P QPS ≈ 1.04
+   Allocated P QPS = 1 × P QPS = 34.55 req/s
+   Allocated D QPS = 1 × D QPS = 35.99 req/s
+   Balanced QPS = min(Allocated P QPS, Allocated D QPS) = 34.55 req/s
+   ```
+
+   生成 `512` 个输出 token 时，首 token 之后有 `511` 个 Decode 间隔。理论 PD 配比按 `P Instance:D Instance` 表示，因此 `1.04` 表示理想情况下约需 `1.04` 个 Prefill 实例对应 `1` 个 Decode 实例。在 32 个设备、单实例 16 die 的条件下，`1P + 1D` 是唯一可行的正整数分配，并非对理论配比直接取整所得。推荐配置由分配后的均衡吞吐及配比匹配共同决定，不应以最大可行批大小替代搜索结果。实际部署应使用真实设备预算重新计算。
+4. 日志中所选 Prefill 和 Decode 候选的模拟 `Memory Left` 分别约为 `30.63 GB` 和 `29.75 GB`，均为正值，表明其在当前设备画像和估算方法下通过显存初筛。日志同时提示部分算子没有专用的属性函数，因而按显存带宽受限进行估算；负的 `activation memory` 估算被截断为 `0`。因此性能和显存结果只能作为方案筛选参考，当前摘要也不足以判断具体算子、Cube、Vector、通信或显存带宽瓶颈。模型 revision、软件版本或设备画像变化时，具体数值也可能变化。
+
+##### 无可行配置
+
+以下配置保持 `--num-devices 32` 和显式的单 DP 副本 Prefill token 预算与正常案例一致，将 Prefill 和 Decode 单实例从 `16` die 缩小至 `8` die，并关闭线性层量化。为缩短复现时间，搜索范围收窄为 `TP=2`、`EP=8`、`MOE-DP=1` 和 `Batch=1–8`；该范围调整不是本例判定显存不足的依据。
+
+```bash
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V4-Flash \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --num-devices 32 \
+    --input-length 2048 \
+    --output-length 512 \
+    --enable-optimize-prefill-decode-ratio \
+    --prefill-devices-per-instance 8 \
+    --decode-devices-per-instance 8 \
+    --ttft-limit 2000 \
+    --tpot-limit 50 \
+    --tp-sizes 2 \
+    --ep-sizes 8 \
+    --moe-dp-sizes 1 \
+    --batch-range 1 8 \
+    --max-batched-tokens 8192 \
+    --reserved-memory-gb 10 \
+    --quantize-linear-action DISABLED \
+    --quantize-attention-action DISABLED \
+    --compile \
+    --jobs 8 \
+    --log-level info
+```
+
+```text
+Memory Left: -19.19 GB
+No result found with TP 2 and num_mtp_tokens 0 for ttft None ms, tpot 50.0 ms
+Memory Left: -19.55 GB
+No result found with TP 2 and num_mtp_tokens 0 for ttft 2000.0 ms, tpot None ms
+No PD ratio results found.
+```
+
+本例的退出码为 `0`，但 Decode 和 Prefill 候选的 `Memory Left` 分别为 `-19.19 GB` 和 `-19.55 GB`，两个阶段均无有效候选，因此没有可组合的 P/D 结果。`No PD ratio results found` 也可能由模型加载失败或无有效并行配置触发，排查时应先检查前序警告和错误日志。若确认是显存不足，应优先增加每个实例的设备数、启用与实际部署一致的量化配置，或选择显存更大的设备画像；若显存超限主要来自 `KV cache` 或 `activation memory`，再考虑减小批大小或上下文长度。
+
+##### 参数冲突
+
+PD 配比模式内部已经分别执行 Prefill 与 Decode 优化，不能在上述命令中再添加 `--disagg`，否则会输出：
+
+```text
+msmodeling inference throughput-optimizer: error: PD-ratio optimization cannot be used together with disagg
+```
+
+删除 `--disagg` 后重新运行 PD 配比命令。该冲突会触发参数校验，命令将以非零状态退出。
 
 ### 2.4 KV Cache Offload 场景
 
@@ -240,9 +430,9 @@ msmodeling inference throughput-optimizer zai-org/GLM-5.2 \
 
 ### 2.5 容量规划场景
 
-容量规划模式回答反向问题：**给定目标 QPS 与 SLO，最少需要多少张卡？** 它在现有 optimizer 的寻优结果之上叠加线性推算，不改变 optimizer 本身的搜索逻辑——同一命令加不加 `--target-qps` 会走相同的仿真路径，只是前者额外给出最少卡数结论。
+容量规划模式用于估算满足目标 QPS 和 SLO 约束所需的最少设备数。工具针对指定或自动枚举的实例规模执行仿真与并行配置搜索，并基于单实例吞吐量线性推算所需实例数及总设备数。
 
-传入 `--target-qps` 即触发该模式，可与 PD 混部、PD 分离、PD 配比组合使用。
+通过 `--target-qps` 启用容量规划，支持与 PD 混部、PD 分离和 PD 配比模式组合使用。
 
 #### 聚合模式
 
@@ -258,7 +448,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 #### PD 分离模式
 
-`--disagg` 与容量规划组合时，必须**恰好指定一个**阶段 SLO，用于确定推算所依据的阶段：
+`--disagg` 与容量规划组合使用时，必须恰好指定一个阶段的 SLO，容量推算以该阶段的仿真结果为依据：
 
 ```bash
 # Prefill 阶段
@@ -306,16 +496,91 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
     --target-qps 500
 ```
 
+#### 实践案例：DeepSeek-V4-Flash 目标 QPS 容量规划
+
+本例估算 DeepSeek-V4-Flash 在 A3 设备上达到 `100 req/s` 所需的设备数，TTFT 和 TPOT 上限分别为 `2000 ms` 和 `50 ms`。
+
+省略 P/D 单实例设备数参数后，工具按 `--num-devices 32` 为两个阶段分别搜索 `8、16、32` die 的单实例规模。实例内搜索 `TP={2,4,8}`、`EP={8,16,32}`、`MOE-DP={1,2,4}` 和 `Batch=1–128`。
+
+##### 优化命令
+
+```bash
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V4-Flash \
+    --device ATLAS_800_A3_752T_128G_DIE \
+    --num-devices 32 \
+    --input-length 2048 \
+    --output-length 512 \
+    --enable-optimize-prefill-decode-ratio \
+    --target-qps 100 \
+    --ttft-limit 2000 \
+    --tpot-limit 50 \
+    --tp-sizes 2 4 8 \
+    --ep-sizes 8 16 32 \
+    --moe-dp-sizes 1 2 4 \
+    --batch-range 1 128 \
+    --max-batched-tokens 8192 \
+    --reserved-memory-gb 10 \
+    --quantize-linear-action W8A8_DYNAMIC \
+    --quantize-attention-action DISABLED \
+    --compile \
+    --jobs 8 \
+    --log-level info
+```
+
+##### 容量推算结果
+
+下表比较 7 组 P/D 单实例规模，容量结果根据阶段日志按 5.3 的公式离线推算。
+
+| P / D 单实例规模（die） | P / D 实例数 | 总设备数（die） | Achieved QPS（req/s） | Per-die QPS（req/s） |
+| --- | --- | --- | --- | --- |
+| 8 / 8 | 6 / 16 | 176 | 100.37 | 0.57 |
+| 8 / 16 | 6 / 3 | 96 | 105.14 | 1.10 |
+| 8 / 32 | 6 / 1 | 80 | 102.74 | 1.28 |
+| 16 / 8 | 3 / 16 | 176 | 100.37 | 0.57 |
+| 16 / 16 | 3 / 3 | 96 | 103.65 | 1.08 |
+| 16 / 32 | 3 / 1 | 80 | 102.74 | 1.28 |
+| 32 / 8 | 2 / 16 | 192 | 100.37 | 0.52 |
+
+每行取对应实例规模组合中按当前容量规则排序的首行。所有行使用本轮相同的模型、负载、量化、SLO 和扩展后的并行搜索范围；`16 / 16` 行不是直接复用 2.3 的推荐配置。
+
+在这 7 组已覆盖的候选中，当前排序的首行配置如下：
+
+| 配置项 | Prefill | Decode |
+| --- | --- | --- |
+| 单实例设备数 | 8 die | 32 die |
+| TP / DP / PP | 2 / 4 / 1 | 2 / 16 / 1 |
+| EP / MOE-TP / MOE-DP | 8 / 1 / 1 | 32 / 1 / 1 |
+| Batch / Concurrency | 12 / 48 | 128 / 2048 |
+| 单实例请求 QPS | 17.52 req/s | 102.74 req/s |
+| 阶段时延 | TTFT 1826.075 ms | TPOT 39.011 ms |
+| 日志中的模拟 Memory Left | 14.51 GB | 37.12 GB |
+
+##### 容量结果解读
+
+1. 两侧单实例指标均满足本例的仿真筛选条件。按目标 QPS 独立计算实例数，再取两侧扩容能力的较小值。以下使用显示值演示；实际取整使用未提前舍入的 QPS：
+
+   ```text
+   P instances = ceil(100 / 17.52) = 6
+   D instances = ceil(100 / 102.74) = 1
+   Total dies = 6 × 8 + 1 × 32 = 80
+   Achieved QPS ≈ min(6 × 17.52, 1 × 102.74) = 102.74 req/s
+   Per-die QPS ≈ 102.74 / 80 = 1.28 req/s
+   ```
+
+2. 理论 PD 配比为 `D QPS / P QPS ≈ 5.86`，表示 P:D 实例数量关系；整数容量方案为 `6P + 1D`，不是 P/D 设备数之比，也不是吞吐提升倍数。当前容量规则按总设备数升序、设备数相同时按 `Per-die QPS` 降序排列；共有 6 条候选在这两个排序指标上并列，包括 `3` 个 16-die P 实例配 `1` 个 32-die D 实例，不能将首行解释为唯一最优布局。
+3. 同一轮的 `16 / 16` 子空间需要 `3P + 3D`、共 `96` die；表中 `8 / 32` 与 `16 / 32` 方案均需 `80` die，在满足同一目标 QPS 时少 `16` die（约 `16.7%`）。这是已覆盖候选中的仿真容量比较，不是实际吞吐提升或任意部署范围内的全局最优结论。
+4. 模拟显存余量为正，表示所选配置通过显存筛选。部署前应使用实际负载验证集群调度、P/D 间 KV 传输和尾时延。
+
 #### 约束
 
 - `--target-qps` 必须为正数；只要传入即触发容量规划模式。
 - `--num-devices` 变为可选：
-  - 指定时，容量规划只在该卡数上运行一次 optimizer；该值同时作为 PD 配比自动搜索中每实例卡数的上限。
-  - 不指定时，从设备画像的 `comm_grid` 推导起始预算，并枚举到 `comm_grid` 容量的**全部** 2 的幂预算，每个预算完整运行一次 optimizer，结果合并后取全局最少卡数。单卡 QPS 随卡数非单调（更大预算可能引入更优并行结构），因此不做提前退出；预算次数有限，例如 A3 的 `comm_grid` 容量为 768、共 8 个预算。
-  - 取值超过设备 `comm_grid` 容量时直接判为不可行，不会再运行注定失败的 optimizer。
+  - 指定时，聚合或单阶段分离模式只在该设备数上运行一次 optimizer；PD 配比自动搜索将该值作为 P/D 各自单实例规模的上限，检查容量边界后对可运行的组合执行 optimizer。显式指定 P/D 单实例规模时，按两者之和运行一次。该值不限制容量推算的最终总设备数。
+  - 不指定时，从设备画像的 `comm_grid` 推导预算序列，按起始预算逐次翻倍，并包含 `comm_grid` 容量上限。聚合或单阶段分离模式逐一运行各预算；PD 配比自动搜索则枚举 P/D 预算的全部组合。合并结果后选取所搜索候选中的最少设备数。单卡 QPS 随卡数非单调，因此不做提前退出；例如 A3 的 `comm_grid` 容量为 768、共 8 个预算。
+  - 每次运行前检查 `comm_grid` 容量；PD 配比按该组 P/D 单实例设备数之和检查，超界组合会被跳过。PD 自动搜索中，`--num-devices` 超过 grid 容量不会使整个搜索无效，仍会搜索 grid 范围内的预算。
 - `--disagg` 与容量规划组合时，`--ttft-limit` 与 `--tpot-limit` 必须恰有一个；同时给出或都不给出会显式报错，避免静默改用聚合仿真路径。
-- PD 配比自动搜索会枚举 P、D 每实例卡数的全部组合（`p_budgets × d_budgets`），组合数随预算数量平方增长。每实例卡数预算来自设备 `comm_grid`，与 `--tp-sizes` 无关——TP 是实例**内部**的并行结构，实例卡数应以其乘积（`TP × PP`）为量级；需要精确控制时请显式传入 `--prefill-devices-per-instance` / `--decode-devices-per-instance`。
-- `--tp-sizes` / `--pp-sizes` / `--ep-sizes` 等搜索维度在容量规划下语义不变，仍控制**每个实例内部**的并行结构搜索。
+- PD 配比自动搜索会枚举 P、D 每实例卡数的全部组合（`p_budgets × d_budgets`），组合数随预算数量平方增长。每实例卡数预算来自设备 `comm_grid`，与 `--tp-sizes` 无关。实例设备数为 `TP × DP × PP`；MoE 并行复用实例内设备，不再额外乘以 EP。需要固定实例规模时请成对指定 `--prefill-devices-per-instance` / `--decode-devices-per-instance`。
+- 在容量规划模式下，`--tp-sizes`、`--pp-sizes`、`--ep-sizes` 等参数仍用于搜索实例内的并行配置。
 - 容量规划模式下 `--device` 只取第一个设备；传入多个设备时会在日志中给出告警。
 
 ## 3 结果说明
@@ -708,8 +973,8 @@ KV Cache Offload Options:
 | `--performance-model` | Performance Model Options | 可选 | 指定性能模型类型。<br>1. 类型：Str。<br>2. 参考值：`analytic`、`profiling`。<br>3. 默认值：`analytic`。<br>4. `profiling` 模式需配合 `--profiling-database-path` 使用。 |
 | `--profiling-database-path` | Performance Model Options | 条件必选 | 指定 profiling 模式使用的实测算子 CSV 数据库目录。<br>1. 类型：Str。<br>2. 取值范围：数据库目录路径，例如 `tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/`。<br>3. 默认值：`None`；使用 `--performance-model profiling` 时必填。 |
 | `--chrome-trace-file` | Debug Options | 可选 | 生成 Chrome Trace 文件，用于可视化分析算子级性能。<br>1. 类型：Str。<br>2. 参考值：Trace 文件路径，例如 `trace.json`。<br>3. 默认值：`None`，表示不生成 Chrome Trace 文件。 |
-| `--ttft-limit` | Service Options | 可选 | 指定 TTFT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TTFT。 |
-| `--tpot-limit` | Service Options | 可选 | 指定 TPOT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TPOT。 |
+| `--ttft-limit` | Service Options | 可选 | 指定 TTFT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TTFT。<br>4. 兼容别名：`--ttft-limits`。 |
+| `--tpot-limit` | Service Options | 可选 | 指定 TPOT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TPOT。<br>4. 兼容别名：`--tpot-limits`。 |
 | `--target-qps` | Service Options | 可选 | 指定目标请求 QPS（req/s）；设置后触发容量规划模式，在给定 SLO 下反推满足该 QPS 的最少卡数。<br>1. 类型：Float。<br>2. 取值范围：正数。<br>3. 默认值：`None`。<br>4. 与 `--num-devices` 的配合方式、以及 `--disagg` 下需恰好指定一个阶段 SLO 的约束，见 [2.5 容量规划场景](#25-容量规划场景)。 |
 | `--max-batched-tokens` | Service Options | 可选 | 指定单个数据并行（DP）副本在一次 prefill 或混合 prefill/decode step 的最大 batched tokens。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；自动模式先使用 `4 * input_length`，并在 Prefill OOM 时依次降级为 `2 * input_length`、`1 * input_length`。 |
 | `--max-concurrency` | Service Options | 可选 | 限制每个优化器实例的并发请求总数。<br>1. 类型：Int。<br>2. 取值范围：大于等于 1 的整数。<br>3. 默认值：`None`，表示此选项不限制并发数。 |
@@ -722,8 +987,8 @@ KV Cache Offload Options:
 | `--image-batch-size` | MultiModal Options | 可选 | 指定每个请求的图像数量。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；未设置时复用 batch size。 |
 | `--image-height` | MultiModal Options | 可选 | 指定输入图像高度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`。 |
 | `--image-width` | MultiModal Options | 可选 | 指定输入图像宽度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`。 |
-| `--prefill-devices-per-instance` | PD Ratio Optimization Options | 条件必选 | 启用 PD 配比优化时必填，指定每个 Prefill 实例的设备数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。<br>4. 用于确定 Prefill 阶段的并行配置搜索空间。 |
-| `--decode-devices-per-instance` | PD Ratio Optimization Options | 条件必选 | 启用 PD 配比优化时必填，指定每个 Decode 实例的设备数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。<br>4. 用于确定 Decode 阶段的并行配置搜索空间。 |
+| `--prefill-devices-per-instance` | PD Ratio Optimization Options | 条件必选 | 指定每个 Prefill 实例的设备数，与 Decode 参数成对提供；仅在设置 `--target-qps` 时可同时省略以自动搜索。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。<br>4. 用于确定 Prefill 阶段的并行配置搜索空间。 |
+| `--decode-devices-per-instance` | PD Ratio Optimization Options | 条件必选 | 指定每个 Decode 实例的设备数，与 Prefill 参数成对提供；仅在设置 `--target-qps` 时可同时省略以自动搜索。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。<br>4. 用于确定 Decode 阶段的并行配置搜索空间。 |
 | `--enable-optimize-prefill-decode-ratio` | PD Ratio Optimization Options | 可选 | 启用 Prefill/Decode 实例配比优化模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 不能与 `--disagg` 同时使用。 |
 
 ### 搜索维度与范围
@@ -827,9 +1092,11 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
   `P QPS = p_concurrency / prefill_phase_makespan_ms * 1000` (req/s)
 
   其中：
-  - `p_concurrency`：Prefill 阶段的批大小（并发请求数）
-  - `prefill_phase_makespan_ms`：Prefill 相位排空耗时（毫秒）；旧结果行缺失该列时回退使用 `ttft`
+  - `p_concurrency`：Prefill 阶段的总并发数；PD 配比模式按 `batch_size × DP` 计算
+  - `prefill_phase_makespan_ms`：Prefill 阶段全部请求完成的总时长，单位为毫秒
   - PP>1（流水线并行）行：吞吐列按稳态波次间隔计算，P QPS 相应取 `token/s / input_length`（完整 prompt token 口径，与吞吐分子一致；prefix cache 命中时吞吐分子仍计完整输入，分母不得用 cache-miss 长度 `effective_input_length`）
+
+  固定长度、PP=1 的 Prefill 路径将整个候选批次建模为同时到达，使用各波次请求累计完成时间的请求加权平均作为 `ttft`。该值包含候选批次内部的等待，用于时延约束筛选，不等于整个阶段的完成时长，也不代表最慢请求的 TTFT。仅在兼容缺少 `prefill_phase_makespan_ms` 字段的旧结果时，PP=1 的 QPS 计算才回退使用 `ttft`。
 
 - **Decode QPS（D QPS）**：
 
@@ -838,13 +1105,13 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
   `D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000` (req/s)
 
   其中：
-  - `d_concurrency`：Decode 阶段的批大小（并发请求数）
+  - `d_concurrency`：Decode 阶段的总并发数；PD 配比模式按 `batch_size × DP` 计算
   - `tpot`：每输出 token 时间，单位为毫秒
-  - `max(output_length - 1, 1)`：生成首 token 之后的 Decode token 数
+  - `max(output_length - 1, 1)`：首 token 之后的 Decode 步数，计算时至少取 `1`
 
 - **PD 配比**：
 
-  PD 配比表示为实现均衡吞吐量，Prefill 与 Decode 实例之间的最优比例。
+  PD 配比表示当前搜索范围内用于平衡 Prefill 与 Decode 单实例处理能力的比例。
 
   `PD 配比 = D QPS / P QPS`
 
@@ -855,17 +1122,11 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
 
 - **实例分布**：
 
-  指定 `--num-devices` 时，会计算最优的 Prefill 与 Decode 实例数量：
+  当 `--num-devices` 至少可容纳一个 Prefill 实例和一个 Decode 实例时，工具在设备预算内分配整数实例数：
 
-  1. 计算在设备预算内可容纳的总实例数：
-     `max_p_inst = total_devices / p_devices_per_instance`
-     `max_d_inst = total_devices / d_devices_per_instance`
-
-  2. 寻找 P:D 实例组合，使其：
-     - 优先最大化分配后的 `Balanced QPS`
-     - `Balanced QPS` 相同时使用更多设备
-     - 设备使用量也相同时尽可能接近理论 PD 配比
-     - 落在总设备预算内
+  1. 枚举设备预算可容纳的正整数 Decode 实例数。
+  2. 对每个 Decode 实例数，将剩余设备分配给尽可能多的完整 Prefill 实例，保留两个阶段均至少有一个实例的组合。
+  3. 选择分配后 `Balanced QPS` 最高的组合；吞吐相同时优先使用更多设备，再选择更接近理论 PD 配比的组合。
 
   分配后的集群吞吐量按以下公式计算：
 
@@ -874,6 +1135,8 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
   `Allocated D QPS = D 实例数 * D QPS`
 
   `Balanced QPS = min(Allocated P QPS, Allocated D QPS)`
+
+  设备预算可部署时，候选方案按分配后的 `Balanced QPS` 排序；否则，汇总保留单实例处理能力和理论配比，按 `Balanced QPS = min(P QPS, D QPS)` 排序，不输出实例分配结果。
 
 ### 5.3 容量规划下最少卡数的计算方法
 
