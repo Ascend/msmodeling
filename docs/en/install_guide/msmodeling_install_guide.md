@@ -206,7 +206,7 @@ If you choose the source upgrade, complete the upgrade as follows:
     pip install --upgrade -e .
     ```
 
-When upgrading versions, pay attention to the version compatibility relationships. See [Release Notes](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.2.0/release_notes.md).
+When upgrading versions, pay attention to the version compatibility relationships. See [Release Notes](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.2.0/release_notes_en.md).
 
 ## 6. Appendix
 

@@ -18,7 +18,7 @@
 
 **Linux / macOS 环境**
 
-若您的设备具备互联网访问能力，可通过一条命令自动完成工具的下载与安装。请参见昇腾社区 MindStudio [下载](https://www.hiascend.com/developer/software/mindstudio/download)页面，选择产品版本，选择“推理开发”使用场景，选择 msModeling 工具，并在安装方式中选择“在线安装”，系统将引导您完成后续操作。
+若您的设备具备互联网访问能力，可通过一条命令自动完成工具的下载与安装。请参见昇腾社区 MindStudio [下载](https://www.hiascend.com/zh/developer/software/mindstudio/download)页面，选择产品版本，选择“推理开发”使用场景，选择 msModeling 工具，并在安装方式中选择“在线安装”，系统将引导您完成后续操作。
 
 **Windows 环境**
 
@@ -38,7 +38,7 @@ pip install https://gitcode.com/Ascend/msmodeling/releases/download/tag_MindStud
 
 **Linux / macOS 环境**
 
-请参见昇腾社区 MindStudio [下载](https://www.hiascend.com/developer/software/mindstudio/download)页面，选择产品版本，选择“推理开发”使用场景，选择 msModeling 工具，并在安装方式中选择“离线安装”，获取对应的安装包及操作指引。
+请参见昇腾社区 MindStudio [下载](https://www.hiascend.com/zh/developer/software/mindstudio/download)页面，选择产品版本，选择“推理开发”使用场景，选择 msModeling 工具，并在安装方式中选择“离线安装”，获取对应的安装包及操作指引。
 
 **Windows 环境**
 
