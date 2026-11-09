@@ -1957,3 +1957,71 @@ class TestDisaggPipelineParallel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDecodeWithLengthDistribution(unittest.TestCase):
+    """A decode step with a length distribution must not use the chunk loop.
+
+    Regression: the variable-input branch ran the chunked-prefill loop for
+    decode as well, which contributed no chunks, so TPOT collapsed to
+    ``serving_cost`` (0) and the PD-ratio join dropped every D row.
+    """
+
+    def test_decode_branch_skips_chunk_loop_for_distributions(self):
+        """A decode step with a distribution must not enter the chunk loop.
+
+        Behaviour, not source text (review: hanxinlong1999): the chunked-prefill
+        branch has no prefill chunks to replay on decode, so it used to leave
+        ``tpot`` at ``serving_cost`` (0), and the PD join's ``tpot > 0`` filter
+        then dropped every D row.
+        """
+        strategy = DisaggThroughputOptimizer()
+        strategy.dp = 1
+        strategy.tp = 1
+        strategy.pp = 1
+        strategy.is_moe_model = False
+        strategy.num_mtp_tokens = 0
+        strategy.model_runner = Mock()
+        strategy.model_runner.user_input.device = "TEST_DEVICE"
+        strategy.model_runner.user_input.model_id = "test-model"
+        strategy.model_runner.user_input.quantize_linear_action = "DISABLED"
+        strategy.model_runner.user_input.quantize_attention_action = "DISABLED"
+        strategy.model_runner.model.model_config.parallel_config = Mock(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            decode_context_parallel_size=1,
+        )
+
+        # ``ttft_limits is None`` marks the decode phase.
+        optimizer_data = OptimizerData(
+            ttft_limits=None,
+            tpot_limits=100,
+            batch_size=2,
+            length_distribution=_simple_length_distribution(),
+            output_length=50,
+            serving_cost=0,
+            max_batched_tokens=8192,
+        )
+
+        batch_result = Mock(
+            execution_time_s={"analytic": 0.0125},
+            device_memory_available_gb=1.0,
+            breakdowns={},
+            offload_mode="none",
+            offload_transfer_time_ms=0.0,
+        )
+        with (
+            patch.object(
+                strategy,
+                "_get_batched_forward_info",
+                side_effect=AssertionError("decode entered the chunked-prefill loop"),
+            ),
+            patch.object(strategy, "_get_forward_info", return_value=batch_result),
+        ):
+            result = strategy.get_inference_info(optimizer_data)
+
+        row = result.get_summary_df().iloc[0]
+        # Decode latency is the decode step itself, not a collapsed 0.
+        self.assertEqual(row["tpot"], 12.5)
+        self.assertGreater(row["tpot"], 0)

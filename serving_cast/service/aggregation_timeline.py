@@ -84,7 +84,12 @@ class TimelineResult:
         return sum(r.finish_ms for r in self.requests) / len(self.requests)
 
 
-def build_requests(data: OptimizerData, concurrency: int, image_tokens_per_request: int = 0) -> list[TimelineRequest]:
+def build_requests(
+    data: OptimizerData,
+    concurrency: int,
+    image_tokens_per_request: int = 0,
+    image_tokens_per_row: list[int] | None = None,
+) -> list[TimelineRequest]:
     """Build fixed chunks once; scheduler admission never resplits them.
 
     ``image_tokens_per_request`` follows the PR-1 chunk-plan contract: the
@@ -94,6 +99,10 @@ def build_requests(data: OptimizerData, concurrency: int, image_tokens_per_reque
     timeline re-split the text-only length and the generators re-added the
     image tokens on every chunk (review: zhangzhenyu round 7 P1 —
     aggregation dropped the image-aware plan).
+
+    ``image_tokens_per_row`` is the per-bin budget (P1-02). When given it wins
+    over the scalar: a text-only bin inside a multimodal distribution keeps a
+    text-only prompt and ``carries_image=False`` (review: zhenyu_zhang F1).
     """
     if data.length_distribution is None:
         rows = [
@@ -101,16 +110,21 @@ def build_requests(data: OptimizerData, concurrency: int, image_tokens_per_reque
                 "samples": concurrency,
                 "num_input_tokens": data.input_length,
                 "query_len": data.get_effective_input_length() + image_tokens_per_request,
+                "image_budget": int(image_tokens_per_request),
             }
         ]
     else:
-        rows = [
-            dict(row, query_len=row["query_len"] + image_tokens_per_request)
-            for row in data.build_concurrency_samples(concurrency)
-        ]
+        samples = data.build_concurrency_samples(concurrency, image_token_budgets=image_tokens_per_row)
+        rows = []
+        for row in samples:
+            budget = (
+                int(row.get("image_tokens", 0)) if image_tokens_per_row is not None else int(image_tokens_per_request)
+            )
+            rows.append(dict(row, query_len=row["query_len"] + budget, image_budget=budget))
     requests = []
     for row in rows:
-        prompt = row["num_input_tokens"] + image_tokens_per_request
+        budget = int(row.get("image_budget", image_tokens_per_request))
+        prompt = row["num_input_tokens"] + budget
         query = row["query_len"]
         if query <= 0:
             raise ValueError("Aggregation requests require a positive prefill query length")
@@ -119,7 +133,7 @@ def build_requests(data: OptimizerData, concurrency: int, image_tokens_per_reque
         consumed = 0
         while consumed < query:
             q = min(data.max_batched_tokens, query - consumed)
-            if image_tokens_per_request and not chunks and q < image_tokens_per_request:
+            if budget and not chunks and q < budget:
                 # The image-bearing first chunk must hold the full placeholder
                 # span: the budget models placeholders + boundary tokens and
                 # the forward writes the whole image span in one chunk.
@@ -129,7 +143,7 @@ def build_requests(data: OptimizerData, concurrency: int, image_tokens_per_reque
                 # cross-chunk feature reuse and stays out of scope.
                 raise ValueError(
                     f"max_batched_tokens ({data.max_batched_tokens}) cannot hold the per-request "
-                    f"image token budget ({image_tokens_per_request}); raise instead of "
+                    f"image token budget ({budget}); raise instead of "
                     "straddling the image placeholders across chunks"
                 )
             consumed += q
@@ -140,7 +154,7 @@ def build_requests(data: OptimizerData, concurrency: int, image_tokens_per_reque
                     False,
                     q,
                     cached + consumed,
-                    carries_image=image_tokens_per_request > 0 and not chunks,
+                    carries_image=budget > 0 and not chunks,
                 )
             )
         requests.extend(TimelineRequest(prompt, chunks.copy()) for _ in range(row["samples"]))

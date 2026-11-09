@@ -1,0 +1,35 @@
+# Multimodal length distribution (P1-39).
+#
+# ``min_tokens``/``max_tokens`` stay *text* token counts; image tokens are
+# added on top of the representative point, so a bin's effective request
+# length is ``mid(min_tokens, max_tokens) + sum(num_image_tokens)``.
+#
+# ``images`` is optional per bin and follows this schema:
+#   min_count / max_count : how many images a request in this bin carries
+#   sizes                 : list of "HEIGHTxWIDTH", cycled by image index
+#   ids                   : optional per-image identity, matched to sizes by
+#                           index (used by the image/prefix cache keys)
+#
+# Current limitation: all image-bearing bins must agree on the per-request
+# count and the size set, because the chunk plan and ``OptimizerData.image_*``
+# describe one geometry per run. Per-bin heterogeneity is tracked as P1-02.
+bins:
+  - min_tokens: 0
+    max_tokens: 512
+    weight: 0.4
+  - min_tokens: 512
+    max_tokens: 1024
+    weight: 0.3
+    images:
+      min_count: 1
+      max_count: 1
+      sizes: ["1080x1920"]
+      ids: ["img-1080p"]
+  - min_tokens: 1024
+    max_tokens: 2048
+    weight: 0.3
+    images:
+      min_count: 1
+      max_count: 1
+      sizes: ["1080x1920"]
+      ids: ["img-1080p"]

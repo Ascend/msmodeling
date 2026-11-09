@@ -145,6 +145,15 @@ class PDRatioThroughputOptimizer:
             "batch_size_d",
             "concurrency_p",
             "concurrency_d",
+            # P1-42: vision-encoder accounting per phase. ``_d`` is always 0
+            # because decode requests carry no images — that inequality is the
+            # direct evidence that vision belongs to the P instances only.
+            *(
+                [f"{column}_p" for column in ("encoder_waves", "vision_time_ms")]
+                + [f"{column}_d" for column in ("encoder_waves", "vision_time_ms")]
+                if {"encoder_waves_p", "vision_time_ms_p", "encoder_waves_d", "vision_time_ms_d"} <= set(merged.columns)
+                else []
+            ),
             *[f"{column}_p" for column in PP_RESULT_COLUMNS],
             *[f"{column}_d" for column in PP_RESULT_COLUMNS],
         ]

@@ -31,6 +31,7 @@ from .optimizer_summary import (
 )
 from .utils import (
     DISAGG_COLUMNS,
+    IMAGE_COLUMNS,
     build_memory_info,
     format_breakdowns,
     format_parallel_label,
@@ -161,9 +162,15 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             chunk_plan = []
             global_batched_token_limit = None
         else:
+            # Same per-bin contract as the aggregation path: a text-only bin
+            # must not inherit another bin's image budget (review:
+            # zhenyu_zhang).
+            per_row_budgets = self._image_tokens_per_row(optimizer_data)
             chunk_plan = optimizer_data.get_prefill_chunk_plan(
                 (concurrency + self.dp - 1) // self.dp if variable_input_mode else None,
-                image_tokens_per_request=self._image_tokens_per_request(optimizer_data),
+                image_tokens_per_request=(
+                    per_row_budgets if per_row_budgets is not None else self._image_tokens_per_request(optimizer_data)
+                ),
             )
             global_batched_token_limit = self._get_global_batched_token_limit(optimizer_data)
 
@@ -187,13 +194,26 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             )
 
         if decode_flag or variable_input_mode or unbounded_prefill or single_prefill_fits_budget:
-            if variable_input_mode:
+            # A decode step with a length distribution must not go through the
+            # chunked-prefill loop: it has no prefill chunks to replay, so the
+            # loop contributes nothing and TPOT collapses to serving_cost (0 for
+            # PD ratio), which then empties the D frame and the whole PD join.
+            # The scalar path below resolves the decode shape from the
+            # distribution's weighted context length instead.
+            if variable_input_mode and not decode_flag:
                 chunk_results, composition_rows = self._get_batched_forward_info(
                     concurrency,
                     optimizer_data,
                     chunk_plan,
                 )
-                latency_ms = optimizer_data.serving_cost
+                # Encoder budget (P1-05): the batched forward runs the vision
+                # tower once, so the waves beyond the first are charged here as a
+                # phase overhead. Without this the disaggregated prefill path
+                # ignored --encoder-budget while the aggregation path honoured it
+                # (review: zhenyu_zhang F4).
+                latency_ms = optimizer_data.serving_cost + self._extra_vision_wave_ms(
+                    optimizer_data, concurrency, chunk_plan=chunk_plan
+                )
                 device_memory_available_gb = float("inf")
                 memory_info = None
                 breakdown_sums = {}
@@ -434,7 +454,19 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         summary = OptimizerSummary(optimizer_data)
         if memory_info:
             summary.set_memory_info(memory_info)
-        columns = DISAGG_COLUMNS.copy()
+        # P1-42/P1-05: expose the vision-encoder accounting per phase so the
+        # PD cross join can derive vision_time_ms_p / _d (vision runs on P only).
+        # Both frames decide from the workload, not from the phase, so a text-only
+        # PD run keeps the historical schema (same rule as aggregation;
+        # review: stormchasingg).
+        image_columns = list(IMAGE_COLUMNS) if self._has_image_workload(optimizer_data) else []
+        if image_columns:
+            encoder_waves, vision_time_ms = (
+                self._encoder_row_accounting(optimizer_data, max(1, concurrency)) if not decode_flag else (1, 0.0)
+            )
+        else:
+            encoder_waves, vision_time_ms = 1, 0.0
+        columns = DISAGG_COLUMNS.copy() + image_columns
         data = [
             self.model_runner.user_input.device,
             optimizer_data.num_devices,
@@ -463,6 +495,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
             memory_info["model_activation_size_gb"] if memory_info else float("nan"),
             memory_info["device_memory_available_gb"] if memory_info else float("nan"),
+            *([encoder_waves, vision_time_ms] if image_columns else []),
         ]
         rows = [data]
         if variable_input_mode and not decode_flag:

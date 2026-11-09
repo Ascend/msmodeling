@@ -104,6 +104,11 @@ class RequestInfo:
     # image inputs are still generated so the vision tower runs exactly once
     # on the chunk that carries the image placeholders.
     image_tokens_included: bool = False
+    # Per-image geometry for a request that carries heterogeneous images
+    # (P1-02). When set it takes precedence over the scalar
+    # image_batch_size/image_height/image_width trio, which can only express
+    # N identical images.
+    images: Optional[tuple] = None
     # CSA2 state belongs to the request/workload lifecycle, not the model
     # object.  Keeping it here prevents concurrent ModelRunner invocations from
     # sharing mutable compressor tails and top-k streams.
@@ -170,8 +175,12 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     # Match the varlen entry so cached-prefix tokens count as previous context.
     context_length = request.context_length or max(seq_len - query_len, 0)
     if model.is_vl_model:
-        has_image_input = all(
-            value is not None for value in (request.image_batch_size, request.image_height, request.image_width)
+        has_image_input = (
+            bool(request.images)
+            if request.images is not None
+            else all(
+                value is not None for value in (request.image_batch_size, request.image_height, request.image_width)
+            )
         )
         _validate_deepseek_v41_image_chunk(
             model.model_config.hf_config.model_type,
@@ -179,14 +188,56 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
             is_decode,
             context_length,
         )
-        image_kwargs = generate_image_inputs(
-            model,
-            request.image_batch_size,
-            request.image_height,
-            request.image_width,
-            concurrency,
-        )
-        num_image_tokens = image_kwargs.pop("num_image_tokens", 0)
+        if request.images is not None:
+            if any(
+                value is not None for value in (request.image_batch_size, request.image_height, request.image_width)
+            ):
+                raise ValueError(
+                    "request carries both per-image 'images' and the scalar "
+                    "image_batch_size/image_height/image_width; use one representation"
+                )
+            # ``groups`` is per request, so the template must be listed once per
+            # request of this forward: the scalar path replicates the image block
+            # ``batch_size`` times and the language sequence expands for every
+            # request, so a single group would under-generate the visual input
+            # (review: zhenyu_zhang F2).
+            # The language batch of this rank holds ceil(concurrency / DP)
+            # requests, so the image groups must use the same per-rank count:
+            # replicating by the global concurrency over-generates images under
+            # DP>1 (review: zhenyu_zhang).
+            parallel_config = getattr(model.model_config, "parallel_config", None)
+            dp_size = max(1, int(getattr(parallel_config, "data_parallel_size", 1) or 1))
+            per_rank_requests = max(1, (int(concurrency) + dp_size - 1) // dp_size)
+            image_kwargs = generate_image_inputs_for_specs(
+                model,
+                [tuple(request.images)] * per_rank_requests,
+                per_rank_requests,
+            )
+        else:
+            image_kwargs = generate_image_inputs(
+                model,
+                request.image_batch_size,
+                request.image_height,
+                request.image_width,
+                concurrency,
+            )
+        # Length contract: the scalar generator returns the per-request token
+        # count while ``pixel_values`` covers the whole batch. The per-spec
+        # generator is told about every request, so its ``num_image_tokens`` is
+        # the batch total -- feeding that into seq/query would inflate the
+        # request length by ``concurrency`` (review: stormchasingg). Use the
+        # per-request share, exactly like the varlen path does.
+        per_request_tokens = image_kwargs.pop("per_request_image_tokens", None) or []
+        if per_request_tokens:
+            num_image_tokens = int(per_request_tokens[0])
+            if any(int(value) != num_image_tokens for value in per_request_tokens):
+                raise ValueError(
+                    "uniform multimodal forward received requests with different image "
+                    f"token budgets: {per_request_tokens}"
+                )
+            image_kwargs.pop("num_image_tokens", None)
+        else:
+            num_image_tokens = image_kwargs.pop("num_image_tokens", 0)
         # per-image geometry and provenance are input-generation
         # metadata, not model forward inputs.
         image_kwargs.pop("per_image", None)
@@ -628,6 +679,103 @@ def resolve_multimodal_token_budget(model, image_batch_size, image_height, image
     patch_rows = grid_t * grid_h * grid_w
     merge_length = merge_size**2
     return image_batch_size * (patch_rows // merge_length + VISION_IMAGE_BOUNDARY_TOKEN_COUNT)
+
+
+_IMAGE_TEMPLATE_CACHE: dict[tuple[int, int, str], dict] = {}
+
+
+def _single_image_template(model, height: int, width: int) -> dict:
+    """Geometry/forward inputs for exactly one image of ``height x width``.
+
+    Reuses ``generate_image_inputs`` with ``image_batch_size=1`` so the token
+    formula (``patch_tokens // merge_length + VISION_IMAGE_BOUNDARY_TOKEN_COUNT``)
+    and the pixel-budget fail-closed behaviour keep a single implementation.
+    ``pixel_values`` is built on the meta device, so caching is cheap.
+    """
+    # Same key scope as ``serving_cast.service.multimodal.resolve_image_geometry``:
+    # the model instance identity matters because two processes can load two
+    # configs with the same model_id (review: stormchasingg).
+    key = (
+        height,
+        width,
+        getattr(model, "model_id", "") or "",
+        id(getattr(model, "model_config", None)),
+    )
+    template = _IMAGE_TEMPLATE_CACHE.get(key)
+    if template is None:
+        template = generate_image_inputs(model, 1, height, width, 1, concurrency_is_per_rank=True)
+        if not template:
+            raise ValueError(f"model reports no image input support but a {height}x{width} image was requested")
+        _IMAGE_TEMPLATE_CACHE[key] = template
+    return template
+
+
+def reset_image_template_cache() -> None:
+    """Drop the per-size template cache (tests and multi-model processes)."""
+    _IMAGE_TEMPLATE_CACHE.clear()
+
+
+def generate_image_inputs_for_specs(model, groups, concurrency: int) -> dict:
+    """Build multimodal inputs for a batch whose images may differ per request.
+
+    ``groups`` is a per-request sequence of ``ImageSpec`` (``vision_geometry``);
+    an empty group means a text-only request. Images are flattened in request
+    order, matching the layout ``generate_image_inputs`` produces for N identical
+    images: ``pixel_values`` concatenates every image's patches and
+    ``image_grid_thw`` carries one row per image.
+    """
+    from tensor_cast.core.vision_geometry import flatten_image_specs
+
+    if not groups:
+        return {}
+    if not flatten_image_specs(groups):
+        return {}
+    hf_config = model.model_config.hf_config
+    if hf_config.model_type == "deepseek_v41":
+        raise ValueError(
+            "per-request heterogeneous images are not supported for deepseek_v41; "
+            "keep the scalar image_batch_size/image_height/image_width inputs uniform"
+        )
+
+    pixel_values = []
+    image_grid_thw = []
+    per_image = []
+    per_request_tokens = []
+    span_offset = 0
+    for group in groups:
+        row_tokens = 0
+        for spec in group:
+            template = _single_image_template(model, spec.height, spec.width)
+            entry = (template.get("per_image") or [{}])[0]
+            pixel_values.append(template["pixel_values"])
+            image_grid_thw.append(template["image_grid_thw"])
+            token_count = int(template.get("num_image_tokens", 0))
+            per_image.append(
+                {
+                    "height": spec.height,
+                    "width": spec.width,
+                    "image_id": spec.image_id,
+                    "grid_thw": list(entry.get("grid_thw", (1, 0, 0))),
+                    "patch_rows": int(entry.get("patch_rows", 0)),
+                    "merged_rows": int(entry.get("merged_rows", 0)),
+                    "placeholder_len": int(entry.get("placeholder_len", token_count)),
+                    "num_image_tokens": token_count,
+                    "text_offset": span_offset,
+                }
+            )
+            span_offset += int(entry.get("placeholder_len", token_count))
+            row_tokens += token_count
+        per_request_tokens.append(row_tokens)
+
+    return {
+        "pixel_values": torch.cat(pixel_values, dim=0),
+        "image_grid_thw": torch.cat(image_grid_thw, dim=0),
+        # Total across the batch; per-request totals travel in
+        # ``per_request_image_tokens`` so each row can grow by its own amount.
+        "num_image_tokens": sum(per_request_tokens),
+        "per_request_image_tokens": per_request_tokens,
+        "per_image": per_image,
+    }
 
 
 def generate_image_inputs(
@@ -2076,9 +2224,51 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
                     f"image_height={request.image_height}, "
                     f"image_width={request.image_width}) at index {idx}"
                 )
-        image_requests = [
-            (idx, request) for idx, request in enumerate(requests) if request.image_batch_size is not None
-        ]
+        per_request_images = [request.images for request in requests]
+        if any(images is not None for images in per_request_images):
+            # P1-02: per-request heterogeneous images. Each request carries its
+            # own ordered spec list, so the batch may mix counts and sizes; the
+            # scalar uniformity requirement below only applies to the legacy
+            # representation.
+            for idx, request in enumerate(requests):
+                if request.images is not None and any(
+                    value is not None for value in (request.image_batch_size, request.image_height, request.image_width)
+                ):
+                    raise ValueError(
+                        "varlen request carries both per-image 'images' and the scalar "
+                        f"image_batch_size/image_height/image_width at index {idx}; use one representation"
+                    )
+            if any(is_decode_list) and not all(is_decode_list):
+                raise ValueError(
+                    "varlen multimodal batch with mixed prefill/decode requests "
+                    f"is not supported: is_decode_list={is_decode_list}"
+                )
+            groups = [tuple(images or ()) for images in per_request_images]
+            image_kwargs = generate_image_inputs_for_specs(
+                model,
+                groups,
+                sum(1 for group in groups if group),
+            )
+            per_request_tokens = image_kwargs.pop("per_request_image_tokens", [0] * len(groups))
+            image_kwargs.pop("per_image", None)
+            image_kwargs.pop("num_image_tokens", None)
+            included_flags = {requests[idx].image_tokens_included for idx, group in enumerate(groups) if group}
+            if len(included_flags) > 1:
+                raise ValueError(
+                    "varlen multimodal batch must use a uniform image_tokens_included "
+                    f"contract across image-bearing requests, got {sorted(included_flags)}"
+                )
+            if included_flags and not included_flags.pop():
+                seq_lens = [sl + tokens for sl, tokens in zip(seq_lens, per_request_tokens)]
+                if not all(is_decode_list):
+                    query_lens = [ql + tokens for ql, tokens in zip(query_lens, per_request_tokens)]
+            if all(is_decode_list):
+                image_kwargs = {}
+            image_requests = []
+        else:
+            image_requests = [
+                (idx, request) for idx, request in enumerate(requests) if request.image_batch_size is not None
+            ]
         if image_requests:
             first_image = image_requests[0][1]
             for idx, request in image_requests[1:]:

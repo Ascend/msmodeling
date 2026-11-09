@@ -63,6 +63,13 @@ class LoadGenConfig:
     num_input_tokens: int
     num_output_tokens: int
     request_rate: float
+    # Multimodal payload (P1-42): either ``[height, width]`` pairs or
+    # ``{height, width, image_id?}`` mappings, forwarded to the fixed-length
+    # load generator so the DES path can simulate image requests. Kept as a raw
+    # list here and validated where it is converted into ``ImageSpec`` objects
+    # (review: zhenyu_zhang -- without this field the YAML entry is rejected
+    # before the simulation starts).
+    images: list | None = None
 
 
 @dataclass

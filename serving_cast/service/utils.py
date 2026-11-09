@@ -24,7 +24,10 @@ from typing import Dict, Iterable, Optional, TypedDict
 
 import yaml
 
+from tensor_cast.core.vision_geometry import ImageSpec
 from tensor_cast.model_config import ParallelConfig
+
+from .multimodal import BinImages, parse_bin_images
 from tensor_cast.pipeline_parallel import UnsupportedPPConfigurationError as UnsupportedPPConfigurationError
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,10 @@ MEMORY_COLUMNS = list(MEMORY_KEY_TO_COLUMN.values())
 # text header (OptimizerSummary._memory_info) rather than as table columns.
 
 AGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns(p)", "percentage_breakdowns(d)"] + MEMORY_COLUMNS
+# Vision-encoder accounting of a candidate (P1-05). Only appended to the result
+# table when the workload actually carries images, so text-only runs keep the
+# historical schema (review: stormchasingg).
+IMAGE_COLUMNS = ["encoder_waves", "vision_time_ms"]
 # Internal phase timing used to derive disaggregated Prefill request QPS. It is
 # separate from ``ttft`` because chunked prefill reports request-average TTFT,
 # while throughput and QPS are phase-makespan metrics.
@@ -118,6 +125,12 @@ class PrefillChunk:
     # image-bearing chunk is the first one). Only this chunk receives image
     # forward inputs; later chunks of the same request are text-only.
     is_first_chunk: bool = False
+    # Per-request image template (P1-02/P1-39). Set on the request's first
+    # chunk so the forward can attribute images to the request that actually
+    # declared them, instead of falling back to the distribution-wide template
+    # (review: zhenyu_zhang -- a text-only bin inside a mixed distribution must
+    # not be charged another bin's images).
+    images: tuple = ()
 
 
 @dataclass
@@ -150,6 +163,57 @@ class OptimizerData:
     decode_devices_per_instance: Optional[int] = None
     prefix_cache_hit_rate: float = 0.0
     concurrency_search_strategy: str = "exponential"
+    # Ordered per-request image template resolved from a multimodal
+    # length distribution (P1-02). Set by __post_init__; ``None`` means the
+    # run carries images through the scalar image_* triple, or no images.
+    distribution_images: Optional[tuple] = None
+    # Maximum image patch tokens the vision encoder processes in one wave
+    # (P1-05). ``None`` keeps the historical single-wave assumption.
+    encoder_budget: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        """Fold a multimodal distribution's image config into the scalar fields.
+
+        ``--input-length <file.yaml>`` is the only multimodal entry (P1-39 adds
+        no CLI flag), so the bin-declared geometry has to become the
+        ``image_batch_size/image_height/image_width`` trio the rest of the
+        pipeline already understands. Bins must currently agree on one config;
+        explicit CLI image parameters that disagree are rejected instead of
+        being silently overwritten.
+        """
+        if self.length_distribution is None or not self.length_distribution.is_multimodal:
+            return
+        template = tuple(self.length_distribution.image_config() or ())
+        if not template:
+            return
+        self.distribution_images = template
+        distinct_sizes = {(spec.height, spec.width) for spec in template}
+        explicit = (self.image_batch_size, self.image_height, self.image_width)
+        if any(value is not None for value in explicit):
+            # The scalar triple can only describe N identical images, so it can
+            # represent the distribution only when every image shares one size.
+            if len(distinct_sizes) != 1:
+                raise ValueError(
+                    "length distribution declares heterogeneous image sizes per request "
+                    f"({len(distinct_sizes)} distinct sizes), which the scalar "
+                    "image_batch_size/image_height/image_width cannot express; "
+                    "remove the CLI image parameters and let the distribution drive it"
+                )
+            height, width = distinct_sizes.pop()
+            declared = (len(template), height, width)
+            if explicit != declared:
+                raise ValueError(
+                    "length distribution declares images "
+                    f"(count={declared[0]}, height={height}, width={width}) but the CLI sets "
+                    f"(image_batch_size={self.image_batch_size}, image_height={self.image_height}, "
+                    f"image_width={self.image_width}); keep the image geometry in one place"
+                )
+            return
+        if len(distinct_sizes) == 1:
+            # Keep the historical scalar representation for the common
+            # single-size case so every existing consumer keeps working.
+            height, width = distinct_sizes.pop()
+            self.image_batch_size, self.image_height, self.image_width = len(template), height, width
 
     def get_representative_rows(self, strategy: str = "mid") -> list[dict]:
         """
@@ -183,6 +247,12 @@ class OptimizerData:
                     "num_input_tokens": representative_point,
                     "query_len": max(1, representative_point - cached_prefix_tokens),
                     "request_ratio": bin_.weight / total_weight,
+                    # Declared per-image specs for this bin's representative
+                    # request. Token counts are resolved later, against a live
+                    # model, because they depend on the pixel budget. The key
+                    # is absent for text-only bins so the historical row shape
+                    # stays byte-identical.
+                    **({"images": bin_.images.specs(strategy=strategy)} if bin_.images is not None else {}),
                 }
             )
         return representative_rows
@@ -236,7 +306,7 @@ class OptimizerData:
     def get_prefill_chunk_plan(
         self,
         concurrency: Optional[int] = None,
-        image_tokens_per_request: int = 0,
+        image_tokens_per_request: int | list[int] | None = 0,
     ) -> list[PrefillChunk]:
         """Split the effective prefill prompt into chunks bounded by max_batched_tokens.
 
@@ -268,9 +338,18 @@ class OptimizerData:
             chunks = []
             chunk_index = 0
             remaining_token_budget = self.max_batched_tokens
-            for row in self.build_concurrency_samples(concurrency):
+            # ``image_tokens_per_request`` may be a per-bin list (P1-02): a
+            # text-only bin inside a multimodal distribution must not be charged
+            # another bin's image budget (review: zhenyu_zhang F1).
+            per_row_budgets = image_tokens_per_request if isinstance(image_tokens_per_request, list) else None
+            scalar_budget = 0 if per_row_budgets is not None else int(image_tokens_per_request or 0)
+            samples = self.build_concurrency_samples(concurrency, image_token_budgets=per_row_budgets)
+            for row in samples:
+                row_budget = (
+                    int(row.get("image_tokens", scalar_budget)) if per_row_budgets is not None else scalar_budget
+                )
                 for _ in range(row["samples"]):
-                    request_query_len = row["query_len"] + image_tokens_per_request
+                    request_query_len = row["query_len"] + row_budget
                     cached_prefix_tokens = row["num_input_tokens"] - row["query_len"]
                     consumed_query_len = 0
                     is_first_chunk = True
@@ -279,21 +358,24 @@ class OptimizerData:
                             chunk_index += 1
                             remaining_token_budget = self.max_batched_tokens
 
-                        if (
-                            is_first_chunk
-                            and image_tokens_per_request
-                            and remaining_token_budget < image_tokens_per_request
-                        ):
+                        if is_first_chunk and row_budget and remaining_token_budget < row_budget:
                             # The image-bearing first chunk must hold the full
                             # placeholder span. When earlier requests of the
                             # same wave consumed too much budget, move this
                             # request's first chunk to a fresh wave instead of
                             # straddling the image budget across chunks
                             # (review: lutean).
-                            if self.max_batched_tokens < image_tokens_per_request:
-                                raise ValueError(
+                            if self.max_batched_tokens < row_budget:
+                                # Same structural-impossibility class as the
+                                # encoder-budget guard, for every VL model, so the
+                                # runner's "skip and count" contract applies
+                                # regardless of requires_image_span_in_chunk
+                                # (review: hanxinlong1999).
+                                from .multimodal import UndeployableCandidateError
+
+                                raise UndeployableCandidateError(
                                     f"max_batched_tokens ({self.max_batched_tokens}) cannot hold "
-                                    f"the per-request image token budget ({image_tokens_per_request}); "
+                                    f"the per-request image token budget ({row_budget}); "
                                     "raise instead of straddling the image placeholders across chunks"
                                 )
                             chunk_index += 1
@@ -312,6 +394,7 @@ class OptimizerData:
                                 seq_len=cached_prefix_tokens + consumed_query_len,
                                 is_last_chunk=consumed_query_len == request_query_len,
                                 is_first_chunk=is_first_chunk,
+                                images=tuple(row.get("images") or ()) if is_first_chunk else (),
                             )
                         )
                         is_first_chunk = False
@@ -377,8 +460,13 @@ class OptimizerData:
         """Return the number of chunks represented by a prefill chunk plan."""
         return max(chunk.index for chunk in chunk_plan) + 1 if chunk_plan else 0
 
-    def build_concurrency_samples(self, concurrency: int):
+    def build_concurrency_samples(self, concurrency: int, image_token_budgets: Optional[list[int]] = None):
         rows = self.get_representative_rows()
+        if image_token_budgets is not None and len(image_token_budgets) != len(rows):
+            raise ValueError(
+                "image_token_budgets must align with the representative rows: "
+                f"got {len(image_token_budgets)} budgets for {len(rows)} bins"
+            )
         ideal_samples = [concurrency * row["request_ratio"] for row in rows]
         base_samples = [math.floor(sample) for sample in ideal_samples]
         remaining = concurrency - sum(base_samples)
@@ -396,10 +484,11 @@ class OptimizerData:
             base_samples[idx] += 1
 
         composition_rows = []
-        for row, sample in zip(rows, base_samples):
+        for idx, (row, sample) in enumerate(zip(rows, base_samples)):
             if sample <= 0:
                 continue
-            composition_rows.append({**row, "samples": sample})
+            row_image_tokens = image_token_budgets[idx] if image_token_budgets is not None else 0
+            composition_rows.append({**row, "samples": sample, "image_tokens": row_image_tokens})
 
         return composition_rows
 
@@ -409,11 +498,31 @@ class LengthBin:
     min_tokens: int
     max_tokens: int
     weight: float
+    # Declared image configuration (P1-39). ``None`` keeps the bin text-only,
+    # which is also the shape every existing distribution file has.
+    images: Optional["BinImages"] = None
 
 
 @dataclass(frozen=True)
 class LengthDistribution:
     bins: list[LengthBin]
+
+    @property
+    def is_multimodal(self) -> bool:
+        return any(bin_.images is not None for bin_ in self.bins)
+
+    def image_config(self) -> Optional[tuple["ImageSpec", ...]]:
+        """Distribution-wide per-request image template (ordered ImageSpec tuple).
+
+        Returns ``None`` for a text-only distribution; image-bearing bins must
+        already agree on one template (see ``uniform_image_config``).
+        """
+        from .multimodal import uniform_image_config
+
+        return uniform_image_config(self.bins)
+
+
+_LENGTH_BIN_KEYS = frozenset({"min_tokens", "max_tokens", "weight", "images"})
 
 
 def validate_length_distribution(bins: list[LengthBin]) -> None:
@@ -426,11 +535,20 @@ def validate_length_distribution(bins: list[LengthBin]) -> None:
             raise ValueError(f"bin {index} min_tokens must be >= 0")
         if bin_.max_tokens <= bin_.min_tokens:
             raise ValueError(f"bin {index} max_tokens must be > min_tokens")
+        if not math.isfinite(bin_.weight):
+            raise ValueError(f"bin {index} weight must be finite, got {bin_.weight!r}")
         if bin_.weight <= 0:
             raise ValueError(f"bin {index} weight must be > 0")
         if previous_max_tokens is not None and bin_.min_tokens < previous_max_tokens:
             raise ValueError(f"bin {index} ranges overlap")
         previous_max_tokens = bin_.max_tokens
+
+    # A distribution that mixes text-only and image-bearing bins is allowed:
+    # the image config is resolved distribution-wide, and a bin without
+    # ``images`` simply carries no image tokens.
+    for index, bin_ in enumerate(bins):
+        if bin_.images is not None and bin_.images.max_count > 0 and not bin_.images.sizes:
+            raise ValueError(f"bin {index} declares images but no sizes")
 
 
 def load_length_distribution(
@@ -458,11 +576,25 @@ def load_length_distribution(
         missing_keys = [key for key in ("min_tokens", "max_tokens", "weight") if key not in item]
         if missing_keys:
             raise ValueError(f"bin {index} missing required key(s): {', '.join(missing_keys)}")
+        unknown_keys = sorted(set(item) - _LENGTH_BIN_KEYS)
+        if unknown_keys:
+            raise ValueError(
+                f"bin {index} has unknown key(s): {', '.join(unknown_keys)} "
+                f"(allowed: {', '.join(sorted(_LENGTH_BIN_KEYS))}); "
+                "a typo would otherwise be ignored and silently drop the intended field"
+            )
+        try:
+            min_tokens = int(item["min_tokens"])
+            max_tokens = int(item["max_tokens"])
+            weight = float(item["weight"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"bin {index} has a non-numeric min_tokens/max_tokens/weight: {exc}") from None
         bins.append(
             LengthBin(
-                min_tokens=int(item["min_tokens"]),
-                max_tokens=int(item["max_tokens"]),
-                weight=float(item["weight"]),
+                min_tokens=min_tokens,
+                max_tokens=max_tokens,
+                weight=weight,
+                images=parse_bin_images(item.get("images"), index),
             )
         )
     validate_length_distribution(bins)

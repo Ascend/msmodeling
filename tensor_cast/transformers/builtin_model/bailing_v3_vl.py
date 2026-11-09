@@ -518,6 +518,10 @@ register_model_profile(
         # merger linear_fc1/fc2): without a pattern it stays fully
         # replicated on every rank under TP/VTP>1 and the projector's TP
         # gain is systematically under-counted (review: Hudingyi).
+        # Bailing's vision attention is a varlen call (cu_seqlens), so one
+        # forward may carry images with different patch counts.
+        supports_heterogeneous_vision=True,
+        requires_image_span_in_chunk=True,
         visual_merger_linear_mapping={
             "linear_proj.0": COLWISE_LINEAR,
             "linear_proj.2": ROWWISE_LINEAR,

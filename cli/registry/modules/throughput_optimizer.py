@@ -370,6 +370,20 @@ IMAGE_WIDTH = Param(
     cli_help="Width of the input images.",
 )
 
+ENCODER_BUDGET = Param(
+    name="encoder-budget",
+    data_type="integer",
+    default=None,
+    min=1,
+    group="Multimodal Options",
+    cli_metavar="<N>",
+    cli_help=(
+        "Maximum image patch tokens the vision encoder can process in one wave. "
+        "When a batch's total patches exceed it, the encoder runs in several "
+        "serial waves and the vision time is charged once per wave."
+    ),
+)
+
 # PD Ratio Optimization Options
 PREFILL_DEVICES_PER_INSTANCE = Param(
     name="prefill-devices-per-instance",
@@ -586,6 +600,7 @@ SPEC = ModuleSpec(
         IMAGE_BATCH_SIZE,
         IMAGE_HEIGHT,
         IMAGE_WIDTH,
+        ENCODER_BUDGET,
         # PD Ratio Optimization Options
         PREFILL_DEVICES_PER_INSTANCE,
         DECODE_DEVICES_PER_INSTANCE,

@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tensor_cast.core.vision_geometry import ImageSpec
+from serving_cast.service.multimodal import parse_bin_images
 from serving_cast.service.utils import (
     BatchRangeAction,
     LengthBin,
@@ -32,6 +34,7 @@ from serving_cast.service.utils import (
     check_string_valid,
     format_parallel_label,
     load_length_distribution,
+    validate_length_distribution,
 )
 from tensor_cast.model_config import ParallelConfig
 
@@ -582,3 +585,787 @@ class TestFormatParallelLabel(unittest.TestCase):
         pc = ParallelConfig(world_size=1, tensor_parallel_size=1)
         label = format_parallel_label(pc, is_moe_model=False, num_mtp_tokens=2)
         self.assertEqual(label, "TP=1 | PP=1 | DP=1 | MTP=2")
+
+
+class TestMultimodalLengthDistribution(unittest.TestCase):
+    """P1-39: bin-level ``images`` schema, strict validation and config folding."""
+
+    def _write(self, tmp_path: Path, body: str) -> Path:
+        path = tmp_path / "distribution.yaml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_text_only_distribution_stays_supported(self, tmp_path=None):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write(
+                Path(directory),
+                "bins:\n  - {min_tokens: 0, max_tokens: 512, weight: 1.0}\n",
+            )
+            distribution = load_length_distribution(path)
+        self.assertFalse(distribution.is_multimodal)
+        self.assertIsNone(distribution.image_config())
+        self.assertEqual(distribution.bins[0].images, None)
+
+    def test_images_are_parsed_and_expanded(self):
+        images = parse_bin_images(
+            {"min_count": 1, "max_count": 3, "sizes": ["1080x1920", "720x1280"], "ids": ["a", "b"]},
+            0,
+        )
+        self.assertEqual((images.min_count, images.max_count), (1, 3))
+        self.assertEqual(images.sizes, ((1080, 1920), (720, 1280)))
+        # count_at("mid") of [1, 3] is 2, and sizes/ids cycle by index.
+        specs = images.specs(strategy="mid")
+        self.assertEqual(
+            [(spec.height, spec.width, spec.image_id) for spec in specs], [(1080, 1920, "a"), (720, 1280, "b")]
+        )
+        self.assertEqual(
+            [(spec.height, spec.width) for spec in images.specs(strategy="max")],
+            [(1080, 1920), (720, 1280), (1080, 1920)],
+        )
+        self.assertEqual(images.specs(count=0), ())
+
+    def test_images_default_count_is_one(self):
+        images = parse_bin_images({"sizes": ["1080x1920"]}, 0)
+        self.assertEqual((images.min_count, images.max_count), (1, 1))
+
+    def test_unknown_bin_key_is_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write(
+                Path(directory),
+                "bins:\n  - {min_tokens: 0, max_tokens: 512, weight: 1.0, image: {sizes: ['1080x1920']}}\n",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_length_distribution(path)
+        self.assertIn("unknown key", str(ctx.exception))
+        self.assertIn("image", str(ctx.exception))
+
+    def test_unknown_images_key_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_bin_images({"min_count": 1, "size": ["1080x1920"]}, 2)
+        self.assertIn("bin 2", str(ctx.exception))
+        self.assertIn("size", str(ctx.exception))
+
+    def test_images_without_sizes_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_bin_images({"min_count": 1, "max_count": 2}, 0)
+        self.assertIn("no images.sizes", str(ctx.exception))
+
+    def test_bad_size_literal_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_bin_images({"sizes": ["1080by1920"]}, 1)
+        self.assertIn("bin 1", str(ctx.exception))
+        self.assertIn("HEIGHTxWIDTH", str(ctx.exception))
+
+    def test_non_finite_weight_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_length_distribution([LengthBin(min_tokens=0, max_tokens=512, weight=float("nan"))])
+        self.assertIn("finite", str(ctx.exception))
+
+    def test_non_numeric_bin_field_is_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write(
+                Path(directory),
+                "bins:\n  - {min_tokens: 0, max_tokens: 512, weight: heavy}\n",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_length_distribution(path)
+        self.assertIn("non-numeric", str(ctx.exception))
+
+    def test_distribution_folds_image_config_into_optimizer_data(self):
+        images = parse_bin_images({"sizes": ["1080x1920"]}, 0)
+        distribution = LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=512, weight=1.0, images=images)])
+        data = OptimizerData(length_distribution=distribution, output_length=128)
+        self.assertEqual((data.image_batch_size, data.image_height, data.image_width), (1, 1080, 1920))
+
+    def test_explicit_cli_geometry_must_match_distribution(self):
+        images = parse_bin_images({"sizes": ["1080x1920"]}, 0)
+        distribution = LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=512, weight=1.0, images=images)])
+        with self.assertRaises(ValueError) as ctx:
+            OptimizerData(
+                length_distribution=distribution,
+                output_length=128,
+                image_batch_size=2,
+                image_height=1080,
+                image_width=1920,
+            )
+        self.assertIn("keep the image geometry in one place", str(ctx.exception))
+
+    def test_heterogeneous_bins_are_reported_as_pending_p1_02(self):
+        small = parse_bin_images({"sizes": ["720x1280"]}, 0)
+        large = parse_bin_images({"sizes": ["1080x1920"]}, 1)
+        distribution = LengthDistribution(
+            bins=[
+                LengthBin(min_tokens=0, max_tokens=512, weight=0.5, images=small),
+                LengthBin(min_tokens=512, max_tokens=1024, weight=0.5, images=large),
+            ]
+        )
+        with self.assertRaises(ValueError) as ctx:
+            OptimizerData(length_distribution=distribution, output_length=128)
+        self.assertIn("P1-02", str(ctx.exception))
+
+    def test_representative_rows_carry_declared_images(self):
+        images = parse_bin_images({"sizes": ["1080x1920"]}, 0)
+        distribution = LengthDistribution(
+            bins=[
+                LengthBin(min_tokens=0, max_tokens=512, weight=0.5),
+                LengthBin(min_tokens=512, max_tokens=1024, weight=0.5, images=images),
+            ]
+        )
+        rows = OptimizerData(length_distribution=distribution, output_length=128).get_representative_rows()
+        # Text-only bins keep the historical row shape (no ``images`` key).
+        self.assertNotIn("images", rows[0])
+        self.assertEqual([(spec.height, spec.width) for spec in rows[1]["images"]], [(1080, 1920)])
+
+
+class TestEncoderBudget(unittest.TestCase):
+    """P1-05: --encoder-budget is declared and reaches OptimizerData."""
+
+    def test_encoder_budget_param_is_registered(self):
+        from cli.registry.modules import throughput_optimizer as spec
+
+        self.assertIn(spec.ENCODER_BUDGET, spec.SPEC.fields)
+        self.assertEqual(spec.ENCODER_BUDGET.name, "encoder-budget")
+        self.assertEqual(spec.ENCODER_BUDGET.group, "Multimodal Options")
+
+    def test_optimizer_data_defaults_to_no_budget(self):
+        data = OptimizerData(input_length=512, output_length=128)
+        self.assertIsNone(data.encoder_budget)
+
+    def test_wave_plan_math(self):
+        """waves = ceil(batch_patches / budget); one image must not be split."""
+        import math
+
+        for patches, budget, expected in (
+            (8160, 16384, 1),
+            (16320, 8192, 2),
+            (16320, 16384, 1),
+            (24480, 8192, 3),
+        ):
+            self.assertEqual(max(1, math.ceil(patches / budget)), expected)
+
+
+class TestImageSpanCapability(unittest.TestCase):
+    """Model-capability flags that gate multimodal deployability."""
+
+    def test_bailing_profile_requires_image_span_in_chunk(self):
+        from tensor_cast.transformers.builtin_model import bailing_v3_vl  # noqa: F401
+        from tensor_cast.transformers.custom_model_registry import get_vl_model_profile_attr
+
+        self.assertTrue(
+            get_vl_model_profile_attr(
+                "bailing_moe_v3_vl", "requires_image_span_in_chunk", "requires_image_span_in_chunk", False
+            )
+        )
+        self.assertTrue(
+            get_vl_model_profile_attr(
+                "bailing_moe_v3_vl", "supports_heterogeneous_vision", "supports_heterogeneous_vision", False
+            )
+        )
+
+    def test_qwen_defaults_do_not_require_span_in_chunk(self):
+        from tensor_cast.transformers.custom_model_registry import get_vl_model_profile_attr
+
+        self.assertFalse(
+            get_vl_model_profile_attr("qwen3_vl", "requires_image_span_in_chunk", "requires_image_span_in_chunk", False)
+        )
+
+
+class TestEncoderRowAccounting(unittest.TestCase):
+    """P1-05: encoder_waves / vision_time_ms must reflect the encoder plan."""
+
+    def test_no_budget_means_single_wave(self):
+        from serving_cast.service.multimodal import parse_bin_images
+
+        images = parse_bin_images({"min_count": 2, "max_count": 2, "sizes": ["1080x1920"]}, 0)
+        data = OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[LengthBin(min_tokens=0, max_tokens=512, weight=1.0, images=images)]
+            ),
+            output_length=128,
+            encoder_budget=None,
+        )
+        self.assertIsNone(data.encoder_budget)
+        self.assertEqual(len(data.distribution_images), 2)
+
+    def test_budget_is_carried_on_optimizer_data(self):
+        data = OptimizerData(input_length=512, output_length=128, encoder_budget=8192)
+        self.assertEqual(data.encoder_budget, 8192)
+
+
+class TestDesImagePayload(unittest.TestCase):
+    """P1-42: the DES path must carry the request's images and their H2D bytes."""
+
+    def test_request_keeps_image_specs(self):
+        from serving_cast.request import Request
+        from tensor_cast.core.vision_geometry import ImageSpec
+
+        specs = (ImageSpec(1080, 1920), ImageSpec(720, 1280))
+        self.assertEqual(Request(num_input_tokens=10, images=specs).images, specs)
+        self.assertEqual(Request(num_input_tokens=10).images, ())
+
+    def test_request2info_forwards_images_on_prefill_only(self):
+        from serving_cast.model_runner import ModelRunner
+        from serving_cast.request import Request, RequestState
+        from tensor_cast.core.vision_geometry import ImageSpec
+
+        specs = (ImageSpec(1080, 1920),)
+        req = Request(num_input_tokens=3000, num_output_tokens=8, images=specs)
+        req.query_len = 3000
+        req.seq_len = 3000
+        req.state = RequestState.PREFILLING
+        self.assertEqual(ModelRunner.request2info([req])[0].images, specs)
+        # The vision tower runs with prefill; decode steps carry no images but
+        # their lengths still account for the tokens.
+        req.state = RequestState.DECODING
+        self.assertIsNone(ModelRunner.request2info([req])[0].images)
+
+    def test_fixed_length_load_gen_attaches_images(self):
+        from serving_cast.load_gen import FixedLengthLoadGen
+        from tensor_cast.core.vision_geometry import ImageSpec
+
+        specs = (ImageSpec(1080, 1920),)
+        gen = FixedLengthLoadGen(
+            model_name="m",
+            num_requests=2,
+            num_input_tokens=512,
+            num_output_tokens=8,
+            request_rate=0.0,
+            images=specs,
+        )
+        self.assertTrue(all(req.images == specs for req in gen.requests.values()))
+
+
+class TestUndeployableCandidate(unittest.TestCase):
+    """Infeasible candidates are skipped and counted, not fatal (RFC §3.3.1)."""
+
+    def test_error_type_is_a_plain_exception(self):
+        from serving_cast.service.multimodal import UndeployableCandidateError
+
+        self.assertTrue(issubclass(UndeployableCandidateError, Exception))
+        self.assertIn("skip", UndeployableCandidateError.__doc__.lower())
+
+    def test_runner_skips_and_counts_an_undeployable_candidate(self):
+        """Behaviour, not source text: one bad candidate must not abort the run."""
+        from unittest import mock
+
+        from serving_cast import parallel_runner as module
+        from serving_cast.parallel_runner import ParallelRunner
+        from serving_cast.service.multimodal import UndeployableCandidateError
+
+        runner = object.__new__(ParallelRunner)
+        user_input = mock.Mock(tp_size=1, pp_size=1, num_mtp_tokens=0)
+        user_input.tp_size = 1
+        with mock.patch.object(
+            module,
+            "ModelRunner",
+            side_effect=UndeployableCandidateError("image span exceeds one chunk"),
+        ):
+            self.assertIsNone(runner._get_model_runnner(user_input))
+        self.assertEqual(runner._undeployable_candidates, 1)
+
+
+class TestDesImageConfig(unittest.TestCase):
+    """P1-42: a DES common config can declare images for the load generator."""
+
+    def test_get_load_gen_accepts_images(self):
+        from types import SimpleNamespace
+
+        from serving_cast.main import get_load_gen
+
+        cfg = SimpleNamespace(
+            load_gen_type="fixed_length",
+            num_requests=2,
+            num_input_tokens=512,
+            num_output_tokens=8,
+            request_rate=0.0,
+            images=[{"height": 1080, "width": 1920, "image_id": "a"}, [720, 1280]],
+        )
+        gen = get_load_gen(cfg)
+        specs = next(iter(gen.requests.values())).images
+        self.assertEqual([(s.height, s.width, s.image_id) for s in specs], [(1080, 1920, "a"), (720, 1280, "")])
+
+    def test_get_load_gen_without_images(self):
+        from types import SimpleNamespace
+
+        from serving_cast.main import get_load_gen
+
+        cfg = SimpleNamespace(
+            load_gen_type="fixed_length",
+            num_requests=1,
+            num_input_tokens=512,
+            num_output_tokens=8,
+            request_rate=0.0,
+        )
+        gen = get_load_gen(cfg)
+        self.assertEqual(next(iter(gen.requests.values())).images, ())
+
+
+class TestMixedDistributionImageBudgets(unittest.TestCase):
+    """F1: a text-only bin in a multimodal distribution keeps a text-only request."""
+
+    def _data(self):
+        from serving_cast.service.multimodal import BinImages
+        from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
+
+        return OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=512, weight=0.5),
+                    LengthBin(
+                        min_tokens=512,
+                        max_tokens=1024,
+                        weight=0.5,
+                        images=BinImages(min_count=1, max_count=1, sizes=((1080, 1920),)),
+                    ),
+                ]
+            ),
+            output_length=8,
+            max_batched_tokens=8192,
+        )
+
+    def test_per_row_budget_keeps_the_text_bin_text_only(self):
+        from serving_cast.service.aggregation_timeline import build_requests
+
+        data = self._data()
+        requests = build_requests(data, 4, image_tokens_per_request=2042, image_tokens_per_row=[0, 2042])
+        prompts = sorted({request.prompt_length for request in requests})
+        self.assertEqual(prompts, [256, 2810])
+        text_only = [request for request in requests if request.prompt_length == 256]
+        self.assertTrue(text_only)
+        self.assertFalse(any(chunk.carries_image for req in text_only for chunk in req.chunks))
+        image_bearing = [request for request in requests if request.prompt_length == 2810]
+        self.assertTrue(image_bearing[0].chunks[0].carries_image)
+
+    def test_chunk_plan_uses_the_same_per_row_budget(self):
+        data = self._data()
+        chunks = data.get_prefill_chunk_plan(4, image_tokens_per_request=[0, 2042])
+        self.assertEqual(sorted({chunk.query_len for chunk in chunks}), [256, 2810])
+
+
+class TestEncoderWavePacking(unittest.TestCase):
+    """F3: waves come from packing atomic images, not ceil(total/budget)."""
+
+    def _optimizer(self):
+        from types import SimpleNamespace
+
+        from serving_cast.service.base_throughput_optimizer import BaseThroughputOptimizer
+
+        class _Concrete(BaseThroughputOptimizer):
+            def get_inference_info(self, optimizer_data):  # pragma: no cover - stub
+                raise NotImplementedError
+
+        optimizer = object.__new__(_Concrete)
+        optimizer.model_runner = SimpleNamespace(
+            model=SimpleNamespace(
+                model_id="fake",
+                is_vl_model=True,
+                model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="bailing_moe_v3_vl")),
+            )
+        )
+        return optimizer
+
+    def _plan(self, optimizer, concurrency, budget, patches):
+        from unittest import mock
+
+        from serving_cast.service.utils import OptimizerData
+
+        data = OptimizerData(input_length=512, output_length=8, encoder_budget=budget)
+        with mock.patch(
+            "serving_cast.service.multimodal.resolve_image_geometry",
+            lambda model, spec: {"patch_tokens": patches},
+        ):
+            return optimizer._resolve_encoder_wave_plan(
+                data,
+                concurrency=concurrency,
+                is_decode=False,
+                forward_images=(ImageSpec(1080, 1920),),
+                image_batch_size=None,
+                image_height=None,
+                image_width=None,
+                image_tokens_included=False,
+            )
+
+    def test_three_full_images_need_three_waves(self):
+        # ceil(3*8160/12288) = 2, but no two images fit one wave.
+        plan = self._plan(self._optimizer(), 3, 12288, 8160)
+        self.assertEqual(plan["waves"], 3)
+        self.assertEqual(plan["batch_patches"], 3 * 8160)
+
+    def test_packing_still_packs_when_images_nest(self):
+        plan = self._plan(self._optimizer(), 2, 12288, 8160)
+        self.assertEqual(plan["waves"], 2)
+        small = self._plan(self._optimizer(), 2, 12288, 3000)
+        self.assertEqual(small["waves"], 1)
+
+
+class TestUndeployableCandidates(unittest.TestCase):
+    """Structurally impossible candidates share one skip-and-count contract."""
+
+    def test_chunk_plan_rejects_an_oversized_image_budget(self):
+        from serving_cast.service.multimodal import UndeployableCandidateError
+        from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
+
+        data = OptimizerData(
+            length_distribution=LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=512, weight=1.0)]),
+            output_length=8,
+            max_batched_tokens=1024,
+        )
+        with self.assertRaises(UndeployableCandidateError):
+            data.get_prefill_chunk_plan(1, image_tokens_per_request=[2042])
+
+    def test_heterogeneous_sizes_on_a_single_geometry_tower_are_skippable(self):
+        from types import SimpleNamespace
+
+        from serving_cast.service.base_throughput_optimizer import BaseThroughputOptimizer
+        from serving_cast.service.multimodal import UndeployableCandidateError
+        from serving_cast.service.utils import OptimizerData
+
+        class _Concrete(BaseThroughputOptimizer):
+            def get_inference_info(self, optimizer_data):  # pragma: no cover - stub
+                raise NotImplementedError
+
+        optimizer = object.__new__(_Concrete)
+        optimizer.model_runner = SimpleNamespace(
+            model=SimpleNamespace(
+                model_id="qwen",
+                is_vl_model=True,
+                model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_vl")),
+            )
+        )
+        data = OptimizerData(input_length=512, output_length=8)
+        with self.assertRaises(UndeployableCandidateError):
+            optimizer._get_forward_info(
+                1,
+                data,
+                False,
+                query_len=512,
+                seq_len=512,
+                forward_images=(ImageSpec(1080, 1920), ImageSpec(720, 1280)),
+                image_tokens_included=True,
+            )
+
+
+class TestVisionWaveProbeCache(unittest.TestCase):
+    """The wave probe runs once per (shape, concurrency, waves, budget)."""
+
+    def _optimizer(self):
+        from types import SimpleNamespace
+
+        from serving_cast.service.base_throughput_optimizer import BaseThroughputOptimizer
+
+        class _Concrete(BaseThroughputOptimizer):
+            def get_inference_info(self, optimizer_data):  # pragma: no cover - stub
+                raise NotImplementedError
+
+        optimizer = object.__new__(_Concrete)
+        optimizer.model_runner = SimpleNamespace(
+            model=SimpleNamespace(
+                model_id="fake",
+                is_vl_model=True,
+                model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="bailing_moe_v3_vl")),
+            )
+        )
+        return optimizer
+
+    def _data(self):
+        from serving_cast.service.multimodal import BinImages
+        from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
+
+        return OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(
+                        min_tokens=512,
+                        max_tokens=1024,
+                        weight=1.0,
+                        images=BinImages(min_count=2, max_count=2, sizes=((1080, 1920),)),
+                    )
+                ]
+            ),
+            output_length=8,
+            max_batched_tokens=8192,
+            encoder_budget=8192,
+        )
+
+    def test_repeated_probes_hit_the_cache(self):
+        from unittest import mock
+
+        optimizer = self._optimizer()
+        data = self._data()
+        plan = {"waves": 2, "batch_patches": 16320, "budget": 8192, "image_tokens_included": False}
+        calls = []
+
+        def fake_forward(*args, **kwargs):
+            from types import SimpleNamespace
+
+            calls.append(kwargs.get("forward_images"))
+            value = 0.40 if kwargs.get("forward_images") else 0.10
+            return SimpleNamespace(execution_time_s={"analytic": value})
+
+        with (
+            mock.patch(
+                "serving_cast.service.multimodal.resolve_image_geometry",
+                lambda model, spec: {"patch_tokens": 8160, "num_image_tokens": 2042},
+            ),
+            mock.patch.object(optimizer, "_get_forward_info", fake_forward),
+        ):
+            first = optimizer._extra_vision_wave_ms(data, 1, plan=plan)
+            second = optimizer._extra_vision_wave_ms(data, 1, plan=plan)
+
+        self.assertEqual(first, second)
+        self.assertGreater(first, 0.0)
+        # One image probe + one text probe, reused by the second call.
+        self.assertEqual(len(calls), 2)
+
+
+class TestImageColumnSchema(unittest.TestCase):
+    """The vision columns exist only for an image-bearing workload."""
+
+    def _optimizer(self):
+        from types import SimpleNamespace
+
+        from serving_cast.service.base_throughput_optimizer import BaseThroughputOptimizer
+
+        class _Concrete(BaseThroughputOptimizer):
+            def get_inference_info(self, optimizer_data):  # pragma: no cover - stub
+                raise NotImplementedError
+
+        optimizer = object.__new__(_Concrete)
+        optimizer.model_runner = SimpleNamespace(
+            model=SimpleNamespace(
+                model_id="fake",
+                is_vl_model=True,
+                model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="bailing_moe_v3_vl")),
+            )
+        )
+        return optimizer
+
+    def test_text_only_workload_has_no_image_columns(self):
+        from serving_cast.service.utils import OptimizerData
+
+        self.assertFalse(self._optimizer()._has_image_workload(OptimizerData(input_length=512, output_length=8)))
+
+    def test_scalar_image_workload_has_image_columns(self):
+        from serving_cast.service.utils import OptimizerData
+
+        data = OptimizerData(input_length=512, output_length=8, image_batch_size=1, image_height=1080, image_width=1920)
+        self.assertTrue(self._optimizer()._has_image_workload(data))
+
+    def test_distribution_image_workload_has_image_columns(self):
+        from serving_cast.service.multimodal import BinImages
+        from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
+
+        data = OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(
+                        min_tokens=0,
+                        max_tokens=512,
+                        weight=1.0,
+                        images=BinImages(min_count=1, max_count=1, sizes=((1080, 1920),)),
+                    )
+                ]
+            ),
+            output_length=8,
+        )
+        self.assertTrue(self._optimizer()._has_image_workload(data))
+
+    def test_image_columns_are_named(self):
+        from serving_cast.service.utils import IMAGE_COLUMNS
+
+        self.assertEqual(IMAGE_COLUMNS, ["encoder_waves", "vision_time_ms"])
+
+
+class TestDesImageConfigValidation(unittest.TestCase):
+    """DES ``load_gen.images`` entries fail with their index and value."""
+
+    def _config(self, images):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            load_gen_type="fixed_length",
+            num_requests=1,
+            num_input_tokens=512,
+            num_output_tokens=8,
+            request_rate=0.0,
+            images=images,
+        )
+
+    def test_malformed_entries_raise_a_located_error(self):
+        from serving_cast.main import get_load_gen
+
+        for bad in ([[1080]], ["abc"], [{"height": 1080}], [{"height": "x", "width": 1}], [None]):
+            with self.subTest(entry=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    get_load_gen(self._config([{"height": 1080, "width": 1920}, *bad]))
+                message = str(ctx.exception)
+                self.assertIn("load_gen.images[1]", message)
+                self.assertIn("height", message)
+
+    def test_valid_entries_still_parse(self):
+        from serving_cast.main import get_load_gen
+
+        gen = get_load_gen(self._config([[1080, 1920], {"height": 720, "width": 1280, "image_id": "a"}]))
+        images = next(iter(gen.requests.values())).images
+        self.assertEqual(
+            [(spec.height, spec.width, spec.image_id) for spec in images], [(1080, 1920, ""), (720, 1280, "a")]
+        )
+
+
+class TestPerRequestImageAttribution(unittest.TestCase):
+    """Images follow the request that declared them, also on the PD path."""
+
+    def _data(self):
+        from serving_cast.service.multimodal import BinImages
+        from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
+
+        return OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=512, weight=0.5),
+                    LengthBin(
+                        min_tokens=512,
+                        max_tokens=1024,
+                        weight=0.5,
+                        images=BinImages(min_count=1, max_count=1, sizes=((1080, 1920),)),
+                    ),
+                ]
+            ),
+            output_length=8,
+            max_batched_tokens=8192,
+            batch_size=2,
+        )
+
+    def test_chunks_carry_only_their_request_images(self):
+        data = self._data()
+        chunks = data.get_prefill_chunk_plan(4, image_tokens_per_request=[0, 2042])
+        text_chunks = [chunk for chunk in chunks if chunk.query_len == 256]
+        image_chunks = [chunk for chunk in chunks if chunk.query_len == 2810]
+        self.assertTrue(text_chunks and image_chunks)
+        self.assertFalse(any(chunk.images for chunk in text_chunks))
+        self.assertTrue(all(len(chunk.images) == 1 for chunk in image_chunks))
+        self.assertEqual({(spec.height, spec.width) for chunk in image_chunks for spec in chunk.images}, {(1080, 1920)})
+
+    def test_aggregation_result_columns_only_for_image_workloads(self):
+        from serving_cast.service.utils import IMAGE_COLUMNS
+
+        self.assertEqual(IMAGE_COLUMNS, ["encoder_waves", "vision_time_ms"])
+
+
+class TestEncodedWaveBudgetPerForward(unittest.TestCase):
+    """Only a forward that exceeds one wave pays for extra waves."""
+
+    def _optimizer(self):
+        from types import SimpleNamespace
+
+        import torch
+
+        from serving_cast.service.base_throughput_optimizer import BaseThroughputOptimizer
+
+        class _Concrete(BaseThroughputOptimizer):
+            def get_inference_info(self, optimizer_data):  # pragma: no cover - stub
+                raise NotImplementedError
+
+        parallel_config = SimpleNamespace(
+            data_parallel_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+        )
+        optimizer = object.__new__(_Concrete)
+        optimizer.model_runner = SimpleNamespace(
+            model=SimpleNamespace(
+                model_id="fake",
+                is_vl_model=True,
+                model_config=SimpleNamespace(
+                    dtype=torch.float16,
+                    parallel_config=parallel_config,
+                    hf_config=SimpleNamespace(
+                        model_type="bailing_moe_v3_vl",
+                        vision_config=SimpleNamespace(
+                            patch_size=16,
+                            spatial_merge_size=2,
+                            temporal_patch_size=2,
+                            in_channels=3,
+                        ),
+                    ),
+                ),
+            )
+        )
+        return optimizer
+
+    def _data(self, budget, max_batched_tokens, reset):
+        from serving_cast.service.multimodal import BinImages
+        from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
+
+        reset()
+        return OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(
+                        min_tokens=0,
+                        max_tokens=512,
+                        weight=1.0,
+                        images=BinImages(min_count=1, max_count=1, sizes=((1080, 1920),)),
+                    )
+                ]
+            ),
+            output_length=8,
+            batch_size=2,
+            max_batched_tokens=max_batched_tokens,
+            encoder_budget=budget,
+        )
+
+    def test_split_forwards_pay_no_extra_wave(self):
+        from serving_cast.service.multimodal import reset_geometry_cache
+
+        optimizer = self._optimizer()
+        data = self._data(8192, 2298, reset_geometry_cache)
+        plan = data.get_prefill_chunk_plan(2, image_tokens_per_request=[2042])
+        # max_batched_tokens serializes the two image requests into two forwards.
+        self.assertEqual(optimizer._extra_waves_from_chunk_plan(data, plan), 0)
+
+    def test_batched_images_beyond_one_wave_pay_one_extra_wave(self):
+        from serving_cast.service.multimodal import reset_geometry_cache
+
+        optimizer = self._optimizer()
+        data = self._data(8192, 16384, reset_geometry_cache)
+        plan = data.get_prefill_chunk_plan(2, image_tokens_per_request=[2042])
+        # 2 x 8160 patches in one forward exceeds the 8192 budget -> 2 waves.
+        self.assertEqual(optimizer._extra_waves_from_chunk_plan(data, plan), 1)
+
+
+class TestCommonConfigLoadGenImages(unittest.TestCase):
+    """F4: the public YAML entry can carry load_gen.images."""
+
+    def test_common_config_accepts_load_gen_images(self):
+        import tempfile
+        from pathlib import Path
+
+        from serving_cast.config import Config
+
+        yaml_text = """
+model_config:
+  name: test-model
+load_gen:
+  load_gen_type: fixed_length
+  num_requests: 2
+  num_input_tokens: 512
+  num_output_tokens: 8
+  request_rate: 0.0
+  images:
+    - [1080, 1920]
+serving_config:
+  max_concurrency: 4
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "common.yaml"
+            path.write_text(yaml_text, encoding="utf-8")
+            common = Config._parse_common_config(str(path))
+        self.assertEqual(common.load_gen.images, [[1080, 1920]])

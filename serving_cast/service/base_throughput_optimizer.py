@@ -23,6 +23,7 @@ from typing import Optional
 
 import pandas as pd
 
+from tensor_cast.core.vision_geometry import ImageSpec
 from tensor_cast.core.input_generator import (
     generate_inputs,
     generate_inputs_varlen,
@@ -508,15 +509,29 @@ class BaseThroughputOptimizer(ABC):
         )
 
         image_batch_size = self._resolve_image_batch_size(optimizer_data) if carry_image_input else None
+        template = getattr(optimizer_data, "distribution_images", None) if carry_image_input else None
+        if template and len({(spec.height, spec.width) for spec in template}) > 1:
+            # Heterogeneous per-request images: the spec tuple is the geometry,
+            # so the scalar triple must stay empty to avoid describing a
+            # different (uniform) request in the same key.
+            image_batch_size = image_height = image_width = None
+        else:
+            image_height = optimizer_data.image_height if carry_image_input else None
+            image_width = optimizer_data.image_width if carry_image_input else None
         return ForwardShapeKey(
             is_decode=is_decode,
             model_concurrency=concurrency,
             query_len=query_len,
             seq_len=seq_len,
             image_batch_size=image_batch_size,
-            image_height=(optimizer_data.image_height if carry_image_input else None),
-            image_width=(optimizer_data.image_width if carry_image_input else None),
+            image_height=image_height,
+            image_width=image_width,
             image_tokens_included=image_tokens_included,
+            image_specs=(
+                tuple((spec.height, spec.width, spec.image_id) for spec in template)
+                if (template and image_batch_size is None)
+                else None
+            ),
         )
 
     def get_compile_calibration_probe(
@@ -592,6 +607,16 @@ class BaseThroughputOptimizer(ABC):
         if cached_record is not None:
             return cached_record
 
+        # ``forward_images`` is only forwarded for heterogeneous requests so
+        # single-geometry keys keep the historical call shape (callers and test
+        # doubles that stub ``_get_forward_info`` are unaffected).
+        # Rebuild ImageSpec objects from the opaque fingerprint for the
+        # generators; the cache key itself stays domain-agnostic.
+        extra_kwargs = (
+            {"forward_images": tuple(ImageSpec(height, width, image_id) for height, width, image_id in key.image_specs)}
+            if key.image_specs
+            else {}
+        )
         batch_result = self._get_forward_info(
             key.model_concurrency,
             optimizer_data,
@@ -600,6 +625,7 @@ class BaseThroughputOptimizer(ABC):
             seq_len=key.seq_len,
             forward_image=(key.image_batch_size, key.image_height, key.image_width),
             image_tokens_included=key.image_tokens_included,
+            **extra_kwargs,
         )
 
         record = self._build_forward_latency_record(batch_result)
@@ -721,6 +747,165 @@ class BaseThroughputOptimizer(ABC):
 
         return latency, memory_left_gb, breakdowns, record.memory_info
 
+    def _encoder_row_accounting(self, optimizer_data: OptimizerData, concurrency: int) -> tuple[int, float]:
+        """``(encoder_waves, vision_time_ms)`` for the result row (P1-05).
+
+        ``encoder_waves`` comes from the same plan the forward uses, so it is
+        deterministic per candidate. ``vision_time_ms`` is the modelled extra
+        vision cost of the additional waves; it needs a measured vision delta, so
+        it is reported only when ``--encoder-budget`` actually splits the batch
+        and a measurement is available.
+        """
+        template = getattr(optimizer_data, "distribution_images", None)
+        plan = self._resolve_encoder_wave_plan(
+            optimizer_data,
+            concurrency=concurrency,
+            is_decode=False,
+            forward_images=tuple(template) if template else None,
+            image_batch_size=self._resolve_image_batch_size(optimizer_data),
+            image_height=optimizer_data.image_height,
+            image_width=optimizer_data.image_width,
+            image_tokens_included=False,
+        )
+        if plan is None:
+            return 1, 0.0
+        waves = int(plan["waves"])
+        if waves <= 1:
+            return 1, 0.0
+        # Reuse the plan parsed above instead of resolving it a second time
+        # (review: hanxinlong1999).
+        return waves, self._extra_vision_wave_ms(optimizer_data, concurrency, plan=plan)
+
+    def _extra_waves_from_chunk_plan(self, optimizer_data: OptimizerData, chunk_plan) -> Optional[int]:
+        """Extra encoder waves implied by the forwards the planner actually emits.
+
+        The chunk planner already serializes requests when a wave cannot hold
+        them (``max_batched_tokens``), so two image requests split into two
+        forwards cost no extra wave even though a whole-batch plan would pack them
+        into one. Returns ``None`` when the plan carries no image information, in
+        which case the caller falls back to the whole-batch plan (review:
+        zhenyu_zhang).
+        """
+        if not chunk_plan:
+            return None
+        from .multimodal import resolve_image_geometry
+
+        budget = getattr(optimizer_data, "encoder_budget", None)
+        if not budget:
+            return None
+        per_forward: dict[int, list[int]] = {}
+        for chunk in chunk_plan:
+            specs = getattr(chunk, "images", ())
+            if not specs:
+                continue
+            per_forward.setdefault(chunk.index, []).extend(
+                int(resolve_image_geometry(self.model_runner.model, spec).get("patch_tokens", 0)) for spec in specs
+            )
+        if not per_forward:
+            return None
+        extra = 0
+        for patches in per_forward.values():
+            waves = 0
+            current = 0
+            for value in patches:
+                if current and current + value > budget:
+                    waves += 1
+                    current = 0
+                current += value
+            if current:
+                waves += 1
+            extra += max(0, waves - 1)
+        return extra
+
+    def _extra_vision_wave_ms(
+        self,
+        optimizer_data: OptimizerData,
+        concurrency: int,
+        *,
+        plan: Optional[dict] = None,
+        chunk_plan=None,
+    ) -> float:
+        """Modelled cost of the vision waves beyond the first one (P1-05).
+
+        Shared by the aggregation result column and the disaggregated prefill
+        timeline so both charge the same number (review: zhenyu_zhang F4).
+        """
+        template = getattr(optimizer_data, "distribution_images", None)
+        planned_extra = self._extra_waves_from_chunk_plan(optimizer_data, chunk_plan)
+        if planned_extra is not None and planned_extra == 0:
+            # The planner already spread the images across single-wave forwards.
+            return 0.0
+        if plan is None:
+            plan = self._resolve_encoder_wave_plan(
+                optimizer_data,
+                concurrency=concurrency,
+                is_decode=False,
+                forward_images=tuple(template) if template else None,
+                image_batch_size=self._resolve_image_batch_size(optimizer_data),
+                image_height=optimizer_data.image_height,
+                image_width=optimizer_data.image_width,
+                image_tokens_included=False,
+            )
+        if plan is None:
+            return 0.0
+        waves = int(plan["waves"])
+        if planned_extra is not None:
+            waves = planned_extra + 1
+        if waves <= 1:
+            return 0.0
+        # Measure the vision delta once (same Q/S, with and without images) and
+        # scale it by the extra waves. ``encoder_budget`` is cleared on the copy
+        # so the two probes describe a single wave each.
+        import dataclasses
+
+        probe_data = dataclasses.replace(optimizer_data, encoder_budget=None)
+        # Probe the same shape the wave path charges: the request's first
+        # prefill chunk, whose lengths already contain the image budget
+        # (``image_tokens_included``), so only the vision part differs.
+        budget = self._image_tokens_per_row(optimizer_data)
+        single_budget = max(budget) if budget else self._image_tokens_per_request(optimizer_data)
+        chunk_plan = optimizer_data.get_prefill_chunk_plan(
+            concurrency=concurrency, image_tokens_per_request=single_budget
+        )
+        query_len, seq_len = chunk_plan[0].query_len, chunk_plan[0].seq_len
+        # The probe is a pure function of (shape, concurrency, waves, budget), so
+        # one candidate pays for it once even when several rows ask for the same
+        # column (review: hanxinlong1999).
+        probe_key = (query_len, seq_len, int(concurrency), waves, int(plan["budget"]))
+        if not hasattr(self, "_vision_wave_ms_cache"):
+            self._vision_wave_ms_cache = {}
+        cached_ms = self._vision_wave_ms_cache.get(probe_key)
+        if cached_ms is not None:
+            return cached_ms
+        image_metrics = self._get_forward_info(
+            concurrency,
+            probe_data,
+            False,
+            query_len=query_len,
+            seq_len=seq_len,
+            forward_images=tuple(template) if template else None,
+            image_tokens_included=True,
+        )
+        text_metrics = self._get_forward_info(
+            concurrency,
+            probe_data,
+            False,
+            query_len=query_len,
+            seq_len=seq_len,
+            forward_image=(None, None, None),
+            image_tokens_included=True,
+        )
+        vision_ms = (
+            sum(
+                image_metrics.execution_time_s.get(name, 0.0) - text_metrics.execution_time_s.get(name, 0.0)
+                for name in image_metrics.execution_time_s
+            )
+            * 1000.0
+        )
+        result = round((waves - 1) * vision_ms, 3)
+        self._vision_wave_ms_cache[probe_key] = result
+        return result
+
     def _get_forward_info(
         self,
         concurrency: int,
@@ -731,6 +916,7 @@ class BaseThroughputOptimizer(ABC):
         seq_len: int = None,
         forward_image: tuple[int | None, int | None, int | None] | None = None,
         image_tokens_included: bool = False,
+        forward_images: tuple | None = None,
     ) -> ModelRunnerMetrics:
         """Run one uniform forward and return its metrics.
 
@@ -752,7 +938,25 @@ class BaseThroughputOptimizer(ABC):
             seq_len=seq_len,
         )
 
-        if forward_image is None:
+        if forward_images is not None:
+            # Heterogeneous per-image geometry (P1-02): the spec tuple replaces
+            # the scalar triple, which cannot express mixed sizes or counts.
+            distinct_sizes = {(spec.height, spec.width) for spec in forward_images}
+            if len(distinct_sizes) > 1 and not self._supports_heterogeneous_vision():
+                # Structurally undeployable, not an internal failure: the runner
+                # skips and counts it like an oversized encoder budget, so one
+                # infeasible candidate cannot abort the whole search
+                # (review: stormchasingg).
+                from .multimodal import UndeployableCandidateError
+
+                raise UndeployableCandidateError(
+                    "the vision tower of this model requires every image in a forward to share "
+                    f"one geometry, but the request declares {len(distinct_sizes)} distinct sizes "
+                    f"({sorted(distinct_sizes)}); declare a single image size per request, or "
+                    "model the extra sizes as separate encoder waves (P1-05)"
+                )
+            image_batch_size = image_height = image_width = None
+        elif forward_image is None:
             image_batch_size = self._resolve_image_batch_size(optimizer_data)
             image_height = optimizer_data.image_height
             image_width = optimizer_data.image_width
@@ -766,6 +970,7 @@ class BaseThroughputOptimizer(ABC):
                 image_batch_size=image_batch_size,
                 image_height=image_height,
                 image_width=image_width,
+                images=tuple(forward_images) if forward_images else None,
                 concurrency=concurrency,
                 is_decode=is_decode,
                 image_tokens_included=image_tokens_included,
@@ -774,6 +979,20 @@ class BaseThroughputOptimizer(ABC):
 
         runner = self.model_runner
         assert runner is not None, "initialize() must set model_runner"
+        # P1-05: charge the vision encoder once per wave. ``waves == 1`` keeps
+        # the historical behaviour (the image-bearing forward already contains
+        # the vision tower exactly once); more waves re-run only the vision
+        # part, so the cost becomes ``text_only + waves * vision_delta``.
+        wave_plan = self._resolve_encoder_wave_plan(
+            optimizer_data,
+            concurrency=concurrency,
+            is_decode=is_decode,
+            forward_images=forward_images if forward_images is not None else None,
+            image_batch_size=image_batch_size,
+            image_height=image_height,
+            image_width=image_width,
+            image_tokens_included=image_tokens_included,
+        )
         try:
             metrics = runner.run_inference(requests, generate_inputs_func=generate_inputs)
         except HostKVCapacityExceeded as exc:
@@ -785,7 +1004,214 @@ class BaseThroughputOptimizer(ABC):
             logger.warning("Candidate rejected: %s", exc)
             metrics = _host_capacity_rejected_metrics(exc)
 
+        if wave_plan is not None and wave_plan["waves"] > 1:
+            control_metrics = self._get_forward_info(
+                concurrency,
+                optimizer_data,
+                is_decode,
+                query_len=query_len,
+                seq_len=seq_len,
+                forward_image=(None, None, None),
+                image_tokens_included=image_tokens_included,
+            )
+            metrics = self._apply_encoder_waves(
+                metrics,
+                control_metrics,
+                optimizer_data,
+                wave_plan,
+                query_len=query_len,
+                seq_len=seq_len,
+                concurrency=concurrency,
+                is_decode=is_decode,
+                image_tokens_included=image_tokens_included,
+            )
         return metrics
+
+    def _image_tokens_for_scalar_geometry(self, optimizer_data: OptimizerData, image_batch_size: int) -> int:
+        from tensor_cast.core.input_generator import resolve_multimodal_token_budget
+
+        return resolve_multimodal_token_budget(
+            self.model_runner.model,
+            image_batch_size,
+            optimizer_data.image_height,
+            optimizer_data.image_width,
+        )
+
+    def _requires_image_span_in_chunk(self) -> bool:
+        """Whether the model needs the whole image span inside one prefill chunk."""
+        model = getattr(self.model_runner, "model", None)
+        hf_config = getattr(getattr(model, "model_config", None), "hf_config", None)
+        model_type = getattr(hf_config, "model_type", None)
+        if not model_type:
+            return False
+        try:
+            from tensor_cast.transformers.custom_model_registry import get_vl_model_profile_attr
+
+            return bool(
+                get_vl_model_profile_attr(
+                    model_type, "requires_image_span_in_chunk", "requires_image_span_in_chunk", False
+                )
+            )
+        except Exception:
+            return False
+
+    def _image_tokens_per_row(self, optimizer_data: OptimizerData) -> list[int] | None:
+        """Per-bin image token budget aligned with ``get_representative_rows``.
+
+        Returns ``None`` when the run is not driven by a multimodal length
+        distribution (the scalar contract applies). Otherwise each bin is
+        charged only its own declared images, so a text-only bin inside a
+        multimodal distribution is no longer over-charged (measured: c=1
+        sampling a 256-token text bin used to report 377 ms instead of 39 ms).
+        """
+        if optimizer_data.length_distribution is None or not optimizer_data.length_distribution.is_multimodal:
+            return None
+        model = getattr(self.model_runner, "model", None)
+        if not getattr(model, "is_vl_model", False):
+            return [0] * len(optimizer_data.length_distribution.bins)
+        from serving_cast.service.multimodal import resolve_image_geometry
+
+        budgets: list[int] = []
+        for row in optimizer_data.get_representative_rows():
+            budget = sum(resolve_image_geometry(model, spec)["num_image_tokens"] for spec in row.get("images", ()))
+            budgets.append(budget)
+        limit = optimizer_data.max_batched_tokens
+        if limit and self._requires_image_span_in_chunk() and budgets:
+            worst = max(budgets)
+            if worst > limit:
+                # Same contract as the scalar path: this model scatters the
+                # positions of ``input_ids == image_token_id``, so every
+                # image-bearing request's span must fit one prefill chunk.
+                from .multimodal import UndeployableCandidateError
+
+                raise UndeployableCandidateError(
+                    "per-request image tokens exceed max_batched_tokens: this model requires the "
+                    f"image placeholder span to fit one prefill chunk (worst bin image_tokens={worst}, "
+                    f"max_batched_tokens={limit}); raise --max-batched-tokens or use fewer/smaller "
+                    "images per request"
+                )
+        return budgets
+
+    def _resolve_encoder_wave_plan(
+        self,
+        optimizer_data: OptimizerData,
+        *,
+        concurrency: int,
+        is_decode: bool,
+        forward_images,
+        image_batch_size,
+        image_height,
+        image_width,
+        image_tokens_included: bool,
+    ) -> Optional[dict]:
+        """Work out how many serial vision waves one forward needs (P1-05).
+
+        ``encoder_budget`` is the maximum image patch tokens the encoder can
+        process in a single wave. Nothing is charged when the forward carries no
+        images, when the budget is unset, or when the batch fits in one wave.
+        A single image whose patch count already exceeds the budget is not
+        split — the candidate is undeployable instead of being charged a
+        fictitious latency.
+        """
+        budget = getattr(optimizer_data, "encoder_budget", None)
+        if budget is None or is_decode:
+            return None
+        if forward_images is not None:
+            specs = tuple(forward_images)
+        elif image_batch_size is not None and image_height is not None and image_width is not None:
+            from tensor_cast.core.vision_geometry import specs_from_scalars
+
+            specs = specs_from_scalars(image_batch_size, image_height, image_width)
+        else:
+            return None
+        if not specs:
+            return None
+        model = getattr(self.model_runner, "model", None)
+        if not getattr(model, "is_vl_model", False):
+            return None
+        from serving_cast.service.multimodal import resolve_image_geometry
+
+        per_image_patches = [resolve_image_geometry(model, spec)["patch_tokens"] for spec in specs]
+        if max(per_image_patches) > budget:
+            from .multimodal import UndeployableCandidateError
+
+            raise UndeployableCandidateError(
+                "encoder_budget is smaller than a single image's patch count "
+                f"(budget={budget}, max image patches={max(per_image_patches)}); the vision "
+                "encoder cannot split one image, so this candidate is undeployable — raise "
+                "--encoder-budget or declare a smaller image"
+            )
+        batch_patches = sum(per_image_patches) * max(1, int(concurrency))
+        # Images are atomic: the encoder cannot split one image across waves, so
+        # the wave count is the number of bins a deterministic first-fit packing
+        # needs -- NOT ceil(total/budget), which is only a capacity lower bound
+        # (e.g. 3 images of 8160 patches with a 12288 budget needs 3 waves while
+        # the bound says 2; review: zhenyu_zhang F3).
+        wave_batches: list[list[int]] = []
+        for patches in per_image_patches * max(1, int(concurrency)):
+            for wave in wave_batches:
+                if sum(wave) + patches <= budget:
+                    wave.append(patches)
+                    break
+            else:
+                wave_batches.append([patches])
+        waves = max(1, len(wave_batches))
+        return {
+            "waves": waves,
+            "batch_patches": batch_patches,
+            "budget": budget,
+            "image_tokens_included": image_tokens_included,
+        }
+
+    def _apply_encoder_waves(
+        self,
+        metrics,
+        control_metrics,
+        optimizer_data: OptimizerData,
+        wave_plan: dict,
+        *,
+        query_len: int,
+        seq_len: int,
+        concurrency: int,
+        is_decode: bool,
+        image_tokens_included: bool,
+    ):
+        """Return metrics whose time is ``text_only + waves * vision_delta``.
+
+        The image-bearing forward already contains the vision tower once, so the
+        extra waves only repeat that part. ``control_metrics`` is the same-Q/S
+        forward without images; the difference is exactly the vision delta (the
+        decomposition specified in the RFC §3.3.1).
+        """
+        import copy
+
+        waves = int(wave_plan["waves"])
+        combined = copy.copy(metrics)
+        combined.execution_time_s = {}
+        for name, image_time in metrics.execution_time_s.items():
+            text_time = control_metrics.execution_time_s.get(name, 0.0)
+            combined.execution_time_s[name] = text_time + waves * (image_time - text_time)
+        # The image forward is the memory high-water mark of the whole step.
+        return combined
+
+    def _supports_heterogeneous_vision(self) -> bool:
+        """Whether the model's vision tower accepts mixed patch counts in one forward."""
+        model = getattr(self.model_runner, "model", None)
+        model_config = getattr(model, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        model_type = getattr(hf_config, "model_type", None)
+        if not model_type:
+            return False
+        try:
+            from tensor_cast.transformers.custom_model_registry import get_vl_model_profile_attr
+
+            return bool(
+                get_vl_model_profile_attr(
+                    model_type, "supports_heterogeneous_vision", "supports_heterogeneous_vision", False
+                )
+            )
+        except Exception:
+            return False
 
     def _resolve_image_batch_size(self, optimizer_data: OptimizerData) -> int | None:
         """Resolve the per-request image count.
@@ -820,6 +1246,19 @@ class BaseThroughputOptimizer(ABC):
             _IMAGE_BATCH_DEFAULT_WARNED = True
         return 1
 
+    def _has_image_workload(self, optimizer_data: OptimizerData) -> bool:
+        """Whether this candidate's workload carries images at all.
+
+        Phase independent: a disaggregated decode phase serves image-bearing
+        requests even though the vision tower runs on the prefill side, so the
+        result schema must not flip between the two frames.
+        """
+        if getattr(optimizer_data, "distribution_images", None):
+            return True
+        if optimizer_data.image_width is None or optimizer_data.image_height is None:
+            return False
+        return self._resolve_image_batch_size(optimizer_data) is not None
+
     def _image_tokens_per_request(self, optimizer_data: OptimizerData) -> int:
         """Language-side image token budget per request for the chunk planner.
 
@@ -828,9 +1267,32 @@ class BaseThroughputOptimizer(ABC):
         ``max_batched_tokens`` once the image tokens are appended by the
         varlen input generator. Text-only configurations return 0.
         """
+        template = getattr(optimizer_data, "distribution_images", None)
+        if template:
+            model = getattr(self.model_runner, "model", None)
+            if not getattr(model, "is_vl_model", False):
+                return 0
+            from serving_cast.service.multimodal import resolve_image_geometry
+
+            return sum(resolve_image_geometry(model, spec)["num_image_tokens"] for spec in template)
         image_batch_size = self._resolve_image_batch_size(optimizer_data)
         if image_batch_size is None or optimizer_data.image_width is None:
             return 0
+        if self._requires_image_span_in_chunk():
+            budget_so_far = self._image_tokens_for_scalar_geometry(optimizer_data, image_batch_size)
+            limit = optimizer_data.max_batched_tokens
+            if limit and budget_so_far > limit:
+                # The model scatters ``input_ids == image_token_id`` positions, so
+                # the image span must fit one chunk; otherwise the placeholder
+                # count and the vision embeddings disagree deep inside the model.
+                from .multimodal import UndeployableCandidateError
+
+                raise UndeployableCandidateError(
+                    "per-request image tokens exceed max_batched_tokens: this model requires the "
+                    f"image placeholder span to fit one prefill chunk (image_tokens={budget_so_far}, "
+                    f"max_batched_tokens={limit}); raise --max-batched-tokens or use fewer/smaller "
+                    "images per request"
+                )
         if not getattr(getattr(self.model_runner, "model", None), "is_vl_model", False):
             # Non-VL models never contribute an image token budget: stray
             # image parameters on a text model are configuration noise and
@@ -839,14 +1301,7 @@ class BaseThroughputOptimizer(ABC):
             # guards VL models whose own budget formula fails).
             return 0
         try:
-            from tensor_cast.core.input_generator import resolve_multimodal_token_budget
-
-            return resolve_multimodal_token_budget(
-                self.model_runner.model,
-                image_batch_size,
-                optimizer_data.image_height,
-                optimizer_data.image_width,
-            )
+            return self._image_tokens_for_scalar_geometry(optimizer_data, image_batch_size)
         except (AttributeError, ValueError) as exc:
             # Fail closed (review: zhangzhenyu round 6): a fully configured
             # image geometry whose budget cannot be resolved must not build a
@@ -936,11 +1391,26 @@ class BaseThroughputOptimizer(ABC):
                         # later chunks of the same request are text-only
                         # (image_*=None), so the image is generated and
                         # counted exactly once per request.
+                        # Images belong to the request that declared them: the
+                        # chunk plan records that request's own template, so a
+                        # text-only bin is never charged another bin's images
+                        # (review: zhenyu_zhang).
                         image_batch_size=(
-                            self._resolve_image_batch_size(optimizer_data) if chunk.is_first_chunk else None
+                            None
+                            if (getattr(optimizer_data, "distribution_images", None) or chunk.images)
+                            else (self._resolve_image_batch_size(optimizer_data) if chunk.is_first_chunk else None)
                         ),
-                        image_height=(optimizer_data.image_height if chunk.is_first_chunk else None),
-                        image_width=(optimizer_data.image_width if chunk.is_first_chunk else None),
+                        image_height=(
+                            None
+                            if (getattr(optimizer_data, "distribution_images", None) or chunk.images)
+                            else (optimizer_data.image_height if chunk.is_first_chunk else None)
+                        ),
+                        image_width=(
+                            None
+                            if (getattr(optimizer_data, "distribution_images", None) or chunk.images)
+                            else (optimizer_data.image_width if chunk.is_first_chunk else None)
+                        ),
+                        images=tuple(chunk.images) if chunk.images else None,
                         is_decode=False,
                         num_output_tokens=optimizer_data.output_length,
                         # Length contract: the chunk plan already folded the

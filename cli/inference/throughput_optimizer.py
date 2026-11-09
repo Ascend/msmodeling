@@ -318,13 +318,14 @@ def main():
     if device_targets is None:
         return 1
 
-    if isinstance(args.input_length, str) and (
-        args.enable_optimize_prefill_decode_ratio
-        or (args.disagg and (args.ttft_limits is None or args.tpot_limits is not None))
+    if (
+        isinstance(args.input_length, str)
+        and args.disagg
+        and (args.ttft_limits is None or args.tpot_limits is not None)
     ):
         logger.warning(
-            "--input-length FILE currently supports aggregation runs or disaggregation "
-            "prefill-only runs with --ttft-limit and without --tpot-limit."
+            "--input-length FILE supports aggregation runs, PD ratio optimization, or "
+            "disaggregation prefill-only runs with --ttft-limit and without --tpot-limit."
         )
         return 1
 

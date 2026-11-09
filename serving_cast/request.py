@@ -57,6 +57,11 @@ class Request:
         self.model_name: str | None = kwargs.get("model_name")
         self.num_input_tokens: int = kwargs.get("num_input_tokens", 0)
         self.num_output_tokens: int = kwargs.get("num_output_tokens", 0)  # number of expected output tokens
+        # Multimodal payload (P1-42): the ordered per-image specs the request
+        # carries. Empty for text-only requests. The DES path forwards these to
+        # the input generators so the H2D byte accounting includes
+        # ``pixel_values`` / ``image_grid_thw``.
+        self.images: tuple = tuple(kwargs.get("images") or ())
 
         # The following fields are states
         self._state: RequestState = RequestState.INITIAL

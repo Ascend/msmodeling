@@ -1110,6 +1110,95 @@ def test_agg_timeline_single_chunk_respects_image_budget(_mock_kv, _mock_sparse,
     return_value={},
 )
 @patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
+def test_agg_pp_timeline_forwards_heterogeneous_images(_mock_kv, _mock_sparse, _no_preprocessor_config):
+    """A mixed-size template must reach the PP step forward (review F5).
+
+    The scalar triple cannot express it, so without ``images=`` the image-bearing
+    step ran as a longer text-only forward and the vision cost vanished silently.
+    """
+    from serving_cast.service.agg_throughput_optimizer import AggThroughputOptimizer
+    from serving_cast.service.multimodal import parse_bin_images
+    from serving_cast.service.scheduler import DecodeFirstWithSlack
+    from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
+
+    model = _bailing_vl_model_dp(dp_size=1)
+    images = parse_bin_images(
+        {"min_count": 2, "max_count": 2, "sizes": ["1080x1920", "720x1280"]},
+        0,
+    )
+    data = OptimizerData(
+        length_distribution=LengthDistribution(
+            bins=[LengthBin(min_tokens=1000, max_tokens=1001, weight=1.0, images=images)]
+        ),
+        output_length=8,
+        batch_size=1,
+        max_batched_tokens=8192,
+    )
+
+    stage = SimpleNamespace(
+        stage_id=0,
+        kv_cache_bytes=1.0,
+        indexer_cache_bytes=0.0,
+        runtime_peak_bytes=1.0,
+        weight_bytes=1.0,
+        outgoing_payload_bytes=0.0,
+        compute_time_s_by_model={"analytic": 0.001},
+        outgoing_comm_time_s_by_model={"analytic": 0.0},
+    )
+    fake_profile = SimpleNamespace(stages=(stage, stage), transfers=(), pipeline_schedule_estimate=None, pp_size=2)
+    captured = []
+
+    def fake_get_forward_info(
+        concurrency,
+        optimizer_data,
+        is_decode,
+        *,
+        query_len=None,
+        seq_len=None,
+        forward_image=None,
+        forward_images=None,
+        image_tokens_included=False,
+    ):
+        captured.append((is_decode, forward_image, forward_images, image_tokens_included))
+        return SimpleNamespace(pipeline_profile=fake_profile)
+
+    optimizer = AggThroughputOptimizer()
+    optimizer.model_runner = _CapturingRunner(model)
+    optimizer.model_runner.total_device_memory_gb = 64.0
+    optimizer.model_runner.user_input = SimpleNamespace(block_size=128, reserved_memory_gb=0.0)
+    optimizer.scheduler = DecodeFirstWithSlack()
+    optimizer.pp = 2
+    optimizer._get_forward_info = fake_get_forward_info
+
+    budget = len(data.distribution_images) and sum(
+        2042 if (spec.height, spec.width) == (1080, 1920) else 882 for spec in data.distribution_images
+    )
+    optimizer._get_pp_timeline_metrics(data, concurrency=1, image_tokens_per_request=budget)
+
+    prefill = [entry for entry in captured if not entry[0]]
+    assert prefill, "the PP timeline must run a prefill step"
+    assert prefill[0][1] is None, "a mixed template must not be expressed as the scalar triple"
+    assert prefill[0][2] == tuple(data.distribution_images)
+    assert prefill[0][3] is True
+
+
+def test_agg_pp_step_cache_distinguishes_heterogeneous_templates():
+    from serving_cast.service.agg_throughput_optimizer import AggThroughputOptimizer
+    from tensor_cast.core.vision_geometry import ImageSpec
+
+    fingerprint = AggThroughputOptimizer._image_template_fingerprint
+    assert fingerprint(None) is None
+    assert fingerprint((ImageSpec(1080, 1920),)) == ((1080, 1920, ""),)
+    assert fingerprint((ImageSpec(1080, 1920), ImageSpec(720, 1280))) != fingerprint(
+        (ImageSpec(720, 1280), ImageSpec(1080, 1920))
+    )
+
+
+@patch(
+    "tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info",
+    return_value={},
+)
+@patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
 def test_agg_pp_timeline_carries_image_contract(_mock_kv, _mock_sparse, _no_preprocessor_config):
     from serving_cast.service.agg_throughput_optimizer import AggThroughputOptimizer
     from serving_cast.service.scheduler import DecodeFirstWithSlack

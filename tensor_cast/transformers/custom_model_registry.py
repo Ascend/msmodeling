@@ -272,6 +272,21 @@ class ModelProfile:
     # Example: "language_model.layers"
     language_layers_path_str: Optional[str] = None
 
+    # Whether the vision tower can attend over images with different patch
+    # counts inside one forward. Models whose attention splits per image and
+    # concatenates (e.g. the upstream Qwen3.5 vision tower) require every
+    # image in a forward to share one geometry; variable-length attention
+    # models (Bailing V3 VL) accept mixed sizes.
+    supports_heterogeneous_vision: bool = False
+
+    # Whether the model derives its image-placeholder count from the
+    # ``input_ids`` length of the forward (Bailing V3 VL scatters
+    # ``mask.sum()`` positions). Such a model requires the whole per-request
+    # image span to land inside one prefill chunk, otherwise the placeholder
+    # count and the vision embedding rows disagree. Models that size the
+    # scatter from the image budget instead (Qwen3.5 VL) leave this off.
+    requires_image_span_in_chunk: bool = False
+
     # Mapping for linear layers in the visual feature merger/projector.
     # Defines how visual features are projected to the language space.
     visual_merger_linear_mapping: Optional[Dict[str, Any]] = dataclasses.field(default_factory=dict)

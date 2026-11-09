@@ -15,6 +15,8 @@
 # -------------------------------------------------------------------------
 
 import argparse
+
+from tensor_cast.core.vision_geometry import ImageSpec
 import os
 
 from cli.logo import print_logo
@@ -137,12 +139,38 @@ def get_serving(instance_group):
 
 def get_load_gen(load_gen_config):
     if load_gen_config.load_gen_type == "fixed_length":
+        # P1-42: ``images`` lets a DES run simulate multimodal requests so the
+        # H2D accounting (``enable_preprocessing_modeling``) sees pixel_values.
+        raw_images = getattr(load_gen_config, "images", None) or ()
+        # Fail with the offending index and entry instead of a bare
+        # KeyError/IndexError/TypeError from deep inside the config parser
+        # (review: stormchasingg).
+        parsed_images = []
+        for position, item in enumerate(raw_images):
+            try:
+                if isinstance(item, dict):
+                    parsed_images.append(
+                        ImageSpec(
+                            int(item["height"]),
+                            int(item["width"]),
+                            str(item.get("image_id", "")),
+                        )
+                    )
+                else:
+                    parsed_images.append(ImageSpec(int(item[0]), int(item[1]), ""))
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"load_gen.images[{position}] {item!r} must be a [height, width] pair "
+                    f"or a {{height, width, image_id?}} mapping: {exc}"
+                ) from None
+        images = tuple(parsed_images)
         load_gen = FixedLengthLoadGen(
             model_name=None,
             num_requests=load_gen_config.num_requests,
             num_input_tokens=load_gen_config.num_input_tokens,
             num_output_tokens=load_gen_config.num_output_tokens,
             request_rate=load_gen_config.request_rate,
+            images=images,
         )
         return load_gen
     else:

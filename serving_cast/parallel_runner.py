@@ -32,6 +32,7 @@ from tensor_cast import config
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
+from serving_cast.service.multimodal import UndeployableCandidateError
 from tensor_cast.layers.parallel_linear import InvalidHeadParallelismError
 from .service.optimizer_factory import OptimizerFactory
 from .service.optimizer_summary import OptimizerSummary
@@ -144,6 +145,7 @@ class ParallelRunner:
             image_batch_size=self.args.image_batch_size,
             image_height=self.args.image_height,
             image_width=self.args.image_width,
+            encoder_budget=getattr(self.args, "encoder_budget", None),
             ttft_limits=self.args.ttft_limits,
             max_batched_tokens=max_batched_tokens,
             max_concurrency=getattr(self.args, "max_concurrency", None),
@@ -290,6 +292,20 @@ class ParallelRunner:
             model_runner = ModelRunner(user_input)
         except InvalidHeadParallelismError:
             # The layer already warned about the incompatible TP candidate.
+            return None
+        except UndeployableCandidateError as exc:
+            # Structurally impossible candidate (image span / encoder budget):
+            # skip and count it instead of aborting the whole search, so a
+            # search that enumerates encoder budgets or vision TP sizes keeps
+            # its feasible points (RFC §3.3.1 / P1-36).
+            self._undeployable_candidates = getattr(self, "_undeployable_candidates", 0) + 1
+            logger.warning(
+                "Skipping undeployable candidate TP %d PP %d (%d skipped so far): %s",
+                user_input.tp_size,
+                getattr(user_input, "pp_size", 1),
+                self._undeployable_candidates,
+                exc,
+            )
             return None
         except UnsupportedPPConfigurationError as exc:
             pp_size = getattr(user_input, "pp_size", 1)
@@ -897,6 +913,18 @@ class ParallelRunner:
             )
 
             return result
+        except UndeployableCandidateError as exc:
+            # Structurally impossible candidate: skip and count it rather than
+            # aborting the search (RFC §3.3.1 / P1-36).
+            self._undeployable_candidates = getattr(self, "_undeployable_candidates", 0) + 1
+            logger.warning(
+                "Skipping undeployable candidate TP %d PP %d (%d skipped so far): %s",
+                user_input.tp_size,
+                getattr(user_input, "pp_size", 1),
+                self._undeployable_candidates,
+                exc,
+            )
+            return None
         except UnsupportedPPConfigurationError as exc:
             logger.warning(
                 "Skipping candidate TP %d PP %d: %s",

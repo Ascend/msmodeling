@@ -194,6 +194,11 @@ class ModelRunner:
                 num_output_tokens=num_output_tokens,
                 seq_len=seq_len,
                 is_decode=is_decode,
+                # P1-42: keep the multimodal payload on the DES path so the
+                # generators can build pixel_values and the H2D accounting sees
+                # them. Decode steps carry no images (the vision tower runs with
+                # prefill) but keep the token accounting from the lengths.
+                images=(tuple(req.images) if (getattr(req, "images", ()) and not is_decode) else None),
             )
             transferred_batch.append(request_info)
 

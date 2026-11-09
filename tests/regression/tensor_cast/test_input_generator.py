@@ -1599,3 +1599,162 @@ def test_varlen_deepseek_v41_keeps_per_rank_images_and_metadata(_mock_kv, _mock_
     assert inputs["engram_token_mask"].shape == inputs["input_ids"].shape
     # Each request's query grows by its own 184 image tokens.
     assert inputs["attention_meta"].query_lens_values == [64 + 184, 64 + 184]
+
+
+def _fake_heterogeneous_vl_model():
+    """Minimal VL model with a Qwen3-VL style vision config for geometry tests."""
+    return SimpleNamespace(
+        is_vl_model=True,
+        model_id="stub-qwen3-vl",
+        num_hidden_layers=0,
+        unwrap=lambda: SimpleNamespace(layers=[]),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            mtp_config=None,
+            parallel_config=SimpleNamespace(
+                data_parallel_size=1, tensor_parallel_size=1, decode_context_parallel_size=1
+            ),
+            mla_config=None,
+            hf_config=SimpleNamespace(
+                model_type="qwen3_vl",
+                vision_config=SimpleNamespace(
+                    patch_size=16,
+                    spatial_merge_size=2,
+                    temporal_patch_size=2,
+                    in_channels=3,
+                ),
+            ),
+        ),
+    )
+
+
+def test_heterogeneous_image_inputs_mix_sizes_and_counts():
+    from tensor_cast.core.input_generator import generate_image_inputs_for_specs, reset_image_template_cache
+    from tensor_cast.core.vision_geometry import ImageSpec
+
+    reset_image_template_cache()
+    model = _fake_heterogeneous_vl_model()
+    groups = [
+        (ImageSpec(1080, 1920),),
+        (ImageSpec(720, 1280), ImageSpec(1080, 1920)),
+        (),
+    ]
+    kwargs = generate_image_inputs_for_specs(model, groups, concurrency=2)
+
+    # 1080p -> 8160 patches / 2042 tokens, 720p -> 3520 patches / 882 tokens.
+    assert kwargs["image_grid_thw"].tolist() == [[1, 68, 120], [1, 44, 80], [1, 68, 120]]
+    assert kwargs["pixel_values"].shape[0] == 8160 + 3520 + 8160
+    assert kwargs["num_image_tokens"] == 2042 + (882 + 2042)
+    # Per-request totals drive each row's own length growth.
+    assert kwargs["per_request_image_tokens"] == [2042, 882 + 2042, 0]
+
+
+def test_heterogeneous_image_inputs_report_per_image_offsets():
+    from tensor_cast.core.input_generator import generate_image_inputs_for_specs, reset_image_template_cache
+    from tensor_cast.core.vision_geometry import ImageSpec
+
+    reset_image_template_cache()
+    model = _fake_heterogeneous_vl_model()
+    kwargs = generate_image_inputs_for_specs(model, [(ImageSpec(720, 1280), ImageSpec(1080, 1920))], concurrency=1)
+    per_image = kwargs["per_image"]
+    assert [entry["grid_thw"] for entry in per_image] == [[1, 44, 80], [1, 68, 120]]
+    assert per_image[0]["text_offset"] == 0
+    assert per_image[1]["text_offset"] == per_image[0]["placeholder_len"]
+
+
+def test_heterogeneous_image_inputs_match_the_uniform_path_for_one_size():
+    from tensor_cast.core.input_generator import (
+        generate_image_inputs,
+        generate_image_inputs_for_specs,
+        reset_image_template_cache,
+    )
+    from tensor_cast.core.vision_geometry import ImageSpec
+
+    reset_image_template_cache()
+    model = _fake_heterogeneous_vl_model()
+    uniform = generate_image_inputs(model, 2, 1080, 1920, 1)
+    hetero = generate_image_inputs_for_specs(model, [(ImageSpec(1080, 1920), ImageSpec(1080, 1920))], concurrency=1)
+    assert uniform["num_image_tokens"] == hetero["num_image_tokens"]
+    assert uniform["pixel_values"].shape == hetero["pixel_values"].shape
+    assert uniform["image_grid_thw"].tolist() == hetero["image_grid_thw"].tolist()
+
+
+def test_heterogeneous_image_inputs_reject_deepseek_v41():
+    from tensor_cast.core.input_generator import generate_image_inputs_for_specs
+    from tensor_cast.core.vision_geometry import ImageSpec
+
+    model = _fake_heterogeneous_vl_model()
+    model.model_config.hf_config.model_type = "deepseek_v41"
+    with pytest.raises(ValueError, match="deepseek_v41"):
+        generate_image_inputs_for_specs(model, [(ImageSpec(1080, 1920),)], concurrency=1)
+
+
+def test_specs_from_scalars_contract():
+    from tensor_cast.core.vision_geometry import specs_from_scalars
+
+    assert specs_from_scalars(None, None, None) == ()
+    assert specs_from_scalars(0, None, None) == ()
+    assert len(specs_from_scalars(3, 1080, 1920)) == 3
+    with pytest.raises(ValueError, match="partial image geometry"):
+        specs_from_scalars(1, None, 1920)
+
+
+def test_specs_path_replicates_the_template_for_every_request():
+    """F2: one group per request; a 3-request forward needs 3x the images."""
+    from tensor_cast.core.input_generator import (
+        generate_inputs,
+        reset_image_template_cache,
+    )
+    from tensor_cast.core.vision_geometry import ImageSpec
+
+    reset_image_template_cache()
+    model = _fake_heterogeneous_vl_model()
+    request = RequestInfo(
+        query_len=8,
+        seq_len=8,
+        num_input_tokens=8,
+        num_output_tokens=2,
+        is_decode=False,
+        images=(ImageSpec(1080, 1920), ImageSpec(720, 1280)),
+        concurrency=3,
+    )
+    kwargs = generate_inputs(model, [request] * 3, block_size=128)
+
+    # 3 requests x 2 images = 6 grid rows, matching the replicated scalar path.
+    assert len(kwargs["image_grid_thw"]) == 6
+    assert kwargs["pixel_values"].shape[0] == 3 * (8160 + 3520)
+    # The language side must grow by ONE request's image tokens (1080p 2042 +
+    # 720p 882), not by the whole-batch total (review: stormchasingg).
+    meta = kwargs["attention_meta"]
+    assert meta.seq_lens_values == [8 + 2042 + 882] * 3
+    assert meta.query_lens_values == [8 + 2042 + 882] * 3
+
+
+def test_image_groups_follow_per_rank_requests_under_data_parallelism():
+    """DP>1: the image groups must match this rank's language requests (F2)."""
+    from tensor_cast.core.input_generator import (
+        generate_inputs,
+        reset_image_template_cache,
+    )
+    from tensor_cast.core.vision_geometry import ImageSpec
+
+    reset_image_template_cache()
+    model = _fake_heterogeneous_vl_model()
+    try:
+        for dp, expected_requests, expected_rows in ((1, 3, 6), (2, 2, 4)):
+            model.model_config.parallel_config.data_parallel_size = dp
+            request = RequestInfo(
+                query_len=8,
+                seq_len=8,
+                num_input_tokens=8,
+                num_output_tokens=2,
+                is_decode=False,
+                images=(ImageSpec(1080, 1920), ImageSpec(720, 1280)),
+                concurrency=3,
+            )
+            kwargs = generate_inputs(model, [request] * 3, block_size=128)
+            meta = kwargs["attention_meta"]
+            assert len(meta.seq_lens_values) == expected_requests
+            assert len(kwargs["image_grid_thw"]) == expected_rows
+    finally:
+        model.model_config.parallel_config.data_parallel_size = 1

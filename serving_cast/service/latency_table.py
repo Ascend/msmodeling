@@ -41,6 +41,12 @@ class ForwardShapeKey:
     # carries image forward inputs, later chunks are text-only — which makes
     # the key space distinguish "vision tower runs" from "language only".
     image_tokens_included: bool = False
+    # Opaque fingerprint of the per-image geometry when the request carries
+    # heterogeneous images (P1-02): ``((height, width, image_id), ...)``.
+    # Takes precedence over the scalar image_* triple, which can only express
+    # N identical images. Kept as plain primitives so this cache infrastructure
+    # never depends on the multimodal domain objects (review: zwt__).
+    image_specs: tuple[tuple[int, int, str], ...] | None = None
 
 
 @dataclass(frozen=True)
