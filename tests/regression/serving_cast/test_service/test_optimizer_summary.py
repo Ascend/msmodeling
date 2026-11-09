@@ -48,7 +48,7 @@ class TestSummary(unittest.TestCase):
         self.assertIsNone(self.summary._summary_df)
         self.assertEqual(self.summary.data_config, self.data_config)
 
-    def test_chunked_prefill_qps_uses_phase_makespan_not_average_ttft(self):
+    def test_chunked_prefill_qps_uses_average_ttft(self):
         row = pd.Series(
             {
                 "concurrency": 5,
@@ -58,9 +58,9 @@ class TestSummary(unittest.TestCase):
             }
         )
 
-        self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 5 / 37 * 1000)
+        self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 5 / 25 * 1000)
 
-    def test_prefill_qps_does_not_fallback_when_phase_makespan_is_invalid(self):
+    def test_prefill_qps_uses_ttft_when_phase_makespan_is_invalid(self):
         row = pd.Series(
             {
                 "concurrency": 5,
@@ -70,7 +70,7 @@ class TestSummary(unittest.TestCase):
             }
         )
 
-        self.assertIsNone(_compute_disagg_request_qps(row, output_length=None))
+        self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 5 / 25 * 1000)
 
     def test_prefill_qps_uses_ttft_for_legacy_rows_without_phase_makespan(self):
         row = pd.Series({"concurrency": 5, "ttft": 25.0, "tpot": None})
@@ -136,9 +136,8 @@ class TestSummary(unittest.TestCase):
 
         self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 6 / 9789.9 * 1000)
 
-    def test_pp1_prefill_qps_keeps_phase_makespan_time_base(self):
-        # PP=1 keeps the #527 contract: token/s and QPS both stay on the
-        # drain-makespan time base.
+    def test_pp1_prefill_qps_uses_ttft_time_base(self):
+        # PP=1 token/s and QPS both use request-average TTFT.
         row = pd.Series(
             {
                 "concurrency": 5,
@@ -146,12 +145,13 @@ class TestSummary(unittest.TestCase):
                 "tpot": None,
                 "prefill_phase_makespan_ms": 37.0,
                 "pp_size": 1,
-                "token/s": 120.0,
+                "token/s": 20000.0,
+                "input_length": 100.0,
                 "effective_input_length": 100.0,
             }
         )
 
-        self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 5 / 37 * 1000)
+        self.assertAlmostEqual(_compute_disagg_request_qps(row, output_length=None), 5 / 25 * 1000)
 
     def test_set_and_get_summary_df(self):
         """Test setting and getting summary DataFrame"""

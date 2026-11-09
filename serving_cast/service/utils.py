@@ -94,9 +94,8 @@ AGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns(p)", "percentage_breakdow
 # table when the workload actually carries images, so text-only runs keep the
 # historical schema (review: stormchasingg).
 IMAGE_COLUMNS = ["encoder_waves", "vision_time_ms"]
-# Internal phase timing used to derive disaggregated Prefill request QPS. It is
-# separate from ``ttft`` because chunked prefill reports request-average TTFT,
-# while throughput and QPS are phase-makespan metrics.
+# Internal phase timing retained for diagnostics and PP>1 fallback paths. PP=1
+# disaggregated Prefill throughput and QPS use request-average TTFT.
 PREFILL_PHASE_MAKESPAN_COLUMN = "prefill_phase_makespan_ms"
 DISAGG_COLUMNS = COMMON_COLUMNS.copy()
 DISAGG_COLUMNS.insert(DISAGG_COLUMNS.index("concurrency"), PREFILL_PHASE_MAKESPAN_COLUMN)

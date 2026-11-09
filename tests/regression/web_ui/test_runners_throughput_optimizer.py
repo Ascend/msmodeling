@@ -292,32 +292,27 @@ class TestRowHelpers:
         assert _fnum(None) is None
         assert _fnum(float("nan")) is None
 
-    def test_disagg_qps_prefill_from_input_throughput(self):
-        """Primary caliber: QPS = engine token/s ÷ input_length (the input
-        rate divided by request length — QPS × input_length == token/s by
-        construction, matching the core's compute_request_qps).
-        """
-        r = self._row(concurrency=10.0, ttft=5.0, **{"token/s": 512000.0})
+    def test_disagg_qps_prefill_pp_gt1_from_steady_input_throughput(self):
+        """PP>1 keeps its steady-state QPS = input token/s ÷ input_length."""
+        r = self._row(concurrency=10.0, ttft=5.0, pp_size=4, **{"token/s": 512000.0})
         assert _disagg_qps(r, 100, "disagg_prefill", input_length=1024) == 512000.0 / 1024
 
-    def test_disagg_qps_prefill_variable_length_makespan_fallback(self):
+    def test_disagg_qps_prefill_variable_length_uses_ttft(self):
         """Variable-length rows (no single input_length) fall back to the CLI's
-        makespan caliber: QPS = concurrency / prefill_phase_makespan.
+        request-level TTFT caliber: QPS = concurrency / ttft.
         """
         r = self._row(concurrency=10.0, ttft=5.0, prefill_phase_makespan_ms=8.0)
-        assert _disagg_qps(r, 100, "disagg_prefill") == 10.0 / 8.0 * 1000.0
+        assert _disagg_qps(r, 100, "disagg_prefill") == 10.0 / 5.0 * 1000.0
 
     def test_disagg_qps_prefill_legacy_ttft_fallback(self):
         """Legacy rows without the makespan column fall back to concurrency/ttft."""
         r = self._row(concurrency=10.0, ttft=5.0)
         assert _disagg_qps(r, 100, "disagg_prefill") == 10.0 / 5.0 * 1000.0
 
-    def test_disagg_qps_prefill_none_when_makespan_value_missing(self):
-        """Modern rows with a None makespan (OOM/partial phase) have no QPS —
-        a TTFT-based value would use the wrong caliber (same as the core).
-        """
+    def test_disagg_qps_prefill_uses_ttft_when_makespan_value_missing(self):
+        """PP=1 Prefill QPS uses TTFT even when the diagnostic makespan is missing."""
         r = self._row(concurrency=10.0, ttft=5.0, prefill_phase_makespan_ms=None)
-        assert _disagg_qps(r, 100, "disagg_prefill") is None
+        assert _disagg_qps(r, 100, "disagg_prefill") == 10.0 / 5.0 * 1000.0
 
     def test_disagg_qps_decode_from_output_throughput(self):
         """Primary caliber: QPS = engine token/s ÷ output_length (QPS ×

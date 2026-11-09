@@ -67,9 +67,9 @@ def _steady_pp_prefill_request_qps(row: pd.Series) -> Optional[float]:
     ``prefill_phase_makespan_ms`` on these rows is the wave-1 warm-up
     diagnostic (it still contains the amortized pipeline cooldown), so using
     it here would put QPS and token/s on different time bases. Returns
-    ``None`` for PP=1 rows and for rows missing either operand, letting
-    callers fall back to the phase-makespan formula instead of silently
-    mixing token bases.
+    ``None`` for PP=1 rows and for rows missing either operand; PP=1 callers
+    use request-level TTFT, while PP>1 callers may fall back to the phase
+    makespan when steady-state operands are unavailable.
     """
     if "pp_size" not in row.index:
         return None
@@ -86,13 +86,13 @@ def _steady_pp_prefill_request_qps(row: pd.Series) -> Optional[float]:
 def _compute_disagg_request_qps(row: pd.Series, output_length: Optional[int]) -> Optional[float]:
     """Per-phase request QPS for disaggregation summary rows.
 
-    Prefill uses ``concurrency / prefill_phase_makespan_ms * 1000`` when the
-    phase timing is available. Legacy rows without that field fall back to
-    ``concurrency / ttft * 1000``. PP>1 prefill rows instead use the
-    steady-state ``token/s / input_length`` (full-prompt token basis of the
-    throughput numerator; their ``prefill_phase_makespan_ms`` is the wave-1
-    warm-up diagnostic, see ``_steady_pp_prefill_request_qps`` and Issue
-    #543). Decode uses ``concurrency / (tpot * output_length) * 1000``.
+    PP=1 Prefill uses ``concurrency / ttft * 1000`` so request QPS and
+    throughput share the same request-weighted time base. PP>1 Prefill rows
+    use steady-state ``token/s / input_length`` (full-prompt token basis of
+    the throughput numerator); if those operands are unavailable, they fall
+    back to ``concurrency / prefill_phase_makespan_ms * 1000`` when that
+    timing exists. Legacy rows without PP metadata or phase timing use TTFT.
+    Decode uses ``concurrency / (tpot * output_length) * 1000``.
     Rows with both TTFT and TPOT valid (aggregation-style) return ``None``.
     """
     conc = _positive_float(row.get("concurrency"))
@@ -102,10 +102,15 @@ def _compute_disagg_request_qps(row: pd.Series, output_length: Optional[int]) ->
     tpot = _positive_float(row.get("tpot"))
 
     if ttft is not None and tpot is None:
+        pp_size = pd.to_numeric(row.get("pp_size"), errors="coerce")
+        if pd.isna(pp_size) or int(pp_size) <= 1:
+            return conc / ttft * 1000.0
+
+        steady_qps = _steady_pp_prefill_request_qps(row)
+        if steady_qps is not None:
+            return steady_qps
+
         if PREFILL_PHASE_MAKESPAN_COLUMN in row.index:
-            steady_qps = _steady_pp_prefill_request_qps(row)
-            if steady_qps is not None:
-                return steady_qps
             prefill_makespan = _positive_float(row.get(PREFILL_PHASE_MAKESPAN_COLUMN))
             if prefill_makespan is None:
                 return None

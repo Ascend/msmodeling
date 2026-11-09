@@ -418,7 +418,11 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 # OOM/partial replay has no complete request-level TTFT estimate. Keep the
                 # phase latency for diagnostics; memory-based early stop takes precedence.
                 ttft = latency_ms
-            output_throughput = total_input_tokens / latency_ms * 1000 if latency_ms > 0 else 0
+            # Keep PP=1 Prefill throughput on the same request-level time base
+            # as TTFT. The phase makespan remains available as a diagnostic
+            # column, while TTFT is the request-weighted completion time used
+            # for both the SLO and the reported Prefill rate.
+            output_throughput = total_input_tokens / ttft * 1000 if ttft > 0 else 0
 
         token_s_device = output_throughput / self.dp / self.pp / self.tp
         parallel = format_parallel_label(

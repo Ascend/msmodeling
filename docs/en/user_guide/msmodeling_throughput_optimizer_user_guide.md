@@ -620,8 +620,10 @@ Focus on the following fields:
 - `TP`/`DP`: recommended parallelism strategy
 - `concurrency`: number of concurrent requests that the current candidate configuration supports
 - `batch size`: batch size under the SLO constraint
-- `TTFT`/`TPOT`: time-to-first-token and time-per-output-token
-- `Throughput (token/s)`: system-level output token throughput. A larger value indicates higher throughput.
+- `TTFT`/`TPOT`: time-to-first-token and time-per-output-token. For PD-disaggregated Prefill, TTFT is the request-weighted average completion time across the candidate batch.
+- `Throughput (token/s)`: token rate for the current phase; PD-disaggregated Prefill reports input token/s, while Decode and aggregation report output token/s.
+
+For PD-disaggregated Prefill with PP=1, both `token/s` and QPS use request-weighted TTFT as the time basis: `token/s = total_input_tokens × 1000 / TTFT` and `QPS = concurrency × 1000 / TTFT`. For fixed input length, `QPS = token/s / input_length`. The full Prefill phase makespan remains available for diagnostics and is not used for PP=1 throughput or QPS. PP>1 keeps the steady-state throughput basis.
 
 Success criteria:
 
@@ -1089,14 +1091,16 @@ PD ratio mode uses Queries Per Second (QPS) as the primary metric for matching p
 
   P QPS represents the request processing capacity of a single prefill instance.
 
-  `P QPS = p_concurrency / prefill_phase_makespan_ms * 1000` (req/s)
+  PP=1: `P QPS = p_concurrency / ttft_p * 1000` (req/s)
+
+  PP>1: `P QPS = token/s / input_length` (req/s, steady-state full-prompt basis)
 
   Where:
   - `p_concurrency`: Total Prefill concurrency; PD ratio mode calculates it as `batch_size × DP`
-  - `prefill_phase_makespan_ms`: Total time to complete all requests in the Prefill phase, in milliseconds
+  - `prefill_phase_makespan_ms`: Total time to complete all requests in the Prefill phase, retained as a diagnostic and as a fallback for PP>1 rows when steady-state throughput is unavailable
   - PP>1 (pipeline parallelism) rows: the throughput column is calculated from the steady-state wave interval, and P QPS accordingly takes `token/s / input_length` (full prompt token basis, consistent with the throughput numerator. When the prefix cache hits, the throughput numerator still counts the full input. Therefore, the denominator must not use the cache-miss length `effective_input_length`)
 
-  For fixed-length input with PP=1, `ttft` is the request-weighted average time to the first token. All requests in the candidate batch arrive together; requests completed by later waves wait for earlier waves. This average is used for latency filtering and is distinct from the completion time of the entire phase; it does not represent the slowest request's TTFT. PP=1 QPS calculation falls back to `ttft` only for legacy results without the `prefill_phase_makespan_ms` field.
+  For PP=1, Prefill throughput and P QPS use the request-weighted average `ttft` as their time basis: `throughput = total_input_tokens × 1000 / ttft` and `P QPS = p_concurrency × 1000 / ttft`. All requests in the candidate batch arrive together; requests completed by later waves wait for earlier waves. This average is distinct from the time to complete the entire phase and does not represent the slowest request's TTFT. `prefill_phase_makespan_ms` remains available as a diagnostic; PP>1 uses steady-state throughput for QPS and may fall back to the phase makespan when that throughput is unavailable.
 
 - **Decode QPS (D QPS)**:
 
@@ -1148,7 +1152,7 @@ Capacity planning reuses the optimization results of the optimizer. It first run
 
   - Request QPS per instance:
     - Aggregation: `per_replica_qps = token/s ÷ output_length ÷ dp_size`
-    - PD disaggregation Prefill: `per_replica_qps = concurrency ÷ prefill_phase_makespan_ms × 1000`. PP>1 rows use the steady-state basis `token/s ÷ input_length` (full prompt token basis, consistent with the throughput numerator)
+    - PD disaggregation Prefill: PP=1 uses `per_replica_qps = concurrency ÷ ttft × 1000`. PP>1 rows use the steady-state basis `token/s ÷ input_length` (full prompt token basis, consistent with the throughput numerator)
     - PD disaggregation Decode: `per_replica_qps = concurrency ÷ (tpot × output_length) × 1000`
   - Required number of instances: `replicas_needed = ceil(target_qps ÷ per_replica_qps)`
   - Total device count: `total_gpus = replicas_needed × per_replica_gpus`

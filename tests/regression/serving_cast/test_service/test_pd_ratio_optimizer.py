@@ -145,13 +145,34 @@ class TestPDRatioThroughputOptimizer(unittest.TestCase):
         self.assertIn("ttft_p", result_df.columns)
         self.assertIn("tpot_d", result_df.columns)
 
-    def test_optimize_prefers_prefill_phase_makespan_for_qps(self):
+    def test_optimize_uses_ttft_for_pp1_prefill_qps(self):
         self.optimizer.set_p_results(_prefill_df(ttft=[25.0], prefill_phase_makespan_ms=[37.0], concurrency=[5]))
         self.optimizer.set_d_results(_decode_df())
 
         result_df = self.optimizer.optimize()
 
-        self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 5 / 37 * 1000)
+        self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 5 / 25 * 1000)
+
+    def test_optimize_excludes_zero_ttft_prefill_rows(self):
+        p_df = pd.DataFrame(
+            {
+                "ttft": [0.0, 25.0],
+                "tpot": [0.0, 0.0],
+                "concurrency": [5, 5],
+                "parallel": ["tp4pp1dp1", "tp2pp1dp1"],
+                "batch_size": [4, 4],
+                "num_devices": [4, 2],
+                "pp_size": [1, 1],
+            }
+        )
+        self.optimizer.set_p_results(p_df)
+        self.optimizer.set_d_results(_decode_df())
+
+        result_df = self.optimizer.optimize()
+
+        self.assertEqual(len(result_df), 1)
+        self.assertEqual(result_df.iloc[0]["ttft_p"], 25.0)
+        self.assertEqual(result_df.iloc[0]["p_qps"], 200.0)
 
     def test_optimize_uses_steady_throughput_time_base_for_pp_prefill_rows(self):
         # Issue #543: PP>1 prefill rows report steady-state token/s; p_qps
@@ -173,30 +194,45 @@ class TestPDRatioThroughputOptimizer(unittest.TestCase):
 
         self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 40000.0 / 50000.0)
 
-    def test_optimize_keeps_phase_makespan_qps_for_pp1_prefill_rows(self):
-        # PP=1 keeps the #527 drain-makespan contract for both token/s and QPS.
+    def test_optimize_uses_steady_throughput_without_prefill_makespan_column(self):
         self.optimizer.set_p_results(
             _prefill_df(
-                ttft=[25.0],
-                prefill_phase_makespan_ms=[37.0],
-                concurrency=[5],
-                pp_size=[1],
-                **{"token/s": [120.0], "input_length": [100.0], "effective_input_length": [100.0]},
+                ttft=[1000.0],
+                concurrency=[8],
+                pp_size=[4],
+                **{"token/s": [16000.0], "input_length": [1000.0]},
             )
         )
         self.optimizer.set_d_results(_decode_df())
 
         result_df = self.optimizer.optimize()
 
-        self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 5 / 37 * 1000)
+        self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 16.0)
 
-    def test_optimize_excludes_invalid_prefill_phase_makespan(self):
+    def test_optimize_uses_ttft_qps_for_pp1_prefill_rows(self):
+        # PP=1 QPS uses the request-average TTFT time base.
+        self.optimizer.set_p_results(
+            _prefill_df(
+                ttft=[25.0],
+                prefill_phase_makespan_ms=[37.0],
+                concurrency=[5],
+                pp_size=[1],
+                **{"token/s": [20000.0], "input_length": [100.0], "effective_input_length": [100.0]},
+            )
+        )
+        self.optimizer.set_d_results(_decode_df())
+
+        result_df = self.optimizer.optimize()
+
+        self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 5 / 25 * 1000)
+
+    def test_optimize_uses_ttft_when_prefill_phase_makespan_is_missing(self):
         self.optimizer.set_p_results(_prefill_df(prefill_phase_makespan_ms=[None]))
         self.optimizer.set_d_results(_decode_df())
 
         result_df = self.optimizer.optimize()
 
-        self.assertTrue(result_df.empty)
+        self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 10 / 100 * 1000)
 
     def test_optimize_multiple_results(self):
         """Test optimization with multiple P and D results."""

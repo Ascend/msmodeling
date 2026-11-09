@@ -16,10 +16,13 @@
 
 import logging
 
+import numpy as np
 import pandas as pd
 
-from serving_cast.service.optimizer_summary import PP_RESULT_COLUMNS, _steady_pp_prefill_request_qps
-from serving_cast.service.utils import PREFILL_PHASE_MAKESPAN_COLUMN
+from serving_cast.service.optimizer_summary import (
+    PP_RESULT_COLUMNS,
+    _compute_disagg_request_qps,
+)
 from serving_cast.utils import rank_pd_ratio_rows
 
 
@@ -33,11 +36,9 @@ class PDRatioThroughputOptimizer:
     calculates QPS and PD ratio, and outputs Top N configurations.
 
     QPS Formulas:
-        P QPS = p_concurrency / prefill_phase_makespan_ms * 1000 (req/s)
-                (legacy rows fall back to ttft; PP>1 rows use the steady-state
-                token/s / input_length — full-prompt token basis of the
-                throughput numerator — via the shared per-row helper
-                ``_steady_pp_prefill_request_qps``; Issues #543 and review P1/P8)
+        PP=1 P QPS = p_concurrency / ttft * 1000 (req/s)
+        PP>1 P QPS = token/s / input_length (steady-state full-prompt basis)
+        (shared with the disaggregation summary and capacity planner)
         D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000 (req/s)
 
     PD Ratio Calculation:
@@ -78,34 +79,27 @@ class PDRatioThroughputOptimizer:
             self._result_df = pd.DataFrame()
             return self._result_df
 
-        # Calculate QPS using vectorized operations. Chunked prefill's TTFT is
-        # a request-average completion time, whereas its QPS is defined by the
-        # whole phase makespan. Older result frames did not retain that timing,
-        # so keep a TTFT fallback for backward compatibility.
+        # PP=1 is the common case, so keep its TTFT-based QPS calculation
+        # vectorized. Only PP>1 rows need the per-row steady-state formula and
+        # its phase-makespan fallback.
         p_df = self._p_df.copy()
         for column in PP_RESULT_COLUMNS:
             if column not in p_df.columns:
                 p_df[column] = None
-        if PREFILL_PHASE_MAKESPAN_COLUMN in p_df.columns:
-            p_df["_p_qps_denominator"] = pd.to_numeric(p_df[PREFILL_PHASE_MAKESPAN_COLUMN], errors="coerce")
-        else:
-            p_df["_p_qps_denominator"] = pd.to_numeric(p_df["ttft"], errors="coerce")
-        p_df = p_df[p_df["_p_qps_denominator"] > 0]
-        p_df["p_qps"] = p_df["concurrency"] / p_df["_p_qps_denominator"] * 1000
-        # PP>1 prefill rows report steady-state throughput (anchored on the
-        # steady wave interval, PR !821); override their P QPS with the
-        # shared per-row steady-state helper so summary QPS, p_qps and
-        # capacity planning cannot drift apart (Issue #543, review P1/P8).
-        # The helper guards PP=1 and missing operands itself; rows it cannot
-        # resolve keep the phase-makespan formula above.
-        steady_qps = p_df.apply(_steady_pp_prefill_request_qps, axis=1)
-        take_steady = steady_qps.notna() & (steady_qps > 0)
-        # Guard the empty case: assigning an all-False object Series slice
-        # into the float p_qps column raises LossySetitemError on pandas.
-        if take_steady.any():
-            p_df.loc[take_steady, "p_qps"] = steady_qps[take_steady].astype(float)
-        p_df = p_df.drop(columns="_p_qps_denominator")
-        p_df = p_df[p_df["p_qps"] > 0]
+        concurrency = pd.to_numeric(
+            p_df.get("concurrency", pd.Series(index=p_df.index, dtype="float64")), errors="coerce"
+        )
+        ttft = pd.to_numeric(p_df.get("ttft", pd.Series(index=p_df.index, dtype="float64")), errors="coerce")
+        p_df["p_qps"] = concurrency / ttft.where(ttft > 0) * 1000.0
+        pp_size = pd.to_numeric(p_df.get("pp_size"), errors="coerce")
+        pp_gt1 = pp_size > 1
+        if pp_gt1.any():
+            p_df.loc[pp_gt1, "p_qps"] = p_df.loc[pp_gt1].apply(
+                lambda row: _compute_disagg_request_qps(row, output_length=None),
+                axis=1,
+            )
+        p_df["p_qps"] = pd.to_numeric(p_df["p_qps"], errors="coerce")
+        p_df = p_df[np.isfinite(p_df["p_qps"]) & (p_df["p_qps"] > 0)]
 
         # D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000 (req/s)
         # Filter out zero tpot to avoid ZeroDivisionError

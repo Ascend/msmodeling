@@ -621,7 +621,9 @@ Top 4 Aggregation Configurations:
 - `concurrency`：当前候选配置支持的并发请求数。
 - `batch size`：满足 SLO 约束下的批大小。
 - `TTFT` / `TPOT`：首 token 时间与每输出 token 时间。PD 分离 Prefill 行的 `TTFT` 为**请求加权排空平均**（整个候选批次同时到达、按 wave 依次排空时各请求完成时间的加权平均），随并发增长——并发越大排队越久，`--ttft-limit` 据此剪枝并发搜索。
-- `Throughput (token/s)`：系统级输出 token 吞吐，数值越大表示吞吐越高。
+- `Throughput (token/s)`：当前阶段的 token 速率；PD 分离 Prefill 统计输入 token/s，Decode 和聚合模式统计输出 token/s。
+
+PD 分离 Prefill 在 PP=1 时，`token/s` 和 QPS 统一使用请求加权 TTFT 作为时间基准：`token/s = total_input_tokens ÷ TTFT × 1000`，`QPS = concurrency ÷ TTFT × 1000`。因此固定输入长度时，`QPS = token/s ÷ input_length`。整段 Prefill 的 `prefill_phase_makespan_ms` 仍保留作诊断，不用于 PP=1 的吞吐和 QPS。PP>1 继续使用稳态吞吐口径。
 
 成功标准：
 
@@ -1089,14 +1091,16 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
 
   P QPS 表示单个 Prefill 实例的请求处理能力。
 
-  `P QPS = p_concurrency / prefill_phase_makespan_ms * 1000` (req/s)
+  PP=1：`P QPS = p_concurrency / ttft_p * 1000` (req/s)
+
+  PP>1：`P QPS = token/s / input_length` (req/s，稳态完整 prompt 口径)
 
   其中：
   - `p_concurrency`：Prefill 阶段的总并发数；PD 配比模式按 `batch_size × DP` 计算
-  - `prefill_phase_makespan_ms`：Prefill 阶段全部请求完成的总时长，单位为毫秒
+  - `prefill_phase_makespan_ms`：Prefill 阶段全部请求完成的总时长，保留为诊断列；PP>1 的稳态吞吐不可用时也作为兜底
   - PP>1（流水线并行）行：吞吐列按稳态波次间隔计算，P QPS 相应取 `token/s / input_length`（完整 prompt token 口径，与吞吐分子一致；prefix cache 命中时吞吐分子仍计完整输入，分母不得用 cache-miss 长度 `effective_input_length`）
 
-  固定长度、PP=1 的 Prefill 路径将整个候选批次建模为同时到达，使用各波次请求累计完成时间的请求加权平均作为 `ttft`。该值包含候选批次内部的等待，用于时延约束筛选，不等于整个阶段的完成时长，也不代表最慢请求的 TTFT。仅在兼容缺少 `prefill_phase_makespan_ms` 字段的旧结果时，PP=1 的 QPS 计算才回退使用 `ttft`。
+  PP=1 的 Prefill 吞吐和 P QPS 都以请求加权平均 `ttft` 为时间基准：`吞吐 = total_input_tokens × 1000 / ttft`，`P QPS = p_concurrency × 1000 / ttft`。该路径将整个候选批次建模为同时到达，使用各波次请求累计完成时间的请求加权平均作为 `ttft`。该值包含候选批次内部的等待，但不等于整个阶段的完成时长，也不代表最慢请求的 TTFT。`prefill_phase_makespan_ms` 保留为诊断列；PP>1 使用稳态吞吐计算 QPS，稳态吞吐不可用时可回退到 phase makespan。
 
 - **Decode QPS（D QPS）**：
 
@@ -1148,7 +1152,7 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
 
   - 每实例请求 QPS：
     - 聚合：`per_replica_qps = token/s ÷ output_length ÷ dp_size`
-    - PD 分离 Prefill：`per_replica_qps = concurrency ÷ prefill_phase_makespan_ms × 1000`；PP>1 行使用稳态口径 `token/s ÷ input_length`（完整 prompt token 口径，与吞吐分子一致）
+    - PD 分离 Prefill：PP=1 使用 `per_replica_qps = concurrency ÷ ttft × 1000`；PP>1 使用稳态口径 `token/s ÷ input_length`（完整 prompt token 口径，与吞吐分子一致）
     - PD 分离 Decode：`per_replica_qps = concurrency ÷ (tpot × output_length) × 1000`
   - 所需实例数：`replicas_needed = ceil(target_qps ÷ per_replica_qps)`
   - 总卡数：`total_gpus = replicas_needed × per_replica_gpus`

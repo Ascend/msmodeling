@@ -843,12 +843,10 @@ def _agg_disagg_row(r, device_name: str, mode: str, args) -> dict[str, Any]:
     )
 
     # Phase-appropriate throughput reuse. The engine's ``token/s`` IS the phase
-    # token rate: for prefill rows the INPUT rate (concurrency × input_length /
-    # drain makespan — the saturated caliber the core emits; see the core's
-    # "TTFT (no-queue anchor) and throughput (saturated anchor)" distinction),
-    # for decode and aggregation rows the OUTPUT rate. Reuse it directly
-    # instead of re-deriving via the no-queue TTFT anchor, which would
-    # overestimate multi-wave prefill. Aggregation rows carry no engine input
+    # token rate: for PP=1 prefill rows the INPUT rate (total input tokens /
+    # request-average TTFT), for PP>1 prefill rows the steady-state input rate,
+    # and for decode and aggregation rows the OUTPUT rate. Reuse it directly.
+    # Aggregation rows carry no engine input
     # rate, so their input flow derives from the steady-state QPS.
     per_card_output = _fnum(r.get("token/s/device"))
     if actual_mode == "disagg_prefill":
@@ -915,11 +913,11 @@ def _disagg_qps(r, output_length, mode: str, input_length=None) -> float | None:
       ``tpot × L_out == e2el``); the former
       ``concurrency / (ttft + L_out × tpot)`` double-counted TTFT.
 
-    Fallbacks when the engine throughput is unavailable: decode/aggregation
-    derive from ``concurrency / (tpot × output_length)`` (identical math);
-    prefill variable-length rows (no single input_length) fall back to the
-    CLI's makespan caliber (``concurrency / prefill_phase_makespan_ms``),
-    then the legacy ``concurrency / ttft`` for rows without that column.
+    PP=1 Prefill uses ``concurrency / ttft`` directly; for fixed-length
+    prompts this equals ``token/s / input_length`` because core throughput
+    uses the same TTFT denominator. PP>1 Prefill retains its steady-state
+    throughput basis. Decode/aggregation can derive from
+    ``concurrency / (tpot × output_length)`` when engine throughput is absent.
 
     Args:
         r: DataFrame row.
@@ -935,11 +933,16 @@ def _disagg_qps(r, output_length, mode: str, input_length=None) -> float | None:
         return None
     throughput = _fnum(r.get("token/s"))
     if mode == "disagg_prefill":
-        if throughput and input_length:
-            return throughput / float(input_length)
-        # Variable-length rows: no single input_length — fall back to the
-        # CLI's makespan caliber. Modern rows with a None makespan (OOM/partial
-        # phase) have no QPS, same as the core's _compute_disagg_request_qps.
+        pp_size = _fnum(r.get("pp_size"))
+        if pp_size is None or pp_size <= 1:
+            ttft = _fnum(r.get("ttft"))
+            return conc / ttft * 1000.0 if ttft and ttft > 0 else None
+
+        input_length_value = _fnum(input_length)
+        if throughput and input_length_value and input_length_value > 0:
+            return throughput / input_length_value
+        # Retain the historical fallback for PP>1 rows that lack a fixed
+        # prompt length; variable-length PP>1 is not currently supported.
         if "prefill_phase_makespan_ms" in r.index:
             makespan = _fnum(r.get("prefill_phase_makespan_ms"))
             return conc / makespan * 1000.0 if makespan and makespan > 0 else None

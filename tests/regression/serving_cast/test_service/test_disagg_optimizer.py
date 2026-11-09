@@ -498,7 +498,7 @@ class TestDisaggStrategy(unittest.TestCase):
         # at 38ms: TTFT = (8*35 + 4*38) / 12 = 36.0.
         self.assertEqual(row["ttft"], 36.0)
         self.assertEqual(row["prefill_phase_makespan_ms"], 38.0)
-        self.assertAlmostEqual(row["token/s"], 12 * 10 / 0.038, places=3)
+        self.assertAlmostEqual(row["token/s"], 12 * 10 / 0.036, places=3)
         self.assertEqual(row["prefill_num_chunks"], 3)
         # Waves reuse the latency record of their chunk's first wave: one unique
         # forward per distinct (wave_concurrency, query_len, seq_len) shape.
@@ -1149,7 +1149,8 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
         # Model-only completion times are 10 ms and 30 ms; serving cost is added once.
         self.assertEqual(row["ttft"], 25.0)
         self.assertEqual(row["prefill_phase_makespan_ms"], 37.0)
-        self.assertAlmostEqual(row["token/s"], 11000 / 0.037, places=3)
+        # PP=1 throughput uses request-weighted TTFT; makespan stays diagnostic.
+        self.assertAlmostEqual(row["token/s"], 11000 * 1000 / row["ttft"], places=3)
         self.assertEqual(row["avail_GB"], 2.0)
 
 

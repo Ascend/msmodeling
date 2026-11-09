@@ -97,10 +97,10 @@ class TestAggDisaggRowThroughputReuse:
             "concurrency": 10.0,
             "num_devices": 4,
             "batch_size": 10,
-            "token/s": 512000.0,
-            "token/s/device": 128000.0,
-            # Saturated drain makespan; chosen so QPS × input_length == token/s
-            # (10 × 1024 / 512000 s = 20 ms), mirroring the engine relation.
+            "token/s": 2048000.0,
+            "token/s/device": 512000.0,
+            # TTFT-based input rate: 10 requests × 1024 tokens / 5 ms.
+            # The 20 ms phase makespan remains a separate diagnostic metric.
             "prefill_phase_makespan_ms": 20.0,
             "ttft": 5.0,
             "tpot": 20.0,
@@ -113,29 +113,31 @@ class TestAggDisaggRowThroughputReuse:
 
         return SimpleNamespace(input_length=1024, output_length=256)
 
-    def test_prefill_row_reuses_engine_token_s(self):
-        """Prefill row: input throughput = engine token/s, per-card = token/s/device."""
+    def test_prefill_row_reuses_ttft_based_engine_token_s(self):
+        """Prefill row reuses engine input rate derived from request-average TTFT."""
         from runners.throughput_optimizer import _agg_disagg_row
 
         r = self._row(tpot=None)  # prefill rows have ttft set, tpot None
         rec = _agg_disagg_row(r, "ATLAS_350", "disagg_prefill", self._args())
         s = rec["summary"]
-        assert s["input_throughput_token_s"] == 512000.0
-        assert s["per_card_input_throughput_token_s"] == 128000.0
+        assert s["input_throughput_token_s"] == 2048000.0
+        assert s["per_card_input_throughput_token_s"] == 512000.0
         # No decode phase on prefill rows
         assert s["per_card_output_throughput_token_s"] is None
         assert s["mode"] == "disagg_prefill"
-        # Saturated QPS caliber (token/s ÷ input_length, here == concurrency
-        # / makespan by construction) is consistent with the input throughput:
-        # QPS × input_length == engine token/s
-        assert s["qps"] == pytest.approx(512000.0 / 1024)
+        # PP=1 QPS uses concurrency / TTFT; for fixed-length input it matches
+        # engine token/s ÷ input_length.
+        assert s["qps"] == pytest.approx(10.0 / 5.0 * 1000.0)
         assert s["qps"] * 1024 == pytest.approx(s["input_throughput_token_s"])
 
     def test_decode_row_has_no_input_throughput(self):
         """Decode row: input fields are None (no prefill phase)."""
         from runners.throughput_optimizer import _agg_disagg_row
 
-        r = self._row(ttft=None)  # decode rows have tpot set, ttft None
+        r = self._row(
+            ttft=None,
+            **{"token/s": 512000.0, "token/s/device": 128000.0},
+        )  # decode rows carry output throughput and tpot, but no ttft
         rec = _agg_disagg_row(r, "ATLAS_350", "disagg_decode", self._args())
         s = rec["summary"]
         assert s["input_throughput_token_s"] is None
