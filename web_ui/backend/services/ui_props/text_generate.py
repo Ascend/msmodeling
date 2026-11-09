@@ -730,6 +730,7 @@ UI: dict[str, UIFieldProps] = {
     ),
     "analytic-calibration-profile": UIFieldProps(hidden=True),
     "analytic-calibration-stack": UIFieldProps(hidden=True),
+    "template-graph-optimization": UIFieldProps(hidden=True),
     "remote-source": UIFieldProps(
         label=I18nText("模型远程来源", "Model Remote Source"),
         tooltip=I18nText("模型加载的远程来源。", "Remote source for model loading."),

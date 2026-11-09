@@ -134,7 +134,6 @@ def main():
     # import here to make sure the logger level is set
     logger.info("Importing core modules...")
     from tensor_cast.core.input_generator import generate_inputs
-    from tensor_cast.core.model_runner import ModelRunner
     from tensor_cast.core.user_config import UserInputConfig
 
     logger.debug("Core modules imported")
@@ -154,7 +153,21 @@ def main():
             load_plugin(plugin_path)
 
     logger.info("Initializing ModelRunner")
-    model_runner = ModelRunner(user_input)
+    from template_engine.runner_bridge import create_runner, wrap_registered_runner
+
+    incompatible_reason = 'fusion_plugin' if args.fusion_plugin else ''
+    model_runner = create_runner(
+        user_input,
+        enabled=args.compile and args.template_graph_optimization,
+        incompatible_reason=incompatible_reason,
+    )
+
+    if args.compile:
+        model_runner = wrap_registered_runner(
+            model_runner,
+            enabled=args.template_graph_optimization,
+            incompatible_reason=incompatible_reason,
+        )
     logger.info("ModelRunner initialization completed: %s", model_runner)
 
     logger.info("Running inference...")

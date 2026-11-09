@@ -1,0 +1,20 @@
+{
+  "schema": "template_skill_scope/1",
+  "source": "Prior user scope; typical rows are a finite profile, not full-domain proof",
+  "requested": {
+    "world_size": [1, 256], "B": [1, 256], "S": [1, 262144],
+    "PP": 1, "compile": true, "native_layers": true,
+    "phase": ["prefill", "decode"], "MTP": [0, 1, 2, 3], "DFC": [false, true],
+    "linear_families": ["DISABLED", "W8A16", "W8A8", "W4A8", "FP8", "MXFP4"],
+    "attention_actions": "Current official enum; model/kernel support must be tested",
+    "moe_constraints": ["EP>=TP", "EP>1", "EP>=DP"],
+    "parallel_axes": ["TP", "DP", "EP", "MOE_DP", "MOE_TP", "DCP", "model-relevant module layouts"]
+  },
+  "layout_fields": ["TP", "EP", "MOE_DP", "DCP"],
+  "typical_moe_layouts": [[1,2,1,1],[2,4,1,1],[4,8,1,1],[8,16,1,1],[8,32,1,1],[8,32,2,1],[8,32,4,1],[8,32,8,1],[4,8,1,2],[4,8,1,4]],
+  "typical_dense_layouts": [[1,1,1,1],[2,1,1,1],[4,1,1,1],[8,1,1,1],[4,1,2,1],[4,1,4,1],[4,1,1,2]],
+  "dense_note": "MoE-only constraints are not applicable to dense models. Report any explicit user constraint with an empty model intersection.",
+  "sampling": {"S_train": [256,1024], "S_development": 768, "S_holdout": 2048, "long_S_train": 8192, "S_branch_train": [], "decode_batch_coverage": "typical", "long_request": null},
+  "execution": {"max_capture_processes": 2, "max_captures": 512, "max_seconds": 10800, "per_command_timeout": 1800},
+  "unsupported_must_be_reported": ["Arbitrary explicit world/DP/MOE-TP not encoded by fix CLI", "Nonexpert/head quantization and group-size options absent from fix CLI", "Model-dependent module/vision layouts", "Unimplemented enum actions", "Sampler and chunked-prefill runtime paths without acceptance"]
+}

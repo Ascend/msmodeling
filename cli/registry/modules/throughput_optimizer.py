@@ -473,6 +473,7 @@ ENABLE_PREFILL_KV_OFFLOAD = Param(
 
 # ── ModuleSpec definition ───────────────────────────────────────────
 
+
 SPEC = ModuleSpec(
     module_id="throughput_optimizer",
     title="Throughput Optimizer",
@@ -583,6 +584,7 @@ SPEC = ModuleSpec(
         S.ANALYTIC_CALIBRATION_STACK,
         # Debug Options
         S.CHROME_TRACE,
+        S.TEMPLATE_GRAPH_OPTIMIZATION,
         # Service Options
         TTFT_LIMIT,
         TPOT_LIMIT,

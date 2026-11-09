@@ -59,6 +59,16 @@ web_ui/frontend/src/config/forms/*.json
 
 # msmodeling-govern local tool state (off-repo tool runtime artifacts)
 people.local.yaml
+
+# Template-graph development workspace: internal diagnostic/capture/verification
+# scripts and locally-built runtime caches.  Users rebuild caches from their own
+# captures; see docs/design/template_graph_target_matrix.md.
+/_*.py
+/_*.json
+/_*.txt
+/_cache_nocompile/
+/compile_ops_cache_*/
+/report.log
 govern-state.json
 msmodeling-govern-logs/
 
@@ -68,3 +78,36 @@ reports/
 
 # optix runtime log artifact produced in repo cwd by mindie/ais_bench runs (issue #480)
 report.log
+
+# --- OptiX 寻优/压测运行产物与本地备份（不入库）---
+.agent_optimizer/
+result/
+tmp/
+case_base_out/
+config.pd-*.toml
+*.bak
+*.bak-*
+.codebuddy/
+
+# --- 手工验证轮原始产物（manual_p/d/proxy.sh + bench_raw/ + RESULT.md，5.1MB）---
+pd_final_r7/
+# Template-graph development workspace: internal diagnostic/capture/verification
+# scripts and locally-built runtime caches.  Users rebuild caches from their own
+# captures; see docs/design/template_graph_target_matrix.md.
+/_*.py
+/_*.json
+/_*.txt
+/_cache_nocompile/
+/_structure_switch_evidence/
+/_bisect_hold/
+/_*.jsonl
+/_*_cache/
+/_synth_verify_*.py
+/_count_infer_scratch/
+# Template artifacts stay local EXCEPT the officially verified slim
+# registry artifacts that ship with the repository (one per model+compile
+# variant; regenerated via template_graph.build_template_graph).
+/template_engine/templates/*
+!/template_engine/templates/deepseek_v4_pro_cmp_on.json.xz
+!/template_engine/templates/glm_5_3_cmp_on.json.xz
+*.defect_backup

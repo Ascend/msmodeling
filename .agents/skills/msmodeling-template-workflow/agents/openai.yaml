@@ -1,0 +1,3 @@
+interface:
+  display_name: "模型模板图生成"
+  short_description: "给定模型，采集、构建、独立验收并自动注册模板到寻优"

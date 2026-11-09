@@ -117,8 +117,9 @@ class ModelRunner:
     corresponding to one data-parallel partition ('dp_rank')
     """
 
-    def __init__(self, user_input: UserInputConfig):
+    def __init__(self, user_input: UserInputConfig, *, defer_compile: bool = False):
         self.user_input = user_input
+        self._compile_deferred = bool(defer_compile and user_input.do_compile and user_input.pp_size == 1)
 
         # ---------- 1. init device profile and performance_model ----------
         if user_input.device not in DeviceProfile.all_device_profiles:
@@ -148,7 +149,9 @@ class ModelRunner:
 
         # ---------- 3. build model ----------
         logger.info("Building model architecture")
-        self.model = build_model(user_input).eval()
+        self.model = (
+            build_model(user_input, defer_compile=True) if self._compile_deferred else build_model(user_input)
+        ).eval()
         logger.debug("Model built:_%s", self.model)
 
         # ---------- 4. static_memory ----------
@@ -203,6 +206,13 @@ class ModelRunner:
         self._static_meta_forward = StaticMetaForward(native, get_backend(device_name=self.user_input.device))
         logger.info("Aggregation uses exact static FX capture for DeepSeek V4")
         return True
+
+    def _ensure_compiled(self):
+        if getattr(self, '_compile_deferred', False):
+            from .model_builder import compile_model
+
+            self.model = compile_model(self.model, self.user_input)
+            self._compile_deferred = False
 
     @staticmethod
     def create_performance_models(
@@ -641,7 +651,11 @@ class ModelRunner:
         generate_inputs_func: Callable = generate_inputs_varlen,
         with_sampler: bool = False,
         runtime_observer: Optional[Callable[[Runtime], None]] = None,
+        *,
+        graph_provider: Optional[Callable[[dict], list]] = None,
     ) -> ModelRunnerMetrics:
+        if graph_provider is None:
+            self._ensure_compiled()
         ModelRunner._validate_kv_offload_model(self)
         empirical_record_offsets = {
             id(perf_model): len(perf_model.op_records)
@@ -712,22 +726,25 @@ class ModelRunner:
             ) as runtime,
             torch.no_grad(),
         ):
-            static_forward = getattr(self, "_static_meta_forward", None)
-            if static_forward is None:
-                output = self.model.forward(**input_kwargs)
+            if graph_provider is not None:
+                runtime.op_invoke_infos = graph_provider(input_kwargs)
             else:
-                from ..compilation.static_meta import StaticMetaCaptureUnsupported
-
-                try:
-                    output = static_forward(**input_kwargs)
-                except StaticMetaCaptureUnsupported as exc:
-                    # Validation fails before executing/capturing the model.
-                    # Unsupported inputs keep the existing guarded compiler.
-                    logger.debug("Static meta capture bypassed: %s", exc)
+                static_forward = getattr(self, "_static_meta_forward", None)
+                if static_forward is None:
                     output = self.model.forward(**input_kwargs)
-            primary = _primary_model_output(output)
-            if with_sampler and not _spec_decode_skips_runner_sampler(self.model, input_kwargs):
-                _ = self.sampler(primary, input_kwargs["sampling_metadata"])
+                else:
+                    from ..compilation.static_meta import StaticMetaCaptureUnsupported
+
+                    try:
+                        output = static_forward(**input_kwargs)
+                    except StaticMetaCaptureUnsupported as exc:
+                        # Validation fails before executing/capturing the model.
+                        # Unsupported inputs keep the existing guarded compiler.
+                        logger.debug("Static meta capture bypassed: %s", exc)
+                        output = self.model.forward(**input_kwargs)
+                primary = _primary_model_output(output)
+                if with_sampler and not _spec_decode_skips_runner_sampler(self.model, input_kwargs):
+                    _ = self.sampler(primary, input_kwargs["sampling_metadata"])
         run_end = time.perf_counter()
 
         # Log empirical model stats if using profiling mode

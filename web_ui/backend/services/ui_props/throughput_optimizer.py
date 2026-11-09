@@ -472,6 +472,7 @@ UI: dict[str, UIFieldProps] = {
     "profiling-database-path": UIFieldProps(hidden=True),
     "analytic-calibration-profile": UIFieldProps(hidden=True),
     "analytic-calibration-stack": UIFieldProps(hidden=True),
+    "template-graph-optimization": UIFieldProps(hidden=True),
     "chrome-trace-file": UIFieldProps(
         label=I18nText("Chrome trace 导出", "Chrome Trace Export"),
         tooltip=I18nText(

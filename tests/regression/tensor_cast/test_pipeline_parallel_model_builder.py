@@ -358,7 +358,7 @@ def test_build_model_keeps_single_model_path_when_pp_size_is_one(monkeypatch):
 def test_build_model_passes_compile_mode_to_pipeline_stages(monkeypatch, pp_size):
     _install_fake_builder(monkeypatch, _make_model_config(num_layers=4, pp_size=pp_size, world_size=4))
     monkeypatch.setattr(torch, "compile", lambda model, **_kwargs: model)
-    monkeypatch.setattr(model_builder, "get_backend", lambda **_kwargs: "eager")
+    monkeypatch.setattr("tensor_cast.compilation.get_backend", lambda **_kwargs: "eager")
     user_input = UserInputConfig(model_id="fake/model", world_size=4, tp_size=4 // pp_size, pp_size=pp_size)
     user_input.do_compile = True
 

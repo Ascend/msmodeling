@@ -25,8 +25,13 @@ from cli.registry.modules.text_generate import SPEC as TEXT_GENERATE_SPEC
 from cli.registry.modules.throughput_optimizer import SPEC as THROUGHPUT_OPTIMIZER_SPEC
 from cli.registry.modules.video_generate import SPEC as VIDEO_GENERATE_SPEC
 
+from cli.registry.modules.template_graph import CAPTURE_SPEC, BUILD_SPEC, GENERATE_SPEC
+
 # Registry of all module specs
 MODULE_SPECS = {
+    "template_capture": CAPTURE_SPEC,
+    "template_build": BUILD_SPEC,
+    "template_generate": GENERATE_SPEC,
     "text_generate": TEXT_GENERATE_SPEC,
     "throughput_optimizer": THROUGHPUT_OPTIMIZER_SPEC,
     "video_generate": VIDEO_GENERATE_SPEC,

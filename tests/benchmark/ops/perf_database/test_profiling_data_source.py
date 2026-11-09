@@ -4704,7 +4704,7 @@ def test_glm5_sparse_mla_mixed_phase_falls_back_from_composite_decomposition(cap
         seq_lens_values=[4096, 8192],
         is_decode_values=[False, True],
     )
-    caplog.set_level("DEBUG")
+    caplog.set_level("DEBUG", logger=_decompose_mla_common.__module__)
 
     specs = _decompose_mla_common(
         op,

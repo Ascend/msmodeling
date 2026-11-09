@@ -898,6 +898,7 @@ class TestGqaDcpKvHeadValidation:
 
     def _make_model(self, tp, dcp, num_kv_heads):
         model = MagicMock()
+        model.model_config.mla_config = None
         model.model_config.parallel_config = ParallelConfig(
             world_size=tp,
             tensor_parallel_size=tp,
@@ -906,6 +907,18 @@ class TestGqaDcpKvHeadValidation:
         model.text_config = MagicMock()
         model.text_config.num_key_value_heads = num_kv_heads
         return model
+
+    @pytest.mark.parametrize('tp,dcp', [(4, 2), (8, 2), (8, 4), (16, 2), (16, 4), (16, 8)])
+    def test_mla_with_nominal_single_kv_head_is_not_subject_to_gqa_constraint(self, tp, dcp):
+        from types import SimpleNamespace
+
+        from tensor_cast.parallel_group import ParallelGroupManager
+        from tensor_cast.transformers.transformations import _validate_gqa_dcp_kv_heads
+
+        model = self._make_model(tp=tp, dcp=dcp, num_kv_heads=1)
+        model.model_config.mla_config = SimpleNamespace(module_name='DeepseekV4SparseAttention')
+        dcp_group = ParallelGroupManager(model.model_config.parallel_config).dcp_group
+        _validate_gqa_dcp_kv_heads(model, dcp_group)
 
     def test_illegal_config_raises(self):
         from tensor_cast.parallel_group import ParallelGroupManager

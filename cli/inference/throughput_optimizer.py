@@ -102,7 +102,7 @@ def arg_parse():
     args.num_mtp_tokens, args.num_mtp_token_sizes = _normalize_mtp_token_values(args.num_mtp_tokens)
     # G2/G3 (draft vs MTP) run as registry validators inside parse_module_args
     # (wants_provided=True). When the draft path is taken, RFC requires MTP
-    # disabled for search combinations — clear the candidates here.
+    # disabled for search combinations --clear the candidates here.
     method = draft_method(args)
     if method is not None:
         args.num_mtp_tokens = 0
@@ -120,7 +120,7 @@ def arg_parse():
             if not n_candidates:
                 parser.error("--num-speculative-tokens expects at least one candidate.")
         elif n_raw is None:
-            # Omitted: dflash/dspark → builtin (C2); mtp requires explicit n.
+            # Omitted: dflash/dspark ->builtin (C2); mtp requires explicit n.
             if method == "mtp":
                 parser.error("--speculative-method mtp requires --num-speculative-tokens")
             builtin_n = 0

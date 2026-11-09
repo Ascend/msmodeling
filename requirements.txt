@@ -6,6 +6,7 @@
 
 torch>=2.8,<=2.10
 torchvision>=0.23.0
+filelock>=3.13
 
 transformers>=5.16.0,<5.17.0
 modelscope

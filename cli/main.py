@@ -41,6 +41,10 @@ def _handle_inference_command(
     remaining: list[str],
     inference_parser: argparse.ArgumentParser,
 ) -> int:
+    if args.inference_command == "template-graph":
+        from cli.inference.template_graph import main as template_main
+
+        return _dispatch(template_main, remaining)
     if args.inference_command == "text-generate":
         from cli.inference.text_generate import main as text_generate_main
 
@@ -112,6 +116,7 @@ def main() -> int:
     inference_sub = inference_parser.add_subparsers(dest="inference_command", parser_class=SpecArgumentParser)
     # Defer -h/--help to each module parser so the full flag list is rendered
     # instead of the empty stub (Usage: ... [-h] only).
+    inference_sub.add_parser("template-graph", help="Capture, build and generate model template graphs", add_help=False)
     inference_sub.add_parser("text-generate", help="Run a simulated LLM inference pass", add_help=False)
     inference_sub.add_parser(
         "throughput-optimizer",

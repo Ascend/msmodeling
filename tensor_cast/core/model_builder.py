@@ -26,7 +26,6 @@ import torch
 from transformers.initialization import no_init_weights
 
 from .. import config
-from ..compilation import get_backend
 from ..core.config_resolver import ConfigResolver
 from ..core.user_config import UserInputConfig
 from ..layers.dflash import DflashWrapper
@@ -156,6 +155,7 @@ def _build_pipeline_model(user_input: UserInputConfig, model_config) -> Pipeline
         apply_stage_boundaries(stage_model, stage_spec)
         if user_input.do_compile:
             import torch
+            from ..compilation import get_backend
 
             config.compilation.fusion_patterns.enable_dispatch_ffn_combine = bool(
                 user_input.enable_dispatch_ffn_combine
@@ -173,6 +173,8 @@ def _build_pipeline_model(user_input: UserInputConfig, model_config) -> Pipeline
 
 def build_model(
     user_input: UserInputConfig | None = None,
+    *,
+    defer_compile: bool = False,
 ) -> TransformerModel | PipelineModel:
     """
     Build a transformer model based on the given args
@@ -187,11 +189,17 @@ def build_model(
         return _build_pipeline_model(user_input, model_config)
 
     model = TransformerModel(user_input.model_id, model_config)
+    return model if defer_compile else compile_model(model, user_input)
+
+
+def compile_model(model, user_input: UserInputConfig):
+    """Apply the official compiler wrapper, including deferred native fallbacks."""
     use_full_graph = not user_input.allow_graph_break
     if user_input.do_compile and getattr(model, "is_vl_model", False):
         use_full_graph = _prepare_vl_compile(model)
     if user_input.do_compile:
         import torch
+        from ..compilation import get_backend
 
         config.compilation.fusion_patterns.enable_dispatch_ffn_combine = bool(user_input.enable_dispatch_ffn_combine)
         model = torch.compile(

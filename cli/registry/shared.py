@@ -411,3 +411,15 @@ DSPARK_MARKOV_HEAD = Param(
     cli_metavar="{vanilla,gated,rnn}",
     cli_help="Requires --speculative-method dspark. Markov head type: vanilla (default), gated, or rnn.",
 )
+
+
+TEMPLATE_GRAPH_OPTIMIZATION = Param(
+    name="template-graph-optimization",
+    data_type="boolean",
+    default=True,
+    cli_action="store_true",
+    cli_off_flag="no-template-graph",
+    cli_off_help="Skip registered templates and workload reuse; run native Meta inference instead.",
+    group="Debug Options",
+    cli_help="Use registered template graphs when covered (default: enabled).",
+)

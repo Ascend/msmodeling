@@ -474,10 +474,13 @@ def _validate_gqa_dcp_kv_heads(model: "ModelWrapperBase", dcp_group) -> None:
     head to read and the configuration is illegal on vllm-ascend. We raise here so
     such a config errors at model-build time instead of being silently modeled with
     a degenerate single KV head and reported as optimal. No-op when DCP is disabled
-    or ``num_key_value_heads`` is unavailable (e.g. MLA-style configs).
+    or when the model uses MLA, whose shared latent KV is not split into
+    GQA heads. MLA configs may still expose a nominal num_key_value_heads.
     """
     dcp_size = getattr(dcp_group, "world_size", 1) or 1
     if dcp_size <= 1:
+        return
+    if getattr(model.model_config, "mla_config", None) is not None:
         return
     parallel_config = model.model_config.parallel_config
     tp_size = parallel_config.tensor_parallel_size

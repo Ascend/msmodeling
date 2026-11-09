@@ -20,6 +20,7 @@ dependencies = [
     "einops",
     # Keep fastapi version range aligned with vllm dependency constraint
     "fastapi>=0.133.0,<0.137",
+    "filelock>=3.13",
     "greenlet>=3.5.1",
     "loguru",
     "matplotlib>=3.10.9",
@@ -50,11 +51,16 @@ dependencies = [
 msmodeling = "cli.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["tensor_cast", "serving_cast", "cli", "optix", "web_ui"]
+packages = ["tensor_cast", "serving_cast", "cli", "optix", "web_ui", "template_engine"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "optix/config.toml" = "optix/config.toml"
 "tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json" = "tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json"
+# Root-level expander: six template_engine modules import it at runtime
+# (coverage/coverage gate, builder, compare_ops, formulas, graph_matcher,
+# graph_program), so the wheel must ship it or installed-state template
+# expansion dies on ModuleNotFoundError (review issue #23).
+"template_generate.py" = "template_generate.py"
 
 # Test tools ###################################################################
 

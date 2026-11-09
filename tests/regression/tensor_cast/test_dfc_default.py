@@ -121,7 +121,7 @@ def test_build_model_applies_user_dfc_config_before_compile():
         with (
             patch.object(model_builder.ConfigResolver, "resolve", return_value=fake_model_config),
             patch.object(model_builder, "TransformerModel", return_value=fake_model),
-            patch.object(model_builder, "get_backend", return_value="fake_backend"),
+            patch("tensor_cast.compilation.get_backend", return_value="fake_backend"),
             patch("torch.compile", side_effect=fake_compile),
         ):
             result = model_builder.build_model(user_input)

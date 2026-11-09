@@ -25,13 +25,14 @@ from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.common.pyproject_toml import read_pyproject_data
 
 _REMOVED_RUNTIME_DEPENDENCIES = {
-    "filelock",
     "gradio",
     "pillow",
     "requests",
     "scikit-learn",
 }
 _REQUIRED_RUNTIME_DEPENDENCIES = {
+    # Template cache and registry transactions import filelock directly.
+    "filelock",
     "greenlet",
     "optree",
     "tomlkit",

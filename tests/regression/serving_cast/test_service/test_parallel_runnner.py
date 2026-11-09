@@ -64,7 +64,7 @@ def test_invalid_head_candidate_is_skipped_without_error_log(caplog):
     user_config = UserInputConfig.from_args(args)
 
     with patch(
-        "serving_cast.parallel_runner.ModelRunner",
+        "tensor_cast.core.model_runner.ModelRunner",
         side_effect=InvalidHeadParallelismError("head_num=3 cannot be sharded over tp_size=2"),
     ):
         assert task_runner._get_model_runnner(user_config) is None

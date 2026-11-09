@@ -421,6 +421,7 @@ SPEC = ModuleSpec(
         DISABLE_REPETITION,
         # Optimization Options
         S.COMPILE,
+        S.TEMPLATE_GRAPH_OPTIMIZATION,
         S.COMPILE_ALLOW_GRAPH_BREAK,
         S.COMPILATION_CONFIG,
         FUSION_PLUGIN,

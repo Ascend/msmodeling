@@ -289,7 +289,12 @@ class ParallelRunner:
     def _get_model_runnner(self, user_input: UserInputConfig) -> ModelRunner:
         model_runner = None
         try:
-            model_runner = ModelRunner(user_input)
+            from template_engine.runner_bridge import create_runner
+
+            model_runner = create_runner(
+                user_input,
+                enabled=getattr(self.args, 'template_graph_optimization', True),
+            )
         except InvalidHeadParallelismError:
             # The layer already warned about the incompatible TP candidate.
             return None
@@ -332,8 +337,22 @@ class ParallelRunner:
         return model_runner
 
     def _build_model_runner(self, user_input: UserInputConfig) -> ModelRunner | None:
-        """Build a runner while preserving the existing workload-cache behavior."""
-        if self._workload_cache is None:
+        """Build a runner while preserving the existing workload-cache behavior.
+
+        When the template graph covers this model, the runner is wrapped so
+        covered forwards replay template ops through the same Runtime backend
+        (per-call legacy fallback keeps the original behaviour as the floor).
+        """
+        runner = self._build_base_model_runner(user_input)
+        if runner is None:
+            return runner
+        from template_engine.runner_bridge import wrap_registered_runner
+
+        return wrap_registered_runner(runner, enabled=getattr(self.args, 'template_graph_optimization', True))
+
+    def _build_base_model_runner(self, user_input: UserInputConfig) -> ModelRunner | None:
+        """Original runner construction, extracted unchanged."""
+        if self._workload_cache is None or not getattr(self.args, "template_graph_optimization", True):
             return self._get_model_runnner(user_input)
         if getattr(user_input, "enable_decode_kv_offload", False) or getattr(
             user_input, "enable_prefill_kv_offload", False
@@ -392,7 +411,7 @@ class ParallelRunner:
 
         pp_sizes_raw = getattr(self.args, "pp_sizes", None)
         # Use "is not None" so that an explicit --pp-sizes with no values
-        # (nargs="*" → []) enters the PP search path instead of silently
+        # (nargs="*" 鈫?[]) enters the PP search path instead of silently
         # falling back to legacy PP=1.  build_pp_search_candidates treats []
         # as "search all powers of 2 up to num_devices".
         pp_search_enabled = pp_sizes_raw is not None
@@ -430,7 +449,7 @@ class ParallelRunner:
             tmp_user_input.moe_tp_size = candidate.moe_tp_size
             # Translate the speculative-method search slot: DFlash/DSpark reuse
             # the MTP search slot (candidate.num_mtp_tokens = N), but must NOT
-            # set num_mtp_tokens=N on UserInputConfig — that would make
+            # set num_mtp_tokens=N on UserInputConfig 鈥?that would make
             # ConfigResolver build MtpConfig alongside DflashConfig (mutually
             # exclusive). MTP keeps N for MtpWrapper construction.
             method = getattr(base_user_input, "speculative_method", None)
@@ -697,7 +716,7 @@ class ParallelRunner:
         """Resolve num_hidden_layers for PP validation without loading weights.
 
         Use override if set; otherwise read the HF config (config-only, no
-        weights). Raise on failure — a silent large fallback would let invalid
+        weights). Raise on failure 鈥?a silent large fallback would let invalid
         partitions through and break build_pipeline_plan later.
         """
         override = getattr(base_user_input, "num_hidden_layers_override", 0) or 0
