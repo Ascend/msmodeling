@@ -60,11 +60,12 @@ class AisBenchCommand:
 
 class VllmBenchmarkCommandConfig(BaseModel):
     serving: str = ""
-    backend: str = "vllm"
+    backend: str = ""
     host: str = ""
     port: str = ""
     model: str = ""
     served_model_name: str = ""
+    endpoint: str = ""
     dataset_name: str = ""
     dataset_path: str = ""
     num_prompts: str = ""
@@ -108,6 +109,10 @@ class VllmBenchmarkCommand:
             self.benchmark_command_config.result_dir,
             "--save-result",
         ]
+        if self.benchmark_command_config.backend:
+            cmd.extend(["--backend", self.benchmark_command_config.backend])
+        if self.benchmark_command_config.endpoint:
+            cmd.extend(["--endpoint", self.benchmark_command_config.endpoint])
         if self.benchmark_command_config.num_prompts:
             cmd.extend(["--num-prompts", self.benchmark_command_config.num_prompts])
         if self.benchmark_command_config.others:

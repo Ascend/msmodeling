@@ -131,6 +131,10 @@ port = "port"
 model = "model_path"
 served_model_name = "model_name"
 dataset_name = "dataset_name"
+# Leave backend/endpoint unset to use vllm bench serve's own defaults.
+# For chat-only / PD-disaggregated, set:
+# backend = "openai-chat"
+# endpoint = "/v1/chat/completions"
 others = ""
 
 

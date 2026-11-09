@@ -47,9 +47,10 @@ python <SKILL_ROOT>/scripts/config_writer.py --config <config.toml> \
 ### vllm bench serve 关键参数语义（`vllm bench serve --help` 实测，vLLM 0.23）
 
 optix 拼出的固定 argv 形态：
-`vllm bench serve --host <h> --port <p> --model <m> --served-model-name <n> --dataset-name <d> --max-concurrency $CONCURRENCY --request-rate $REQUESTRATE --result-dir <result_dir> --save-result [--num-prompts <N>] [<others 拆分追加>]`
+`vllm bench serve --host <h> --port <p> --model <m> --served-model-name <n> --dataset-name <d> --max-concurrency $CONCURRENCY --request-rate $REQUESTRATE --result-dir <result_dir> --save-result [--backend <b>] [--endpoint <e>] [--num-prompts <N>] [<others 拆分追加>]`
 （`$CONCURRENCY`/`$REQUESTRATE` 是占位 token，每 trial 由 optix 替换为候选值；
-`REQUESTRATE` ≤0 时该 flag 连同值被整体删除。）
+`REQUESTRATE` ≤0 时该 flag 连同值被整体删除。
+`--backend`/`--endpoint` 仅在 `[vllm_benchmark.command].backend`/`.endpoint` 非空时追加，默认都为空、不传。）
 
 | flag | 语义 | 默认 |
 |---|---|---|
@@ -64,6 +65,8 @@ optix 拼出的固定 argv 形态：
 | `--served-model-name` | API 侧模型名，缺省同 `--model` | 同 `--model` |
 | `--ignore-eos` | 请求带 ignore_eos，输出长度贴近 `--random-output-len`（否则 EOS 会提前截断输出，拉偏 TPOT/吞吐） | False |
 | `--result-dir` + `--save-result` | 结果 JSON 落盘目录；optix 固定携带两者，指标从该 JSON 解析（映射见 `optix-reference.md` 性能指标映射一节） | 当前目录 / 不保存 |
+| `--backend` | 客户端请求函数/后端类型（`vllm`/`openai`/`openai-chat`/`vllm-pooling`/`vllm-rerank`…，取值随 vLLM 版本而变）；仅 `[vllm_benchmark.command].backend` 非空时追加 | 空（不传，由 vllm bench serve 自取默认） |
+| `--endpoint` | 请求打到的 API 路径（如 `/v1/chat/completions`）；仅 `[vllm_benchmark.command].endpoint` 非空时追加 | 空（不传，随 backend 默认） |
 
 ## 3. ais_bench（MindIE 引擎 / 自定义负载）
 

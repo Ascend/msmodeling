@@ -275,6 +275,49 @@ class TestVllmBenchmarkCommand:
         assert "$CONCURRENCY" in cmd
         assert "$REQUESTRATE" in cmd
 
+    def test_command_omits_empty_backend_and_endpoint(self) -> None:
+        config = VllmBenchmarkCommandConfig(
+            host="localhost",
+            port="8000",
+            model="test-model",
+            served_model_name="test",
+            dataset_name="sharegpt",
+            result_dir="/tmp/results",
+            backend="",
+            endpoint="",
+        )
+        cmd = VllmBenchmarkCommand(config).command
+        assert "--backend" not in cmd
+        assert "--endpoint" not in cmd
+
+    def test_command_defaults_omit_backend_and_endpoint(self) -> None:
+        config = VllmBenchmarkCommandConfig(
+            host="localhost",
+            port="8000",
+            model="test-model",
+            served_model_name="test",
+            dataset_name="sharegpt",
+            result_dir="/tmp/results",
+        )
+        cmd = VllmBenchmarkCommand(config).command
+        assert "--backend" not in cmd
+        assert "--endpoint" not in cmd
+
+    def test_command_emits_backend_and_endpoint_when_set(self) -> None:
+        config = VllmBenchmarkCommandConfig(
+            host="localhost",
+            port="8000",
+            model="test-model",
+            served_model_name="test",
+            dataset_name="sharegpt",
+            result_dir="/tmp/results",
+            backend="openai-chat",
+            endpoint="/v1/chat/completions",
+        )
+        cmd = VllmBenchmarkCommand(config).command
+        assert cmd[cmd.index("--backend") + 1] == "openai-chat"
+        assert cmd[cmd.index("--endpoint") + 1] == "/v1/chat/completions"
+
 
 class TestAisBenchCommand:
     def test_init_success_without_which(self) -> None:
