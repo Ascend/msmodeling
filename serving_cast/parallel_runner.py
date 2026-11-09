@@ -288,13 +288,18 @@ class ParallelRunner:
 
     def _get_model_runnner(self, user_input: UserInputConfig) -> ModelRunner:
         model_runner = None
+        args = getattr(self, "args", None)
+        model_id = getattr(user_input, "model_id", None)
         try:
             from template_engine.runner_bridge import create_runner
 
-            model_runner = create_runner(
-                user_input,
-                enabled=getattr(self.args, 'template_graph_optimization', True),
-            )
+            if args is None:
+                model_runner = ModelRunner(user_input)
+            else:
+                model_runner = create_runner(
+                    user_input,
+                    enabled=getattr(args, 'template_graph_optimization', True),
+                )
         except InvalidHeadParallelismError:
             # The layer already warned about the incompatible TP candidate.
             return None
@@ -318,21 +323,21 @@ class ParallelRunner:
                 logger.warning(
                     "Skipping PP=%d candidate for model %r: %s",
                     pp_size,
-                    self.args.model_id,
+                    model_id,
                     exc,
                 )
             else:
-                logger.error("Failed to build model %r", self.args.model_id)
+                logger.error("Failed to build model %r", model_id)
         except Exception as exc:
             pp_size = getattr(user_input, "pp_size", 1)
             if pp_size > 1:
                 # PP>1 candidates must fail loud on non-PP errors (review P1-3).
-                logger.error("Failed to build model %r: %s", self.args.model_id, exc)
+                logger.error("Failed to build model %r: %s", model_id, exc)
                 raise
             else:
                 # PP=1 legacy path preserves the original tolerant behavior:
                 # log the error with full traceback and return None so the caller skips this candidate.
-                logger.exception("Failed to build model %r", self.args.model_id)
+                logger.exception("Failed to build model %r", model_id)
 
         return model_runner
 

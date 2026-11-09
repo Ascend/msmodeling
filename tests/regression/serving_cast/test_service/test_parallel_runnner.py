@@ -1254,3 +1254,37 @@ class TestParallelRunnerPDMode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_runner_creation_preserves_template_switch(enabled):
+    from types import SimpleNamespace
+
+    runner = object.__new__(ParallelRunner)
+    runner.args = SimpleNamespace(template_graph_optimization=enabled)
+    user_input = SimpleNamespace(model_id="example/model", pp_size=1)
+    with patch("template_engine.runner_bridge.create_runner") as create:
+        assert runner._get_model_runnner(user_input) is create.return_value
+    create.assert_called_once_with(user_input, enabled=enabled)
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize("error_kind", ["unsupported_pp", "unexpected"])
+def test_runner_without_args_preserves_build_error_policy(pp_size, error_kind, caplog):
+    from types import SimpleNamespace
+
+    runner = object.__new__(ParallelRunner)
+    user_input = SimpleNamespace(model_id="example/model", pp_size=pp_size)
+    error = (
+        UnsupportedPPConfigurationError("unsupported")
+        if error_kind == "unsupported_pp"
+        else RuntimeError("build failed")
+    )
+    with patch("serving_cast.parallel_runner.ModelRunner", side_effect=error):
+        if error_kind == "unexpected" and pp_size > 1:
+            with pytest.raises(RuntimeError, match="build failed") as caught:
+                runner._get_model_runnner(user_input)
+            assert caught.value is error
+        else:
+            assert runner._get_model_runnner(user_input) is None
+    assert "example/model" in caplog.text
