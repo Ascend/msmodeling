@@ -16,8 +16,8 @@
 
 """Smoke tests for vllm_pd_simulator plugin.
 
-Uses mock to isolate optix heavy dependencies (pandas, pydantic_settings, etc).
-No third-party packages need to be installed to run these tests.
+Requires the project CI dependencies, including Fabric and Invoke.
+SSH connections and remote execution are mocked within individual tests.
 """
 
 from __future__ import annotations
@@ -33,47 +33,6 @@ import sys
 import types as _types
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-
-
-def _make_module(name):
-    mod = _types.ModuleType(name)
-    sys.modules[name] = mod
-    return mod
-
-
-def _install_heavy_dep_mocks():
-    if "pandas" not in sys.modules:
-        pd = _make_module("pandas")
-        pd.DataFrame = type("DataFrame", (), {})
-        pd.concat = lambda *a, **k: None
-        pd.read_csv = lambda *a, **k: None
-        pd.isna = lambda x: x is None
-    if "psutil" not in sys.modules:
-        ps = _make_module("psutil")
-        ps.Process = lambda *a, **k: MagicMock()
-        ps.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
-        ps.AccessDenied = type("AccessDenied", (Exception,), {})
-    if "transformers" not in sys.modules:
-        _make_module("transformers")
-    if "fabric" not in sys.modules:
-        fab = _make_module("fabric")
-        fab.Config = MagicMock()
-        fab.Connection = MagicMock()
-    if "invoke.exceptions" not in sys.modules:
-        invoke = sys.modules.get("invoke") or _make_module("invoke")
-        invoke_exceptions = _make_module("invoke.exceptions")
-
-        class CommandTimedOut(Exception):
-            def __init__(self, result, timeout):
-                super().__init__(f"Command timed out after {timeout} second(s)")
-                self.result = result
-                self.timeout = timeout
-
-        invoke_exceptions.CommandTimedOut = CommandTimedOut
-        invoke.exceptions = invoke_exceptions
-
-
-_install_heavy_dep_mocks()
 
 
 class TestPdSshRemoteConfig(unittest.TestCase):

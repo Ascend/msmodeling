@@ -9,6 +9,7 @@ description = "Unified vLLM simulator plugin (vllm_pd + vllm_cluster) for optix"
 requires-python = ">=3.10"
 dependencies = [
     "fabric>=2.0",
+    "invoke>=1.3,<3",
 ]
 
 [project.entry-points."optix.plugins"]
