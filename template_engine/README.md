@@ -230,32 +230,66 @@ python -m cli.inference.template_graph generate --model-id deepseek-ai/DeepSeek-
 
 安装项目命令行工具后，也可使用 `msmodeling inference template-graph capture/build/generate`，参数与上述模块命令一致。
 
-### 3.5 常用 CLI 参数
+### 3.5 参数说明
+
+以下参数按当前 `template-graph` CLI 的 `--help` 输出整理。`capture` 和 `generate` 使用相同的请求参数；其中 `--model-id` 也可由位置参数 `<NAME>` 提供。
+
+#### capture 和 generate 的请求参数
 
 | 参数 | 使用说明 |
 |---|---|
-| `--model-id` | 模型标识；采集和生成时使用同一模型 |
-| `--num-queries` | 全局请求数量 B |
-| `--query-length`、`--context-length` | S 为两者之和；Prefill 的 context 为 0，Decode 的 query 为 MTP+1 |
-| `--tp-size`、`--ep-size`、`--moe-dp-size`、`--dcp-size` | 并行配置，默认均为 1；必须使用项目支持的合法组合 |
-| `--decode` | 启用 Decode；不传时为 Prefill |
-| `--compile` | 本流程必须指定，生成时须与模板一致 |
-| `--num-mtp-tokens` | MTP 数量，默认 0 |
-| `--quantize-linear-action` | 线性量化动作；默认 `W8A8_DYNAMIC`，关闭时显式传 `DISABLED` |
-| `--quantize-attention-action` | 注意力量化动作，默认 `DISABLED` |
-| `--compilation-config enable_dispatch_ffn_combine` | 开启 DFC；当前模板入口不支持任意其他编译特性 |
-| `--cache-dir` | 采集输出或构建输入目录；默认 `./template_runs/captures/`，构建时须能确定唯一模型 |
-| `--template` | 构建时可省略，自动输出到项目的 `template_engine/templates/`；生成时须指定输入模板 |
-| `--compile-mode on` | 本流程使用开启编译采集的样本构建模板 |
-| `--output` | 生成图的保存路径，父目录须已存在 |
+| `--model-id` 或位置参数 `<NAME>` | 模型来源；使用同一模型采集和生成。模型 ID 模式可能通过 `trust_remote_code=True` 执行远端模型 Python；安全模式优先使用已审核的本地模型绝对路径。 |
+| `--device` | 设备画像名称，默认 `TEST_DEVICE`。 |
+| `--num-devices` | 使用的设备/进程总数；应与并行布局对应。 |
+| `--num-queries` | 单批全局请求数 B；`capture`、`generate` 必填。 |
+| `--query-length`、`--context-length` | 请求新增 token 数与已有上下文长度；S 为两者之和。`capture`、`generate` 必须提供 query length，context 默认 0。 |
+| `--decode` | 启用 Decode；省略时为 Prefill。 |
+| `--num-mtp-tokens` | MTP token 数，默认 0；Decode query length 为 MTP+1。 |
+| `--compile` | 使用 `torch.compile()`；本模板流程须显式开启，生成配置须与模板一致。 |
+| `--compilation-config` | 编译选项：`enable_multistream`、`enable_sequence_parallel`、`enable_matmul_allreduce`、`enable_dispatch_ffn_combine`、`enable_mlapo`、`multistream_overlap_shared_expert`。本流程当前使用 `enable_dispatch_ffn_combine` 表示 DFC；其他选项只有在采集、构建和验证都明确覆盖时才应加入模板请求。 |
+| `--quantize-linear-action` | 线性量化动作。公开选项：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`HIF8`；默认 `W8A8_DYNAMIC`。 |
+| `--quantize-attention-action` | KV cache 注意力量化动作。公开选项：`DISABLED`、`INT8`、`FP8`、`HIF8`；默认 `DISABLED`。HIF8 当前仅为仿真选项。 |
+| `--tp-size`、`--ep-size`、`--moe-dp-size`、`--dcp-size` | TP、EP、专家 DP 和 Decode Context Parallel；默认均为 1，组合须符合项目并行约束。DCP 复用 TP 设备且必须整除 TP。 |
+| `--num-hidden-layers-override` | 调试用层数覆盖，默认使用模型原生层数；正式模板采集和验证不应覆盖原生层数。 |
+
+#### 各子命令参数
+
+| 子命令 | 参数 | 使用说明 |
+|---|---|---|
+| `capture` | `--cache-dir` | 采集语料目录，默认 `./template_runs/captures/`。 |
+| `capture` | `--force` | 替换目录中已存在的同配置采集结果。 |
+| `capture` | `--sampler` | 将 sampling 算子包含在采集图中。 |
+| `build` | `--cache-dir` | 构建输入语料目录，默认 `./template_runs/captures/`；目录须能确定目标模型。 |
+| `build` | `--template` | 输出模板路径；省略时自动选择 `template_engine/templates/` 中的注册路径。 |
+| `build` | `--compile-mode {on,off,unknown}` | 按采集时的 compile 状态筛选；默认 `unknown`。本流程使用 `on`。 |
+| `build` | `--num-hidden-layers-override` | 调试用层数覆盖；正式模板构建应保留原生层数。 |
+| `generate` | `--template` | 要读取的模板文件；必填。 |
+| `generate` | `--output` | 可选的生成图保存路径，父目录须已存在。 |
+| `coverage` | `--cache-dir` | 必填的采集语料目录；与 `--template` 配合时仍需提供。 |
+| `coverage` | `--template` | 可选的已有模板路径；省略时从采集目录构建用于检查的模板。 |
+| `coverage` | `--configs`、`--sweep` | 至少提供其中一个；分别接收分号分隔的请求规格，或 B/S sweep 规格。 |
+| `coverage` | `--save-template` | 从采集目录构建模板时，可选的模板保存路径。 |
+| `coverage` | `--out` | 可选的 JSON 覆盖报告路径；报告也会输出到标准输出。 |
+| `resolve` | `--cache-dir` | 必填的采集语料目录，用于按需构建模板或回退采集。 |
+| `resolve` | `--template` | 可选的模板路径，默认 `template_graph.json.xz`。 |
+| `resolve` | `--num-hidden-layers-override` | 调试用层数覆盖；正式模板解析应使用模型原生层数。 |
+| `resolve` | `--config` | 可重复传入的 legacy `k=v` 请求规格。 |
+| `resolve` | `--sweep-json` | 含请求配置列表的 JSON 文件。可与 `--config` 一起使用。 |
+| `resolve` | `--json` | 将解析结果以 JSON 输出。 |
+| `resolve` | `--rebuild-template` | 从采集目录重新构建模板。 |
+| `resolve` | `--no-capture` | 禁止覆盖未命中时回退采集。 |
+
+所有子命令还提供 `--log-level {debug,info,warning,error,critical}`、`-v/--verbose`、`-q/--quiet`、`-h/--help` 和 `-V/--version`。其中 `--verbose` 等价于 debug 日志，`--quiet` 等价于 error 日志。
 
 ```bash
-python -m cli.inference.template_graph capture --help --model-id deepseek-ai/DeepSeek-V4-Flash --quantize-linear-action DISABLED
+python -m cli.inference.template_graph capture --help
 python -m cli.inference.template_graph build --help
 python -m cli.inference.template_graph generate --help
+python -m cli.inference.template_graph coverage --help
+python -m cli.inference.template_graph resolve --help
 ```
 
-查看当前版本的完整参数和量化选项，不启动采集或构建。
+以上命令只显示当前安装版本公开的参数，不启动采集、构建或解析。
 
 ## 4. 产物与寻优使用
 
@@ -303,7 +337,14 @@ grep -E '\[template (HIT|FALLBACK)\]' ./template_runs/optimizer-compare/template
 
 ### 4.2 跳过模板进行原生仿真对照
 
-`--no-template-graph` 跳过注册模板和工作负载复用，使用原生 Meta 仿真取图；不会删除或修改已注册模板。不传时默认启用模板优化，未覆盖配置仍会回退。
+`throughput_optimizer` 和 `text_generate` 都支持以下模板图参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--template-graph-optimization` | 启用 | 使用已注册且覆盖当前配置的模板图；默认已启用，可显式传入以表明本轮使用模板图。 |
+| `--no-template-graph` | — | 关闭模板图及工作负载复用，改用原生 Meta 仿真取图；不会删除或修改已注册模板。 |
+
+模板开关与 `--compile` 独立，关闭模板图时仍可保留编译参数。
 
 先设置模型和设备画像，定义两轮共用的参数：
 

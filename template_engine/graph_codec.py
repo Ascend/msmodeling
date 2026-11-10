@@ -23,7 +23,7 @@ serialization; JSON cannot instantiate arbitrary objects).
 The codec covers exactly the value surface the corpus census found inside
 ``CapturedOp`` trees and template payloads: ``None``/``bool``/``int``/
 ``float``/``str``/``list``/``dict`` (string keys) travel as native JSON;
-tensors, tuples, ``torch.dtype`` and ``torch.memory_format`` values travel
+tensors, tuples, ``torch.dtype``, ``torch.layout`` and ``torch.memory_format`` values travel
 through explicit sentinel objects so their semantics survive the round
 trip.  Tensors are Meta placeholders - only shape/stride/dtype identity is
 meaningful, never values - and the alias identity the capture pool creates
@@ -36,6 +36,7 @@ Sentinels (deliberately terse for the multi-million-node graphs):
   object for repeated ids (aliasing is load-bearing in template building).
 - ``{"__u__": [...]}`` - tuple.
 - ``{"__dt__": "torch.bfloat16"}`` - ``torch.dtype``.
+- ``{"__layout__": "torch.strided"}`` - ``torch.layout``.
 - ``{"__mf__": "torch.contiguous_format"}`` - ``torch.memory_format``.
 - ``{"__b64__": "..."}`` - ``bytes`` (base64).
 - ``{"__enum__": "tensor_cast.core.quantization.datatypes.QuantScheme.SYMMETRIC"}``
@@ -194,6 +195,8 @@ def encode_value(value: Any, tensors: list[dict[str, Any]], tensor_ids: dict[int
         return {"__t__": index}
     if isinstance(value, torch.dtype):
         return {"__dt__": str(value)}
+    if isinstance(value, torch.layout):
+        return {"__layout__": str(value)}
     if isinstance(value, torch.memory_format):
         return {"__mf__": str(value)}
     if isinstance(value, torch.device):
@@ -282,6 +285,14 @@ def decode_value(payload: Any, tensors: list[Any]) -> Any:
             resolved = getattr(torch, _short(name), None)
             if not isinstance(resolved, torch.dtype):
                 raise GraphCodecError(f"unknown torch dtype name: {name!r}")
+            return resolved
+        if "__layout__" in payload:
+            name = payload["__layout__"]
+            if not isinstance(name, str):
+                raise GraphCodecError("torch layout name must be a string")
+            resolved = getattr(torch, _short(name), None)
+            if not isinstance(resolved, torch.layout):
+                raise GraphCodecError(f"unknown torch layout name: {name!r}")
             return resolved
         if "__mf__" in payload:
             name = str(payload["__mf__"])

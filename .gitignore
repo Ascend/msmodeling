@@ -110,4 +110,5 @@ pd_final_r7/
 /template_engine/templates/*
 !/template_engine/templates/deepseek_v4_pro_cmp_on.json.xz
 !/template_engine/templates/glm_5_3_cmp_on.json.xz
+!/template_engine/templates/kimi_k3_cmp_on.json.xz
 *.defect_backup

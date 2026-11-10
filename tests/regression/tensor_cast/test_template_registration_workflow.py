@@ -579,6 +579,18 @@ def test_unknown_dtype_names_cannot_instantiate_arbitrary_objects():
         decode_value({"__mf__": "torch.system"}, [])
 
 
+def test_torch_layout_roundtrip_and_validation():
+    encoded = encode_value(torch.strided, [], {})
+    assert encoded == {"__layout__": "torch.strided"}
+    assert decode_value(encoded, []) is torch.strided
+    assert decode_value({"__layout__": "sparse_coo"}, []) is torch.sparse_coo
+
+    with pytest.raises(GraphCodecError, match="layout name must be a string"):
+        decode_value({"__layout__": 1}, [])
+    with pytest.raises(GraphCodecError, match="unknown torch layout name"):
+        decode_value({"__layout__": "torch.system"}, [])
+
+
 def test_registry_metadata_obeys_artifact_size_limits(tmp_path, monkeypatch):
     from template_engine import graph_codec
 
