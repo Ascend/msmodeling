@@ -13,23 +13,96 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
-
 import json
 import os
 import time
 from math import inf, isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from ...config.constant import MULTIHOST_INFER_ENGINE
 
 from ...config.config import field_to_param
+from ..errors import ConcurrencySweepError
 from .candidates import Candidate, SearchResult, TrialResult, TrialFailure
-from .validation import validate_candidate, classify_failure
+from .validation import SWEEP_TRIAL_TYPE, validate_candidate, classify_failure
 from .topology import is_multihost_context
 from .parameters import resolve_execution_fields
+
+if TYPE_CHECKING:
+    from ..scheduler import SweepLevelResult
+SWEEP_BEST_METRIC = "generate_speed"
+SWEEP_PLATEAU_TOLERANCE = 0.03
+MIN_SUCCESSFUL_SWEEP_LEVELS = 2
+DEFAULT_SWEEP_LEVEL_COUNT = 5
+
+
+def default_concurrency_levels(search_space_context: dict | None, count: int = DEFAULT_SWEEP_LEVEL_COUNT) -> list:
+    space = (search_space_context or {}).get("search_space", {})
+    items = list(space.get("parameters", [])) + list(space.get("constants", []))
+    item = next((entry for entry in items if str(entry.get("name", "")).upper() == "CONCURRENCY"), None)
+    if item is None:
+        raise ValueError("concurrency_sweep without concurrency_levels requires CONCURRENCY in search_space")
+    try:
+        minimum, maximum = float(item.get("min")), float(item.get("max"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"CONCURRENCY range is not numeric: min={item.get('min')!r}, max={item.get('max')!r}") from exc
+    low, high = max(1, int(minimum)), int(maximum)
+    if high <= low:
+        raise ValueError(f"CONCURRENCY range [{item.get('min')}, {item.get('max')}] leaves no room to sweep")
+    if high - low + 1 <= count:
+        return list(range(low, high + 1))
+    ratio = (high / low) ** (1.0 / (count - 1))
+    return sorted({int(round(low * ratio**i)) for i in range(count)})
+
+
+def select_best_sweep_level(sweep_results: "list[SweepLevelResult]", metric=SWEEP_BEST_METRIC, fitness_evaluator=None):
+    usable = []
+    for result in sweep_results or ():
+        performance = result.get("performance")
+        value = getattr(performance, metric, None) if performance is not None else None
+        if value:
+            usable.append((result, float(value)))
+    if not usable:
+        return None
+    if fitness_evaluator is not None:
+        compliant = [
+            (result, value)
+            for result, value in usable
+            if compute_slo_violated(result.get("performance"), fitness_evaluator) is not True
+        ]
+        if compliant:
+            usable = compliant
+        else:
+
+            def latency_key(item):
+                perf = item[0].get("performance")
+                tpot = getattr(perf, "time_per_output_token", None)
+                ttft = getattr(perf, "time_to_first_token", None)
+                return (float(tpot) if tpot else inf, float(ttft) if ttft else inf)
+
+            return min(usable, key=latency_key)[0]
+    best_value = max(value for _, value in usable)
+    plateau = [result for result, value in usable if value >= best_value * (1 - SWEEP_PLATEAU_TOLERANCE)]
+    return min(plateau, key=lambda result: result["concurrency"])
+
+
+def _sweep_metadata_entry(result: dict) -> dict:
+    entry = {"concurrency": result.get("concurrency")}
+    performance = result.get("performance")
+    if performance is not None:
+        keys = ("generate_speed", "time_to_first_token", "time_per_output_token", "success_rate", "throughput")
+        entry["performance"] = {key: getattr(performance, key, None) for key in keys}
+        if result.get("measured_concurrency") is not None:
+            entry["measured_concurrency"] = result["measured_concurrency"]
+    if result.get("error"):
+        entry["error"] = result["error"]
+    if result.get("skipped"):
+        entry["skipped"] = result["skipped"]
+    return entry
 
 
 def compute_slo_violated(perf, fitness_evaluator) -> bool | None:
@@ -254,6 +327,9 @@ class AgentCandidateStrategy:
         return [Candidate.from_dict(item, i) for i, item in enumerate(data.get("candidates", []))]
 
     def _run_trial(self, validation: dict, scheduler, target_field: list, search_space_context: dict | None = None):
+        candidate_dict = validation.get("candidate") or {}
+        if str(candidate_dict.get("type") or "").strip().lower() == SWEEP_TRIAL_TYPE:
+            return self._run_sweep_trial(validation, scheduler, target_field, search_space_context)
         multihost = is_multihost_context(search_space_context)
         if (search_space_context or {}).get("deployment", {}).get("type") == "pd":
             scheduler.pd_candidate_identity = {"round": self.round_index, "candidate_id": validation["candidate_id"]}
@@ -319,11 +395,7 @@ class AgentCandidateStrategy:
                 )
 
         try:
-            scheduler.save_result(
-                fitness=fitness,
-                candidate_id=candidate_id,
-                run_dir=str(self.run_dir),
-            )
+            scheduler.save_result(fitness=fitness, candidate_id=candidate_id, run_dir=str(self.run_dir))
         except Exception as exc:
             logger.warning("Failed to save trial result: {}", exc)
             if (search_space_context or {}).get("deployment", {}).get("type") == "pd":
@@ -350,6 +422,133 @@ class AgentCandidateStrategy:
             ]
         return TrialResult(
             params=params,
+            fitness=fitness,
+            performance=perf,
+            candidate_id=candidate_id,
+            error=error,
+            source="agent",
+            elapsed_seconds=elapsed,
+            failure=failure,
+            metadata=metadata,
+            slo_violated=slo_violated,
+        )
+
+    def _run_sweep_trial(
+        self, validation: dict, scheduler, target_field: list, search_space_context: dict | None = None
+    ):
+        params = validation["params"]
+        candidate_id = validation["candidate_id"]
+        candidate_dict = validation.get("candidate") or {}
+        resolved_field = self._params_to_target_field(params, target_field, search_space_context)
+        if resolved_field is None:
+            return TrialResult(
+                params=params,
+                fitness=inf,
+                candidate_id=candidate_id,
+                source="agent",
+                error="Failed to resolve target field",
+                failure=TrialFailure(
+                    category="constraint",
+                    sub_category="ratio",
+                    message="Failed to resolve target field from candidate params",
+                    suggested_action="fix_ratio",
+                ),
+                metadata={"round_id": self.round_index, "trial_kind": SWEEP_TRIAL_TYPE},
+            )
+        start = time.monotonic()
+        error = None
+        crashed = False
+        sweep_results = []
+        try:
+            levels = candidate_dict.get("concurrency_levels") or default_concurrency_levels(search_space_context)
+            position = field_to_param(tuple(resolved_field))
+            with scheduler.disable_early_exit():
+                sweep_results = scheduler.run_concurrency_sweep(
+                    position,
+                    tuple(resolved_field),
+                    levels,
+                    candidate_id=candidate_id,
+                    early_stop_tpot=getattr(self.fitness_evaluator, "tpot_slo", None),
+                    early_stop_ttft=getattr(self.fitness_evaluator, "ttft_slo", None),
+                )
+        except ConcurrencySweepError as exc:
+            logger.error("Concurrency sweep aborted for candidate {}: {}", candidate_id, exc)
+            crashed = True
+            sweep_results = list(exc.sweep_results)
+            error = str(exc)
+        except Exception as exc:
+            logger.error("Sweep trial failed for candidate {}: {}", candidate_id, exc)
+            error = str(exc)
+        elapsed = time.monotonic() - start
+
+        best = select_best_sweep_level(sweep_results, fitness_evaluator=self.fitness_evaluator)
+        attempted = [result for result in sweep_results if not result.get("skipped")]
+        succeeded = sum(1 for result in attempted if result.get("performance") is not None)
+        cliff_limited = any(result.get("skipped") == "slo_cliff" for result in sweep_results)
+        if error is None:
+            if best is None:
+                error = "concurrency sweep produced no successful level"
+            elif succeeded < MIN_SUCCESSFUL_SWEEP_LEVELS and not (cliff_limited and succeeded >= 1):
+                error = (
+                    f"concurrency sweep: {succeeded} of {len(attempted)} levels succeeded "
+                    f"(need >= {MIN_SUCCESSFUL_SWEEP_LEVELS})"
+                )
+
+        result_params = dict(params)
+        if best is not None:
+            result_params["CONCURRENCY"] = best["concurrency"]
+        if error is None:
+            perf = best["performance"]
+            fitness = (
+                self.fitness_evaluator.minimum_algorithm(perf)
+                if self.fitness_evaluator
+                else (getattr(perf, "generate_speed", inf) or inf)
+            )
+            slo_violated = compute_slo_violated(perf, self.fitness_evaluator)
+        else:
+            perf = best["performance"] if best is not None else None
+            fitness, slo_violated = inf, None
+
+        failure = None
+        if error:
+            failure_dict = classify_failure(error, getattr(scheduler, "last_outcome", None))
+            if failure_dict:
+                failure = TrialFailure(
+                    category=failure_dict["category"],
+                    sub_category=failure_dict.get("sub_category", ""),
+                    message=failure_dict.get("message", error),
+                    evidence_line=failure_dict.get("evidence_line", ""),
+                    suggested_action=failure_dict.get("suggested_action", ""),
+                    offending_params=dict(params),
+                )
+            elif crashed:
+                failure = TrialFailure(
+                    category="service",
+                    sub_category="crash",
+                    message=error,
+                    suggested_action="retry_or_skip",
+                    offending_params=dict(params),
+                )
+
+        if best is not None:
+            scheduler.backfill_sweep_best(best["performance"], best["concurrency"])
+        try:
+            scheduler.save_result(
+                fitness=fitness,
+                candidate_id=candidate_id,
+                run_dir=str(self.run_dir),
+            )
+        except Exception as exc:
+            logger.warning("Failed to save trial result: {}", exc)
+        metadata = {
+            "round_id": self.round_index,
+            "trial_kind": SWEEP_TRIAL_TYPE,
+            "sweep": [_sweep_metadata_entry(result) for result in sweep_results],
+            "best_concurrency": best["concurrency"] if best is not None else None,
+            "best_metric": SWEEP_BEST_METRIC,
+        }
+        return TrialResult(
+            params=result_params,
             fitness=fitness,
             performance=perf,
             candidate_id=candidate_id,

@@ -70,7 +70,7 @@
           },
           "type": {
             "type": "string",
-            "description": "方向类型，例如 baseline、local_search、factor_isolation、tradeoff_search、recovery、coverage。"
+            "description": "方向类型，例如 baseline、local_search、factor_isolation、tradeoff_search、recovery、coverage、concurrency_sweep。"
           },
           "trial_type": {
             "type": "string",
@@ -154,6 +154,15 @@
             "type": "string",
             "description": "生成该候选的分析方向标识，指向本文件顶层 directions 数组中的 direction_id。"
           },
+          "type": {
+            "type": "string",
+            "description": "候选类型。optimization（默认，可省略）为普通寻优候选；concurrency_sweep 为并发扫描候选（一次部署、按 concurrency_levels 逐档打流，逐档结果与最优档写回 metadata）。"
+          },
+          "concurrency_levels": {
+            "type": "array",
+            "items": {"type": "integer"}, "minItems": 2, "maxItems": 8,
+            "description": "并发档位列表（2~8 个升序整数），仅 type=concurrency_sweep 时使用；省略时按 search_space 的 CONCURRENCY [min, max] 自动生成 5 档。"
+          },
           "baseline_ref": {
             "type": "string",
             "description": "用于对比的基线候选或结果引用。"
@@ -164,7 +173,7 @@
           },
           "params": {
             "type": "object",
-            "description": "仅保存实际参数值；未显式赋值的字段采用 search_space 默认值。不得将 value/dtype/config_position 定义对象放入 params。",
+            "description": "仅保存实际参数值；未显式赋值的字段采用 search_space 默认值。不得将 value/dtype/config_position 定义对象放入 params。type=concurrency_sweep 的候选 params 只携带服务侧参数，不允许包含 CONCURRENCY/REQUESTRATE（并发由 concurrency_levels 接管，REQUESTRATE 固定按无限流处理）。",
             "additionalProperties": {
               "type": [
                 "string",

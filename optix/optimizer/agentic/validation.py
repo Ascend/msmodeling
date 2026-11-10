@@ -605,6 +605,47 @@ def _param_to_cli_flag(name: str) -> str:
 # Main validation function — SINGLE SOURCE OF TRUTH
 # ---------------------------------------------------------------------------
 
+SWEEP_TRIAL_TYPE = "concurrency_sweep"
+SWEEP_MIN_LEVELS = 2
+SWEEP_MAX_LEVELS = 8
+_SWEEP_MANAGED_PARAMS = {"CONCURRENCY", "REQUESTRATE"}
+
+
+def _validate_sweep_candidate(candidate: Dict[str, Any], schema_items: List[Dict[str, Any]], errors: List[str]) -> None:
+    params = candidate.get("params") or {}
+    for name in params:
+        if str(name).upper() in _SWEEP_MANAGED_PARAMS:
+            errors.append(f"{name}: managed by concurrency_levels for a {SWEEP_TRIAL_TYPE} candidate")
+    conc_item = next((i for i in schema_items if str(i.get("name", "")).upper() == "CONCURRENCY"), None)
+    if conc_item is None:
+        errors.append(f"{SWEEP_TRIAL_TYPE} requires CONCURRENCY registered in search_space with a [min, max] range")
+        return
+    try:
+        minimum = float(conc_item.get("min"))
+        maximum = float(conc_item.get("max"))
+    except (TypeError, ValueError):
+        errors.append(f"CONCURRENCY range not numeric: min={conc_item.get('min')!r}, max={conc_item.get('max')!r}")
+        return
+    if conc_item.get("constant") is not None:
+        errors.append(f"CONCURRENCY is frozen at {conc_item.get('constant')!r} (constant): nothing left to sweep")
+        return
+    if isclose(minimum, maximum, rel_tol=1e-5):
+        errors.append(f"CONCURRENCY is pinned at {conc_item.get('min')} (min == max): no range left to sweep")
+        return
+    levels = candidate.get("concurrency_levels")
+    if levels is None:
+        return
+    if not isinstance(levels, list) or any(isinstance(level, bool) or not isinstance(level, int) for level in levels):
+        errors.append(f"concurrency_levels must be a list of integers, got {levels!r}")
+        return
+    if not SWEEP_MIN_LEVELS <= len(levels) <= SWEEP_MAX_LEVELS:
+        errors.append(f"concurrency_levels requires {SWEEP_MIN_LEVELS}~{SWEEP_MAX_LEVELS} levels, got {len(levels)}")
+    if len(set(levels)) != len(levels) or levels != sorted(levels):
+        errors.append(f"concurrency_levels must be strictly ascending without duplicates, got {levels!r}")
+    for level in levels:
+        if level < minimum or level > maximum:
+            errors.append(f"concurrency_levels level {level} is outside CONCURRENCY range [{minimum:g}, {maximum:g}]")
+
 
 def validate_candidate(context: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
     """Validate a single candidate against the context's search space and constraints.
@@ -633,6 +674,9 @@ def validate_candidate(context: Dict[str, Any], candidate: Dict[str, Any]) -> Di
             validate_snapshot(context)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         errors.append(str(exc))
+
+    if str(candidate.get("type") or "").strip().lower() == SWEEP_TRIAL_TYPE:
+        _validate_sweep_candidate(candidate, schema_items, errors)
 
     # 1. Check for unknown parameter names
     for name in params:

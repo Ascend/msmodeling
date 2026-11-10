@@ -246,6 +246,12 @@ class AisBench(BenchmarkInterface):
             performance_index.generate_speed = float(output_average.split()[0])
         return performance_index
 
+    def get_measured_concurrency(self):
+        csv_files = _require_unique_csv(Path(self.config.output_path))
+        json_file = Path(csv_files[0]).with_suffix(".json")
+        with open_file(json_file, "r") as f:
+            return float(_get_aisbench_summary_value(json.load(f), "Concurrency"))
+
     def before_run(self, run_params: Optional[tuple[OptimizerConfigField]] = None):
         remove_file(Path(self.config.output_path))
         super().before_run(run_params)

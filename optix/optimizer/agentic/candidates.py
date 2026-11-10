@@ -26,10 +26,15 @@ class Candidate:
     expected_effect: str = ""
     risk: str = ""
     source: str = "agent"
+    candidate_type: str = "optimization"
+    trial_type: str = "optimization"
+    direction_id: Optional[str] = None
+    concurrency_levels: Optional[List[int]] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], index: int = 0) -> "Candidate":
         cid = str(data.get("candidate_id") or data.get("id") or f"candidate-{index + 1}")
+        levels = data.get("concurrency_levels")
         return cls(
             candidate_id=cid,
             params=dict(data.get("params", {})),
@@ -37,17 +42,28 @@ class Candidate:
             expected_effect=str(data.get("expected_effect", "")),
             risk=str(data.get("risk", "")),
             source=str(data.get("source", "agent")),
+            candidate_type=str(data.get("type") or "optimization"),
+            trial_type=str(data.get("trial_type") or "optimization"),
+            direction_id=data.get("direction_id"),
+            concurrency_levels=[int(level) for level in levels] if isinstance(levels, list) else None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "candidate_id": self.candidate_id,
             "params": self.params,
             "rationale": self.rationale,
             "expected_effect": self.expected_effect,
             "risk": self.risk,
             "source": self.source,
+            "direction_id": self.direction_id,
+            "concurrency_levels": self.concurrency_levels,
         }
+        if self.candidate_type != "optimization":
+            result["type"] = self.candidate_type
+        if self.trial_type != "optimization":
+            result["trial_type"] = self.trial_type
+        return result
 
 
 @dataclass

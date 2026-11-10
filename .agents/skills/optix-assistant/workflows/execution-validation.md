@@ -93,6 +93,9 @@ benchmark 执行、候选校验、失败分类、进程清理全部由 optix 完
      HCCL/TBE/共享内存广播等编译信息属正常阶段，不得误判卡死——日志反复出现
      `shm_broadcast "No available shared memory broadcast block found in 60s"`
      属编译/量化正常阶段，**不是死锁**；
+   - concurrency_sweep 候选执行期间 stage 与普通 trial 相同（`running/*`），
+     不单独区分逐档打流阶段；其特征是单个 trial 耗时 ≈ 1 次部署 + N 档打流，
+     明显长于普通候选，监控时按此预期，不得误判卡死；
    - `running/trial_completed`：一个 trial 完成；
    - `completed/round_done`：本轮全部完成。
    **停滞判据**：进程存活的前提下，连续 30 分钟无任何阶段/状态变化才告警
@@ -143,6 +146,16 @@ agent 先用每条 trial 的 `candidate_id` 回查同轮 `candidates.round-N.jso
   Layer 2」升级处理。
 - 读取前校验一致性：`round` 与文件名一致、candidate_id 在 run 内唯一；
   一致性不符时报告异常，不猜值修补。
+- **sweep 候选（`type: "concurrency_sweep"`）的消费方式**：顶层
+  `fitness`/`performance`/`slo_violated` 填最优档的值，`params.CONCURRENCY`
+  已回填最优档，不读 metadata 也有完整意义；逐档曲线读 `metadata.sweep[]`
+  （`measured_concurrency` 明显低于请求档说明服务已饱和截断，曲线过了拐点），
+  最优档读 `metadata.best_concurrency`——字段细则与逐档原始压测结果的归档
+  位置见 optix-reference 协议。后续轮把 CONCURRENCY 收窄或钉死到最优档：
+  修改 `context.search_space` 中 CONCURRENCY 的 `min`/`max`/`default` 并在
+  下一轮 `candidates_analysis` 说明依据——写 search_space 是 skill 侧既有
+  职责，**optix 不回写**。sweep 候选 `trial_type` 固定 `diagnosis`，按本节
+  开头的回查规则排除判优、验收与收敛统计，仅作证据。
 - 原始 optix 日志（`/tmp/optix-round-N.log`）只在整轮异常退出时用于诊断，
   不作为结果依据。
 

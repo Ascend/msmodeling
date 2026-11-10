@@ -140,3 +140,11 @@ class NoFeasibleSolutionError(OptimizerError):
 
 class PdDisaggError(OptimizerError):
     """Raised when the built-in PD disaggregation workflow cannot continue."""
+
+
+class ConcurrencySweepError(OptimizerError):
+    """Service crashed mid-sweep; carries the per-level results measured so far."""
+
+    def __init__(self, message: str, sweep_results: list):
+        super().__init__(message)
+        self.sweep_results = list(sweep_results)

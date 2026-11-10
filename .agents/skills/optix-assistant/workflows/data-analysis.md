@@ -278,8 +278,7 @@ trial（走 optix 候选管道），只是结果解释权被降级。典型用�
 1. 单变量假设明确，可写出 `hypothesis` 与判读标准；
 2. 目标维度在搜索空间内且未被冻结——被钉死的参数走不了候选通道（optix
    `validate_candidate` 直接拒）；客户端压测类探针（并发梯度等，服务端冻结）
-   **不走本通道**——该类探测需独立旁路执行且结果须与优化结果集隔离，当前
-   流程未提供该通道，相关探测需求应在轮次外单独评估。
+   **不走本通道**——该类探测使用 `concurrency_sweep` 候选（见下节）。
 
 **判优排除（强制）**：`trial_type: "diagnosis"` 候选的结果不得进入——基线选择、fitness
 对比与收敛趋势计算、验收判定与 `best_result.json` 候选池；
@@ -294,6 +293,30 @@ agent 必须结合候选分类（`trial_type` 类型）解释，不能直接将�
 最终导出由 `export_best_config.py` 自动回查同轮候选并过滤 diagnosis；关联不完整、
 类型非法或结果标记与候选冲突时报错。成功轮候选归档必须保留，不得改写。
 诊断会实际消耗运行时间，仍须遵守原有时间预算；不因不计正常轮数而无限追加诊断。
+
+### 并发扫描候选（`type: "concurrency_sweep"`）
+
+并发是测试侧参数（渲染 serve 命令时被跳过），与部署无关。当探索维度只是客户端
+并发时，普通候选"每 trial 重启服务"纯属浪费——`concurrency_sweep` 候选让 optix
+**一次部署服务**，在保活服务上按 `concurrency_levels` 逐档打流，逐档结果与最优档
+写回 `results.round-N.json` 的 `metadata`（协议见
+`../references/optix-reference.md`「并发扫描候选协议」）。
+
+**何时发 sweep**（强制规则）：
+
+1. **粗扫**：CONCURRENCY 区间跨度 >10×（如 [1,64]）时，基线后的首个探索轮必须发一次 sweep，可省略 `concurrency_levels` 自动生成几何 5 档，再据此收窄或钉死区间；不要求服务侧参数已收敛。跨度 ≤10× 时用普通候选逐点括弧即可。
+2. **重扫**：以下结构性变更生效后，下一轮应重扫定档：
+   - 并行拓扑：`tp`/`dp`/`pp` 或并行开关变化；
+   - 显存预算：`GPU_MEMORY_UTILIZATION`、KV cache 容量、量化方式变化；
+   - batching：`MAX_NUM_BATCHED_TOKENS` 跨量级调整、chunked prefill 或调度策略切换；
+   - 投机解码：投机配置增删。
+   CONCURRENCY/REQUESTRATE 本身、参数小幅微调、日志与开关类变化无需重扫。
+
+**档位与写法**：
+
+- `concurrency_levels` 为 2~8 个升序整数，按几何间隔覆盖搜索区间两端；已有实测最优档时在附近加密，分辨平台期与真实拐点。
+- 候选写 `"type": "concurrency_sweep"`，`params` 只含服务侧参数，禁止 CONCURRENCY/REQUESTRATE。
+- 方向的 `trial_type` 固定 `diagnosis`，不进判优收敛；一个 sweep 占一个 `max_trials` 名额，耗时约为一次部署加 N 档打流，结果处理见 `./execution-validation.md`「读取结果」。
 
 ### 参数范围扩展
 
