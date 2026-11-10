@@ -16,6 +16,7 @@
 
 import pickle
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
@@ -338,8 +339,8 @@ class TestWorkloadCache(TestCase):
     def test_lru_eviction_keeps_most_recent_workload(self):
         cache = WorkloadCache(max_entries=1)
         trace = RuntimeWorkloadTrace(tensors=(), invocations=())
-        first = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1, False)
-        second = RuntimeWorkload(trace, 2.0, 0.0, 0.0, 0.0, 0.0, 1, False)
+        first = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1)
+        second = RuntimeWorkload(trace, 2.0, 0.0, 0.0, 0.0, 0.0, 1)
 
         cache.set_workload("first", first)
         cache.set_workload("second", second)
@@ -351,8 +352,8 @@ class TestWorkloadCache(TestCase):
 
     def test_serialized_size_limit_evicts_oldest_workload(self):
         trace = RuntimeWorkloadTrace(tensors=(), invocations=())
-        first = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1, False)
-        second = RuntimeWorkload(trace, 2.0, 0.0, 0.0, 0.0, 0.0, 1, False)
+        first = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1)
+        second = RuntimeWorkload(trace, 2.0, 0.0, 0.0, 0.0, 0.0, 1)
         cache = WorkloadCache(max_entries=2, max_bytes=len(pickle.dumps(first)))
 
         cache.set_workload("first", first)
@@ -364,7 +365,7 @@ class TestWorkloadCache(TestCase):
 
     def test_oversized_workload_is_not_cached(self):
         trace = RuntimeWorkloadTrace(tensors=(), invocations=())
-        workload = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1, False)
+        workload = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1)
         cache = WorkloadCache(max_bytes=len(pickle.dumps(workload)) - 1)
 
         cache.set_workload("oversized", workload)
@@ -399,17 +400,64 @@ class TestWorkloadCache(TestCase):
         runtime.get_breakdowns.return_value = {}
         runtime.event_list = []
         trace = MagicMock()
-        workload = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1, False)
+        workload = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1)
 
         metrics = runner._estimate(workload)
 
         self.assertEqual(metrics.run_time_s, 0.25)
         trace.replay.assert_called_once_with(runtime)
 
+    @patch("serving_cast.service.workload_cache.Runtime")
+    def test_replay_recalibrates_raw_peak_for_target_device(self, runtime_cls):
+        runner = WorkloadReuseModelRunner.__new__(WorkloadReuseModelRunner)
+        runner.perf_models = []
+        runner.device_profile = MagicMock()
+        runner.model_weight_size_gb = 5.0
+        runner.user_input = SimpleNamespace(
+            chrome_trace=None,
+            reserved_memory_gb=0.0,
+            dump_input_shapes=False,
+            dump_op_bound_results=False,
+        )
+        runtime_cls.return_value.total_execution_time_s.return_value = {}
+        runtime_cls.return_value.memory_tracker.peak_mem_usage.return_value = 0
+        runtime_cls.return_value.event_list = []
+        workload = RuntimeWorkload(
+            MagicMock(),
+            5.0,
+            2.0,
+            0.0,
+            0.0,
+            0.0,
+            2,
+            param_matched_size_gb=5.0,
+            derived_resident_size_gb=4.0,
+            intermediate_peak_size_gb=10.0,
+            raw_peak_memory_usage_gb=19.0,
+        )
+        requests = [RequestInfo(1, 1, is_decode=False), RequestInfo(2, 2, is_decode=False)]
+
+        runner.total_device_memory_gb = 16.0
+        calibrated = runner._estimate(workload, requests=requests)
+        self.assertEqual(calibrated.peak_memory_usage_gb, 10.0)
+        self.assertEqual(calibrated.device_memory_available_gb, 6.0)
+        self.assertEqual(calibrated.model_activation_size_gb, 1.0)
+
+        # Trace-derived memory includes 2 GB of KV, but only 1 GB is on device.
+        offloaded = replace(workload, kv_cache_size_gb=1.0, raw_peak_memory_usage_gb=18.0, non_kv_resident_size_gb=2.0)
+        calibrated = runner._estimate(offloaded, requests=requests)
+        self.assertEqual(calibrated.peak_memory_usage_gb, 9.0)
+        self.assertEqual(calibrated.device_memory_available_gb, 7.0)
+
+        runner.total_device_memory_gb = 20.0
+        uncalibrated = runner._estimate(workload, requests=requests)
+        self.assertEqual(uncalibrated.peak_memory_usage_gb, 19.0)
+        self.assertEqual(uncalibrated.model_activation_size_gb, 10.0)
+
     def test_claim_wait_and_publish_are_single_flight(self):
         cache = WorkloadCache()
         trace = RuntimeWorkloadTrace(tensors=(), invocations=())
-        workload = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1, False)
+        workload = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1)
 
         state, _, owner_token = cache.claim_workload("key")
         self.assertEqual(state, "owner")
@@ -453,8 +501,8 @@ class TestWorkloadCache(TestCase):
     def test_expired_owner_cannot_publish_or_abandon_new_owner_lease(self):
         cache = WorkloadCache(inflight_timeout_s=0.01)
         trace = RuntimeWorkloadTrace(tensors=(), invocations=())
-        old_workload = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1, False)
-        new_workload = RuntimeWorkload(trace, 2.0, 0.0, 0.0, 0.0, 0.0, 1, False)
+        old_workload = RuntimeWorkload(trace, 1.0, 0.0, 0.0, 0.0, 0.0, 1)
+        new_workload = RuntimeWorkload(trace, 2.0, 0.0, 0.0, 0.0, 0.0, 1)
 
         state, _, old_token = cache.claim_workload("key")
         self.assertEqual(state, "owner")
@@ -480,7 +528,7 @@ class TestWorkloadCache(TestCase):
         cache.set_template("model", runner)
         self.assertIsNotNone(cache.get_template("model"))
 
-        workload = RuntimeWorkload(RuntimeWorkloadTrace(tensors=(), invocations=()), 1.0, 0.0, 0.0, 0.0, 0.0, 1, False)
+        workload = RuntimeWorkload(RuntimeWorkloadTrace(tensors=(), invocations=()), 1.0, 0.0, 0.0, 0.0, 0.0, 1)
         cache.set_workload("workload", workload)
 
         self.assertIsNone(cache.get_template("model"))

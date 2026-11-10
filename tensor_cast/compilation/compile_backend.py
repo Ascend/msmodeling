@@ -28,7 +28,7 @@ from torch._inductor.fx_passes.post_grad import decompose_auto_functionalized
 
 from .. import config, ops  # noqa: F401
 from . import patterns
-from .constant_folding import fold_meta_constants, replace_node_with_constant
+from .constant_folding import fold_meta_constants, register_graph_folded_constants, replace_node_with_constant
 from .freezing_passes import patterns as freezing_patterns
 from .freezing_passes.dispatch_ffn_combine_pass import DispatchFFNCombinePass
 from .freezing_passes.grouped_matmul_swiglu_pass import GroupedMatmulSwigluPass
@@ -85,6 +85,7 @@ class CompilerBackend:
             def wrapper(args: list[object]) -> Sequence[torch.Tensor]:
                 args_new = [args[i] for i in preserved_arg_indices]
                 args.clear()
+                register_graph_folded_constants(optimized_function)
                 return optimized_function(*args_new)
 
             wrapper._boxed_call = True  # type: ignore[attr-defined]
@@ -98,8 +99,13 @@ class CompilerBackend:
             self.rewrite_before_freezing(fx_graph, inputs)
             if config.compilation.enable_freezing:
                 return freezing_compile(self.rewrite_after_freezing, fx_graph, inputs)
-            else:
-                return self.rewrite_after_freezing(fx_graph, inputs)
+            optimized_graph = self.rewrite_after_freezing(fx_graph, inputs)
+
+            def forward(*args):
+                register_graph_folded_constants(optimized_graph)
+                return optimized_graph(*args)
+
+            return forward
 
         # Use the default decomposition table to decompose operators.
         decompositions = select_decomp_table()

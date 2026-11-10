@@ -1658,6 +1658,10 @@ def test_pipeline_runner_uses_stage_consistent_memory_accounting():
                 peak_memory_usage_bytes=8,
                 cache_stats=PipelineStageCacheStats(kv_cache_bytes=1, indexer_cache_bytes=1),
                 weight_size_bytes=1,
+                param_matched_peak_bytes=0,
+                derived_resident_peak_bytes=0,
+                unexecuted_resident_bytes=0,
+                represented_weight_bytes=0,
             ),
             SimpleNamespace(
                 stage_spec=model.plan.stages[1],
@@ -1670,6 +1674,10 @@ def test_pipeline_runner_uses_stage_consistent_memory_accounting():
                 peak_memory_usage_bytes=1,
                 cache_stats=PipelineStageCacheStats(kv_cache_bytes=4, indexer_cache_bytes=4),
                 weight_size_bytes=100,
+                param_matched_peak_bytes=0,
+                derived_resident_peak_bytes=0,
+                unexecuted_resident_bytes=0,
+                represented_weight_bytes=0,
             ),
         ],
         transfer_results=[
@@ -1726,6 +1734,10 @@ def _make_divergent_stage_results(model):
                     indexer_cache_per_token_bytes=float(indexer),
                 ),
                 weight_size_bytes=weight,
+                param_matched_peak_bytes=0,
+                derived_resident_peak_bytes=0,
+                unexecuted_resident_bytes=0,
+                represented_weight_bytes=0,
             )
         )
     return stages
@@ -2133,6 +2145,10 @@ def _make_profile_stage_result(stage_spec, *, execution_time_s, peak, weight, kv
             indexer_cache_per_token_bytes=8.25,
         ),
         weight_size_bytes=weight,
+        param_matched_peak_bytes=0,
+        derived_resident_peak_bytes=0,
+        unexecuted_resident_bytes=0,
+        represented_weight_bytes=0,
     )
 
 

@@ -173,7 +173,7 @@ class TestTensorCastModelRunner(unittest.TestCase):
             reserved_memory_gb=10.0,
         )
 
-        peak_memory_usage_gb = runner._check_peak_memory_usage_gb(
+        peak_memory_usage_gb, peak_calibrated = runner._check_peak_memory_usage_gb(
             peak_memory_usage_gb=80.0,
             kv_cache_size_gb=5.0,
             requests=[
@@ -183,6 +183,7 @@ class TestTensorCastModelRunner(unittest.TestCase):
         )
 
         self.assertEqual(peak_memory_usage_gb, 48.5)
+        self.assertTrue(peak_calibrated)
 
     def test_check_peak_memory_usage_gb_keeps_homogeneous_prefill_batch(self):
         runner = TensorCastModelRunner.__new__(TensorCastModelRunner)
@@ -194,7 +195,7 @@ class TestTensorCastModelRunner(unittest.TestCase):
             reserved_memory_gb=10.0,
         )
 
-        peak_memory_usage_gb = runner._check_peak_memory_usage_gb(
+        peak_memory_usage_gb, peak_calibrated = runner._check_peak_memory_usage_gb(
             peak_memory_usage_gb=80.0,
             kv_cache_size_gb=5.0,
             requests=[
@@ -204,6 +205,7 @@ class TestTensorCastModelRunner(unittest.TestCase):
         )
 
         self.assertEqual(peak_memory_usage_gb, 80.0)
+        self.assertFalse(peak_calibrated)
 
     def test_check_peak_memory_usage_gb_clamps_negative_activation_for_heterogeneous_prefill_batch(self):
         runner = TensorCastModelRunner.__new__(TensorCastModelRunner)
@@ -215,7 +217,7 @@ class TestTensorCastModelRunner(unittest.TestCase):
             reserved_memory_gb=10.0,
         )
 
-        peak_memory_usage_gb = runner._check_peak_memory_usage_gb(
+        peak_memory_usage_gb, peak_calibrated = runner._check_peak_memory_usage_gb(
             peak_memory_usage_gb=42.0,
             kv_cache_size_gb=5.0,
             requests=[
@@ -225,6 +227,7 @@ class TestTensorCastModelRunner(unittest.TestCase):
         )
 
         self.assertEqual(peak_memory_usage_gb, 45.0)
+        self.assertTrue(peak_calibrated)
 
 
 class TestInterpolationPoint(unittest.TestCase):

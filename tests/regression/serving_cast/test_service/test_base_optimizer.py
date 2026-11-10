@@ -140,6 +140,8 @@ class TestBaseBackend(unittest.TestCase):
                             "prefill_breakdonws",
                             "decode_breakdowns",
                             20.0,
+                            2.0,
+                            2.0,
                             4.0,
                             1.0,
                             39.0,
@@ -339,6 +341,8 @@ class TestBaseBackend(unittest.TestCase):
             "total_device_memory_gb": 64.0,
             "reserved_memory_gb": 4.0,
             "model_weight_size_gb": 20.0,
+            "param_matched_size_gb": 3.0,
+            "derived_resident_size_gb": 5.0,
             "kv_cache_size_gb": 8.0,
             "model_activation_size_gb": 2.0,
             "device_memory_available_gb": 30.0,
@@ -372,6 +376,8 @@ class TestBaseBackend(unittest.TestCase):
                         "prefill_breakdowns",
                         "decode_breakdowns",
                         memory_info["model_weight_size_gb"],
+                        memory_info["param_matched_size_gb"],
+                        memory_info["derived_resident_size_gb"],
                         memory_info["kv_cache_size_gb"],
                         memory_info["model_activation_size_gb"],
                         memory_info["device_memory_available_gb"],
@@ -963,6 +969,101 @@ class TestBaseBackend(unittest.TestCase):
         )
 
         self.assertEqual(estimated, 14)
+
+    def test_estimate_right_boundary_uses_measured_incremental_slope(self):
+        # PR #906 review #2: the two-probe available-memory difference captures
+        # the true marginal per-request cost (KV pool, persistent states) that
+        # account-name classification misses.  stored=0.5 would allow a far
+        # larger batch; the measured slope (10-2)/(8-1)~1.143 must win via max().
+        optimizer_data = OptimizerData(tpot_limits=None, ttft_limits=None)
+
+        estimated = self.backend._estimate_right_boundary(
+            {"batch_size": 1, "device_memory_available_gb": 10.0},
+            {
+                "batch_size": 8,
+                "per_request_memory_gb": 0.5,
+                "device_memory_available_gb": 2.0,
+            },
+            optimizer_data,
+        )
+
+        # per_req = max(0.5, 8/7) = 8/7;  8 + 2 / (8/7) = 9.75 -> round+1 = 11
+        self.assertEqual(estimated, 11)
+
+    def test_estimate_right_boundary_negative_slope_keeps_stored_bound(self):
+        # Non-positive measured slope (paged-block quantization noise across a
+        # small bs_diff) must not lower the stored bound.
+        optimizer_data = OptimizerData(tpot_limits=None, ttft_limits=None)
+
+        estimated = self.backend._estimate_right_boundary(
+            {"batch_size": 7, "device_memory_available_gb": 2.0},
+            {
+                "batch_size": 8,
+                "per_request_memory_gb": 2.0,
+                "device_memory_available_gb": 10.0,
+            },
+            optimizer_data,
+        )
+
+        # slope = (2-10)/1 = -8 <= 0 -> per_req stays stored 2.0: 8 + 10/2 = 13
+        self.assertEqual(estimated, 14)
+
+    def test_estimate_right_boundary_measured_slope_oom_right_probe(self):
+        # An OOM right probe (negative available) yields a larger slope and a
+        # boundary below bs_right: conservative shrink, never an expansion.
+        optimizer_data = OptimizerData(tpot_limits=None, ttft_limits=None)
+
+        estimated = self.backend._estimate_right_boundary(
+            {"batch_size": 4, "device_memory_available_gb": 8.0},
+            {
+                "batch_size": 8,
+                "per_request_memory_gb": 0.5,
+                "device_memory_available_gb": -8.0,
+            },
+            optimizer_data,
+        )
+
+        # per_req = max(0.5, 16/4=4) = 4;  8 + (-8)/4 = 6 -> max(1, round(6)+1) = 7
+        self.assertEqual(estimated, 7)
+
+    def test_compute_per_request_memory_gb_ignores_unknown_derived_resident(self):
+        for value in (None, float("nan")):
+            with self.subTest(derived_resident_size_gb=value):
+                self.assertEqual(
+                    self.backend._compute_per_request_memory_gb(20.0, 5.0, 1.0, 8.0, 2, derived_resident_size_gb=value),
+                    3.0,
+                )
+
+    def test_compute_per_request_memory_gb_amortizes_kv_into_per_request(self):
+        # PR #906 review #2: only the non-KV derived remainder is a fixed
+        # cost; the KV part scales with concurrency and is amortized per
+        # request instead of being deducted once.
+        self.assertEqual(
+            self.backend._compute_per_request_memory_gb(
+                total_device_memory_gb=64,
+                model_weight_size_gb=20,
+                reserved_memory_gb=10,
+                memory_left_gb=12,
+                batch_size=4,
+                derived_resident_size_gb=10.0,
+                kv_cache_size_gb=6.0,
+            ),
+            4.5,
+        )
+        # NaN KV (PP hand-built dicts) is sanitized to 0: derived is then
+        # fully deducted as fixed, matching the legacy conservative fallback.
+        self.assertEqual(
+            self.backend._compute_per_request_memory_gb(
+                total_device_memory_gb=64,
+                model_weight_size_gb=20,
+                reserved_memory_gb=10,
+                memory_left_gb=12,
+                batch_size=4,
+                derived_resident_size_gb=10.0,
+                kv_cache_size_gb=float("nan"),
+            ),
+            3.0,
+        )
 
     def test_exponential_search_without_acc_search_doubles_until_max_iterations(self):
         optimizer_data = OptimizerData(concurrency_search_strategy="exponential")

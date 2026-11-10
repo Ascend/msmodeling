@@ -144,5 +144,8 @@ class StaticMetaForward:
                     module._buffers.clear()
                     module._buffers.update(buffers)
             graph = self.backend.compile_static_meta(graph, flat, num_frozen)
+        from .constant_folding import register_graph_folded_constants
+
+        register_graph_folded_constants(graph)
         outputs = graph(*flat[num_frozen:])
         return pytree.tree_unflatten(list(outputs), output_spec)

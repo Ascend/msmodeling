@@ -820,6 +820,21 @@ class TestModelRunnerProfilingMetrics:
             def peak_mem_usage(self):
                 return 0
 
+            def register_model_params(self, _model):
+                pass
+
+            def unexecuted_param_bytes(self, _named_tensors):
+                return 0
+
+            def peak_intermediate_bytes(self):
+                return 0
+
+            def peak_param_bytes(self):
+                return 0
+
+            def peak_derived_resident_bytes(self):
+                return 0
+
         class FakeRuntime:
             def __init__(self, *_args, **_kwargs):
                 self.memory_tracker = FakeMemoryTracker()
@@ -842,6 +857,15 @@ class TestModelRunnerProfilingMetrics:
 
         class FakeModel:
             model_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=1))
+
+            def named_parameters(self, **_kwargs):
+                return iter([])
+
+            def named_buffers(self, **_kwargs):
+                return iter([])
+
+            def modules(self):
+                return iter([])
 
             def forward(self, **_kwargs):
                 pm.op_records.append(

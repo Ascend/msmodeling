@@ -57,6 +57,8 @@ class TestKimiK25(unittest.TestCase):
             "peak_memory_usage_gb",
             "kv_cache_size_gb",
             "model_activation_size_gb",
+            "param_matched_size_gb",
+            "derived_resident_size_gb",
             "device_memory_available_gb",
             "execution_time_s",
             "table_result",
@@ -86,10 +88,10 @@ class TestKimiK25(unittest.TestCase):
             0,
             f"{test_name}: KV cache size should be non-negative",
         )
-        self.assertGreaterEqual(
+        self.assertGreater(
             result["model_activation_size_gb"],
             0,
-            f"{test_name}: Model activation size should be non-negative",
+            f"{test_name}: Model activation size should be positive (Issue #463)",
         )
 
         # Validate execution time is positive

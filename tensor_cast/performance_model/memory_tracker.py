@@ -44,6 +44,31 @@ class _TensorInfo:
     use_op_indices_by_alias: List[int] = dataclasses.field(default_factory=list)
     """Indirect op use via its alias"""
     last_use_op_idx: int = -1
+    # Storage-level identity for view/repack-robust param matching.
+    storage_ptr: int = 0
+    base_id: int = 0
+    # Object identity at first record, for matching compile-time folded
+    # constants (``_frozen_param*`` buffers) that carry weight bytes but were
+    # never registered as params.
+    obj_id: int = 0
+
+
+def _base_root_id(tensor) -> int:
+    """id() of the view-chain root tensor (the tensor itself when not a view)."""
+    base = tensor
+    seen = 0
+    while getattr(base, "_base", None) is not None and seen < 32:
+        base = base._base
+        seen += 1
+    return id(base)
+
+
+def _storage_ptr(tensor) -> int:
+    """data_ptr of the untyped storage; 0 when unavailable (e.g. meta tensors)."""
+    try:
+        return int(tensor.untyped_storage().data_ptr())
+    except Exception:  # noqa: BLE001 - meta/fake tensors may not expose storage
+        return 0
 
 
 class TensorKey(NamedTuple):
@@ -182,6 +207,115 @@ class MemoryTracker:
         # Key: torch op handle (op_invoke_info.func)
         # Value: AliasPlan if op has alias-bearing outputs; otherwise None.
         self._alias_plan_cache: Dict[Any, Optional[AliasPlan]] = {}
+        # --- Three-account classification (Issue #463) ---
+        # Registered model param/buffer tensor_ids, populated by
+        # ``register_model_params`` before ``model.forward()``.
+        self._registered_param_tensor_ids: Set = set()
+        # Storage-level keys of registered params/buffers: repacked or viewed
+        # weight copies consumed by ops share storage (or a ``_base`` root)
+        # with a registered tensor even when their tensor_id differs.
+        self._registered_param_storage_ptrs: Set[int] = set()
+        self._registered_param_base_ids: Set[int] = set()
+        # Object-identity sets handed over from constant folding (see
+        # ``register_folded_constants``): folded ``_frozen_param*`` constants
+        # are weight bytes created at compile time (never registered as
+        # params), and folded sources are originals fully replaced by them.
+        self._folded_constant_obj_ids: Set[int] = set()
+        self._folded_source_obj_ids: Set[int] = set()
+        # Category map: TensorKey (root) -> "param" | "derived".
+        # Populated during ``analyze()`` after step 1.  Tensors not in this
+        # map are classified as "intermediate".
+        self._category_map: Dict[TensorKey, str] = {}
+        # Peak per-category bytes, computed during ``analyze()`` step 2.
+        self._peak_param_bytes: int = 0
+        self._peak_derived_resident_bytes: int = 0
+        self._peak_intermediate_bytes: int = 0
+
+    def register_model_params(self, model) -> None:
+        """Register model parameters/buffers for three-account classification.
+
+        Must be called **before** ``model.forward()`` so that tensor IDs are
+        captured before the ``EquivalentKeyManager`` remaps them during
+        representative-layer (``RegionMarkerWrapper``) expansion.
+
+        After this call, ``analyze()`` will classify every tensor in the trace
+        into one of three accounts:
+
+        * **param_matched** — model inputs whose ``tensor_id`` matches a
+          registered param/buffer.  These correspond to weights/buffers that
+          are actually consumed by ops in the trace.
+        * **derived_resident** — model inputs that do *not* match any
+          registered param/buffer (e.g. KV-cache tensors, runtime-materialised
+          look-up tables).
+        * **intermediate** — tensors defined by an op (``def_op_idx >= 0``).
+          These are the true activation tensors.
+
+        The split fixes the set-mismatch root cause of Issue #463 where
+        ``peak`` (traced tensors) and ``weight_size`` (all registered params)
+        used different collection scopes.
+        """
+        for _, param in model.named_parameters():
+            tensor_id = self._get_real_tensor_id(param, 0).tensor_id
+            self._registered_param_tensor_ids.add(tensor_id)
+            ptr = _storage_ptr(param)
+            if ptr:
+                self._registered_param_storage_ptrs.add(ptr)
+            self._registered_param_base_ids.add(id(param))
+            self._registered_param_base_ids.add(_base_root_id(param))
+        for _, buffer in model.named_buffers():
+            tensor_id = self._get_real_tensor_id(buffer, 0).tensor_id
+            self._registered_param_tensor_ids.add(tensor_id)
+            ptr = _storage_ptr(buffer)
+            if ptr:
+                self._registered_param_storage_ptrs.add(ptr)
+            self._registered_param_base_ids.add(id(buffer))
+            self._registered_param_base_ids.add(_base_root_id(buffer))
+
+    def register_folded_constants(
+        self,
+        constant_obj_ids: Set[int],
+        source_obj_ids: Set[int],
+    ) -> None:
+        """Hand over constant-folding identity sets for three-account matching.
+
+        Called before executing each compiled graph. See
+        ``compilation.constant_folding`` for how the sets are populated.
+
+        * ``constant_obj_ids``: folded ``_frozen_param*`` constant tensors.
+          They carry real weight bytes consumed by ops but were created at
+          compile time, so neither tensor_id nor storage/base matching can
+          link them to registered params; match by object identity instead.
+        * ``source_obj_ids``: original params/buffers whose graph references
+          were entirely replaced by folded constants.  They never appear in
+          the trace, so ``unexecuted_param_bytes`` must skip them — the folded
+          replacement is the resident copy the ops actually consume.
+        """
+        self._folded_constant_obj_ids.update(constant_obj_ids)
+        self._folded_source_obj_ids.update(source_obj_ids)
+
+    def _matches_registered_param(self, t_key: TensorKey) -> bool:
+        """Four-way match of a traced tensor against registered params/buffers.
+
+        Quantizers and model wrappers often feed ops a repacked or viewed copy
+        of a weight whose tensor_id differs from the registered param, which a
+        plain tensor_id match misses (the copy then lands in derived_resident
+        and the weight is double counted).  A copy shares the untyped-storage
+        ``data_ptr`` or the ``_base`` view-chain root with its registered
+        original, so match on those keys as well.  Storage matching no-ops for
+        meta tensors (``data_ptr`` == 0).  Compile-time folded constants match
+        by object identity: they are new weight tensors with no registered
+        counterpart and no shared storage.
+        """
+        if t_key.tensor_id in self._registered_param_tensor_ids:
+            return True
+        info = self.tensor_infos.get(t_key)
+        if info is None:
+            return False
+        if info.obj_id and info.obj_id in self._folded_constant_obj_ids:
+            return True
+        if info.storage_ptr and info.storage_ptr in self._registered_param_storage_ptrs:
+            return True
+        return bool(info.base_id) and info.base_id in self._registered_param_base_ids
 
     def bind_region_identity_registry(self, identity_registry: RegionIdentityRegistry) -> None:
         """Use the owning Runtime's registry to resolve Region tensor aliases."""
@@ -394,7 +528,12 @@ class MemoryTracker:
             if tensor_id not in self.tensor_infos:
                 # If a tensor is used before it's defined, it's a model input.
                 # We initialize its info here.
-                self.tensor_infos[tensor_id] = _TensorInfo(size_bytes=int(bytes_of_tensor(tensor)))
+                self.tensor_infos[tensor_id] = _TensorInfo(
+                    size_bytes=int(bytes_of_tensor(tensor)),
+                    storage_ptr=_storage_ptr(tensor),
+                    base_id=_base_root_id(tensor),
+                    obj_id=id(tensor),
+                )
             if tensor_id in zero_storage_tensor_ids:
                 self.tensor_infos[tensor_id].size_bytes = 0
             self.tensor_infos[tensor_id].use_op_indices.append(op_idx)
@@ -447,13 +586,57 @@ class MemoryTracker:
                 else:
                     self.model_input_tensors.add(tensor_id)
 
+        # Step 1.5: Classify model input tensors into three accounts.
+        #
+        # ``model_input_tensors`` are external inputs (no def_op_idx).  Split
+        # them into *param_matched* (matches a registered model param/buffer)
+        # and *derived_resident* (KV-cache, runtime lookup tables, etc.).
+        # Everything else (tensors with def_op_idx >= 0) is *intermediate*.
+        self._category_map = {}
+        for t_key in self.model_input_tensors:
+            if self._matches_registered_param(t_key):
+                self._category_map[t_key] = "param"
+            else:
+                self._category_map[t_key] = "derived"
+
         # Step 2: Simulate memory usage over the sequence of operations.
         # Start with memory consumed by model inputs, which are pre-allocated.
-        current_memory_usage = sum(self.tensor_infos[t_id].size_bytes for t_id in self.model_input_tensors)
+        # Region replay reuses the SAME representative weight storage across
+        # repeats, so each physical weight tensor (distinct tensor_id) is
+        # counted once here; the remaining layers are covered by the
+        # represented-weight account in ModelRunner.  Derived-resident tensors
+        # (KV cache etc.) keep per-repeat multiplicity because each repeat
+        # simulates a distinct layer's resident state.
+        counted_param_tensor_ids: Set[int] = set()
+        initial_usage = 0
+        current_param = 0
+        current_derived = 0
+        for t_id in self.model_input_tensors:
+            size = self.tensor_infos[t_id].size_bytes
+            if self._category_map.get(t_id) == "param":
+                if t_id.tensor_id in counted_param_tensor_ids:
+                    continue
+                counted_param_tensor_ids.add(t_id.tensor_id)
+                current_param += size
+            else:
+                current_derived += size
+            initial_usage += size
+        current_memory_usage = initial_usage
         freed_roots: Set[TensorKey] = set()
+
+        # Per-category live bytes tracking (Issue #463).
+        current_intermediate = 0
+        peak_param = current_param
+        peak_derived = current_derived
+        peak_intermediate = current_intermediate
 
         for op_idx, (op_info, _) in enumerate(self.op_invoke_infos_with_repeat_id):
             usage_before_call = current_memory_usage
+
+            # Peak check at the "before" point (matches peak_mem_usage semantics).
+            peak_param = max(peak_param, current_param)
+            peak_derived = max(peak_derived, current_derived)
+            peak_intermediate = max(peak_intermediate, current_intermediate)
 
             # Allocate storage only where a TensorKey is first defined. In-place and
             # custom mutating ops can return an existing input TensorKey.
@@ -465,10 +648,29 @@ class MemoryTracker:
                 if t_id not in self.alias_info and self.tensor_infos[t_id].def_op_idx == op_idx
             )
 
+            # Track per-category allocation for newly defined tensors.
+            for t_id in output_tensor_ids:
+                if t_id in self.alias_info or self.tensor_infos[t_id].def_op_idx != op_idx:
+                    continue
+                size = self.tensor_infos[t_id].size_bytes
+                root_id = self.alias_info.get(t_id, t_id)
+                cat = self._category_map.get(root_id, "intermediate")
+                if cat == "param":
+                    current_param += size
+                elif cat == "derived":
+                    current_derived += size
+                else:
+                    current_intermediate += size
+
             # The memory usage after the call includes the newly allocated tensors.
             # TODO(jgong5): This model does not account for temporary workspace memory, which would
             #               require a more sophisticated model to estimate the workspace usage.
             usage_after_call = usage_before_call + mem_allocated
+
+            # Peak check at the "after" point (after allocation, before freeing).
+            peak_param = max(peak_param, current_param)
+            peak_derived = max(peak_derived, current_derived)
+            peak_intermediate = max(peak_intermediate, current_intermediate)
 
             self.memory_profiles.append(OpMemoryProfile(op_info, usage_before_call, usage_after_call))
 
@@ -491,6 +693,15 @@ class MemoryTracker:
                 ):
                     mem_freed += root_info.size_bytes
                     freed_roots.add(root_id)
+                    # Track per-category freeing (only intermediates can be freed;
+                    # model inputs and outputs are never freed).
+                    cat = self._category_map.get(root_id, "intermediate")
+                    if cat == "param":
+                        current_param -= root_info.size_bytes
+                    elif cat == "derived":
+                        current_derived -= root_info.size_bytes
+                    else:
+                        current_intermediate -= root_info.size_bytes
 
             # Note: we do not count in the memory fragmentation here.
             current_memory_usage -= mem_freed
@@ -498,7 +709,21 @@ class MemoryTracker:
         # memory usage after model execution, all intermediate tensors should be freed
         self.memory_profiles.append(OpMemoryProfile(None, current_memory_usage, current_memory_usage))
 
+        # Final peak check (post-execution state).
+        peak_param = max(peak_param, current_param)
+        peak_derived = max(peak_derived, current_derived)
+        peak_intermediate = max(peak_intermediate, current_intermediate)
+
+        self._peak_param_bytes = peak_param
+        self._peak_derived_resident_bytes = peak_derived
+        self._peak_intermediate_bytes = peak_intermediate
+
         self.is_analyzed = True
+
+    def _ensure_analyzed(self, caller: str) -> None:
+        """Shared pre-condition guard for all post-``analyze()`` accessors."""
+        if not self.is_analyzed:
+            raise RuntimeError(f"`analyze()` must be called before `{caller}`.")
 
     def get_profile(self, initial_mem_usage_bytes: float = 0.0) -> List[OpMemoryProfile]:
         """
@@ -507,8 +732,7 @@ class MemoryTracker:
         Args:
             initial_mem_usage_bytes: memory usage before executing the PyTorch program.
         """
-        if not self.is_analyzed:
-            raise RuntimeError("`analyze()` must be called before `get_profile()`.")
+        self._ensure_analyzed("get_profile()")
 
         # Adjust the calculated profile with the initial memory offset.
         if initial_mem_usage_bytes == 0:
@@ -532,3 +756,84 @@ class MemoryTracker:
         """
         profiles = self.get_profile(initial_mem_usage_bytes)
         return max(max(p.usage_before_call_bytes, p.usage_after_call_bytes) for p in profiles)
+
+    # ------------------------------------------------------------------
+    # Three-account peak accessors (Issue #463)
+    # ------------------------------------------------------------------
+    #
+    # ``peak_mem_usage()`` returns the *total* high-water mark.  The three
+    # accessors below decompose that total into three disjoint accounts:
+    #
+    #   peak = peak_param_bytes + peak_derived_resident_bytes + peak_intermediate_bytes
+    #
+    # (KV-cache tensors that are *model inputs* fall into ``derived_resident``;
+    # KV-cache tensors allocated *inside* the trace fall into ``intermediate``.)
+
+    def peak_param_bytes(self) -> int:
+        """Peak bytes of registered params/buffers actually consumed in the trace."""
+        self._ensure_analyzed("peak_param_bytes()")
+        return self._peak_param_bytes
+
+    def peak_derived_resident_bytes(self) -> int:
+        """Peak bytes of non-registered model inputs (KV cache, look-up tables)."""
+        self._ensure_analyzed("peak_derived_resident_bytes()")
+        return self._peak_derived_resident_bytes
+
+    def peak_intermediate_bytes(self) -> int:
+        """Peak bytes of execution-graph intermediates — the true activation."""
+        self._ensure_analyzed("peak_intermediate_bytes()")
+        return self._peak_intermediate_bytes
+
+    # ------------------------------------------------------------------
+    # Fourth account (Issue #463 follow-up)
+    # ------------------------------------------------------------------
+    def unexecuted_param_bytes(self, named_tensors) -> int:
+        """Bytes of registered params/buffers never touched by any traced op.
+
+        Fourth account complementing the three-account peak: tensors that
+        hang on the module tree (so ``weight_size`` counts them) but that no
+        traced op ever consumed (so the traced ``peak`` misses them).  In a
+        real deployment they stay resident in device memory for the whole
+        run — e.g. an ``lm_head`` a decode simulation never samples with,
+        shared experts whose forward is bypassed, draft-model heads under
+        speculative decoding, rotary caches — so capacity planning must count
+        them as resident instead of treating ``total - traced_peak`` as free.
+
+        Weights consumed by a traced op (including originals read while the
+        quantizer materializes its replacement copies) appear in
+        ``tensor_infos`` and are excluded here.  Tensors that never appeared
+        in the trace (``tensor_id`` absent from ``tensor_infos``) are the
+        unexecuted-resident set.
+
+        Args:
+            named_tensors: iterable of ``(name, tensor)`` pairs, typically
+                ``list(model.named_parameters()) + list(model.named_buffers())``.
+                Callers may pre-filter (e.g. skip the vision tower for
+                text-only runs to stay consistent with the weight account).
+
+        Returns:
+            Total bytes of the unexecuted set.
+        """
+        self._ensure_analyzed("unexecuted_param_bytes()")
+        traced_tensor_ids = {key.tensor_id for key in self.tensor_infos}
+        # Symmetric with ``_matches_registered_param``: a param consumed through
+        # a repacked/viewed copy leaves its storage (or ``_base`` root) in the
+        # trace even when its own tensor_id never appears.
+        traced_storage_ptrs = {info.storage_ptr for info in self.tensor_infos.values() if info.storage_ptr}
+        traced_base_ids = {info.base_id for info in self.tensor_infos.values() if info.base_id}
+        total = 0
+        for _, tensor in named_tensors:
+            tensor_id = self._get_real_tensor_id(tensor, 0).tensor_id
+            if tensor_id in traced_tensor_ids:
+                continue
+            if id(tensor) in self._folded_source_obj_ids:
+                # Fully replaced by a folded constant that is consumed (and
+                # counted as param) in its place.
+                continue
+            ptr = _storage_ptr(tensor)
+            if ptr and ptr in traced_storage_ptrs:
+                continue
+            if id(tensor) in traced_base_ids or _base_root_id(tensor) in traced_base_ids:
+                continue
+            total += int(bytes_of_tensor(tensor))
+        return total

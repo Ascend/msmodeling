@@ -497,6 +497,30 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(large.memory_left_gb, 17.0)
         self.assertEqual(large.memory_info["kv_cache_size_gb"], 4.0)
 
+    def test_search_budget_uses_forward_kv_for_derived_resident_memory(self):
+        strategy = self.make_strategy()
+        runner = strategy.model_runner
+        runner.total_device_memory_gb = 20.0
+        runner.model_weight_size_gb = 5.0
+        runner.get_resident_kv_cache_size_gb = lambda requests: float(len(requests))
+        info = {
+            "model_weight_size_gb": 5.0,
+            "param_matched_size_gb": 5.0,
+            "derived_resident_size_gb": 3.0,
+            "kv_cache_size_gb": 1.0,
+            "model_activation_size_gb": 1.0,
+            "device_memory_available_gb": 11.0,
+        }
+        strategy._compute_forward_latency_record = lambda key, data: ForwardLatencyRecord(2.0, 11.0, "", info)
+        data = self.data(batch_size=4, output_length=1, num_devices=1, concurrency_search_strategy="linear_exponential")
+
+        with patch("serving_cast.service.agg_throughput_optimizer.format_parallel_label", return_value="TP=1"):
+            summary = strategy.get_inference_info(data)
+
+        search_info = summary.get_search_info()
+        self.assertEqual(search_info["device_memory_available_gb"], 8.0)
+        self.assertEqual(search_info["per_request_memory_gb"], 1.25)
+
     def test_waiting_kv_reservation_rounds_pages_per_request(self):
         shape = RequestShape(True, 1, 8)
         caches = {"kv_cache_by_layers": {0: torch.empty(128, dtype=torch.uint8)}}

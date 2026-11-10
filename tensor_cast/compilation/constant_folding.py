@@ -5,12 +5,38 @@
 # This file contains code derived from PyTorch
 # (https://github.com/pytorch/pytorch). See the PyTorch LICENSE.
 
-from typing import Any, Optional
+import functools
+from typing import Any, Optional, Set
 
 import torch
 import torch.utils._pytree as pytree
 from torch._inductor.freezing_utils import maybe_set_is_frozen_param
 from torch.fx import GraphModule, Node
+
+
+# Identity registries bridging constant folding and memory accounting.
+#
+# ``MemoryTracker`` classifies every consumed tensor against the model's
+# registered ``named_parameters``/``named_buffers``.  Constant folding breaks
+# that matching in both directions:
+#
+# * Folded constants (``_frozen_param*`` buffers created here or by the
+#   inductor freezing fold) are *new* tensor objects consumed by ops but never
+#   registered as params, so they would land in ``derived_resident`` and be
+#   multiplied by region repeats, double-counting weight bytes.
+# * Source tensors whose graph references were entirely replaced by folded
+#   constants (the dead ``get_attr`` removals below) are no longer traced even
+#   though their folded replacement *is* consumed, so they must not be counted
+#   as unexecuted-resident.
+#
+# Keep the identities on the graph so cached forwards can register them
+# with whichever Runtime executes the graph.
+def register_graph_folded_constants(gm: GraphModule) -> None:
+    from ..runtime import current_runtime
+
+    runtime = current_runtime()
+    if runtime is not None and runtime.memory_tracker is not None:
+        runtime.memory_tracker.register_folded_constants(gm._folded_constant_obj_ids, gm._folded_source_obj_ids)
 
 
 def replace_node_with_constant(
@@ -156,16 +182,43 @@ class MetaConstantFolder(torch.fx.Interpreter):
         return out
 
 
-def _remove_dead_get_attrs(gm: GraphModule) -> None:
+def _remove_dead_get_attrs(gm: GraphModule, source_ids: Set[int]) -> None:
     for child in gm.children():
         if isinstance(child, GraphModule):
-            _remove_dead_get_attrs(child)
+            _remove_dead_get_attrs(child, source_ids)
 
     dead_nodes = [node for node in gm.graph.find_nodes(op="get_attr") if not node.users]
     for node in dead_nodes:
+        # A dead get_attr means every consumer of this param/buffer was folded
+        # into a constant: record the source tensor's identity so the memory
+        # tracker can skip it in the unexecuted-resident account.  Resolve
+        # before ``delattr``; dotted targets traverse submodule attributes.
+        try:
+            source = functools.reduce(getattr, str(node.target).split("."), gm)
+        except (AttributeError, KeyError, TypeError):
+            source = None
+        if isinstance(source, torch.Tensor):
+            source_ids.add(id(source))
         if hasattr(gm, node.target):
             delattr(gm, node.target)
         gm.graph.erase_node(node)
+
+
+def _collect_folded_constant_ids(gm: GraphModule) -> Set[int]:
+    """Collect ids of every ``_frozen_param*`` tensor reachable from ``gm``.
+
+    The inductor freezing fold (``torch._inductor.constant_folding``) runs
+    inside ``freeze()`` *before* this pass and registers its folded constants
+    with the same ``_frozen_param`` prefix; this scan covers those in addition
+    to the constants registered by ``replace_node_with_constant`` above.
+    """
+    constant_ids = set()
+    for module in gm.modules():
+        for mapping in (getattr(module, "_buffers", {}), vars(module)):
+            for name, value in mapping.items():
+                if name.startswith("_frozen_param") and isinstance(value, torch.Tensor):
+                    constant_ids.add(id(value))
+    return constant_ids
 
 
 def fold_meta_constants(gm: GraphModule) -> GraphModule:
@@ -190,8 +243,11 @@ def fold_meta_constants(gm: GraphModule) -> GraphModule:
             replace_node_with_constant(gm, node, constant)
 
     # Clean up dead constants before DCE recursively lints child GraphModules.
-    _remove_dead_get_attrs(gm)
+    source_ids = set()
+    _remove_dead_get_attrs(gm, source_ids)
     gm.graph.eliminate_dead_code()
     gm.graph.lint()
     gm.recompile()
+    gm._folded_constant_obj_ids = _collect_folded_constant_ids(gm)
+    gm._folded_source_obj_ids = source_ids
     return gm

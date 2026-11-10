@@ -34,6 +34,7 @@ from .model_config import ModelConfig, ParallelConfig
 from .performance_model.memory_tracker import MemoryTracker
 from .performance_model.utils import bytes_of_tensor
 from .runtime import Runtime
+from .transformers.custom_model_registry import get_visual
 
 
 class UnsupportedPPConfigurationError(ValueError):
@@ -181,6 +182,10 @@ class PipelineRunResult:
     indexer_cache_per_token_bytes: float = 0.0
     model_weight_size_bytes: int = 0
     model_activation_size_bytes: Optional[float] = None
+    param_matched_size_bytes: int = 0
+    derived_resident_size_bytes: int = 0
+    unexecuted_resident_size_bytes: int = 0
+    represented_weight_size_bytes: int = 0
     stage_latency_breakdown: list[dict] = field(default_factory=list)
     stage_memory_breakdown: list[dict] = field(default_factory=list)
     trace_events: list[dict] = field(default_factory=list)
@@ -912,6 +917,11 @@ class _PipelineStageRunResult:
     cache_stats: PipelineStageCacheStats
     peak_memory_usage_bytes: float
     weight_size_bytes: int
+    intermediate_peak_bytes: int = 0
+    param_matched_peak_bytes: int = 0
+    derived_resident_peak_bytes: int = 0
+    unexecuted_resident_bytes: int = 0
+    represented_weight_bytes: int = 0
 
 
 @dataclass
@@ -968,12 +978,47 @@ class StageRunner:
             ) as runtime,
             torch.no_grad(),
         ):
+            # Register stage model params for three-account classification.
+            memory_tracker.register_model_params(self.stage)
             output = _primary_model_output(self.stage(**stage_kwargs))
             if with_sampler:
                 _ = sampler(output, stage_kwargs["sampling_metadata"])
 
         if runtime_observer is not None:
             runtime_observer(runtime)
+
+        # Three-account + fourth-account propagation (PR #906 review): align the
+        # PP stage peak with the single-device path in model_runner.run_inference,
+        # which adds registered-but-untraced weights back to the traced peak
+        # BEFORE the heterogeneous-prefill calibration.  Without this add-back,
+        # ``device_memory_available_gb`` is more optimistic for PP candidates
+        # than for the equivalent non-PP run.
+        unexecuted_named_tensors = list(self.stage.named_parameters()) + list(self.stage.named_buffers())
+        # Visual-tower exclusion mirrors model_runner.run_inference, guarded for
+        # PP stage wrappers: get_visual() reads ``model.hf_config``, which
+        # PipelineStageModel does not expose.  Skipping the exclusion there is
+        # the conservative direction — unexecuted stays counted, so PP
+        # availability is never over-estimated.
+        visual = get_visual(self.stage) if hasattr(self.stage, "hf_config") else None
+        if visual and stage_kwargs.get("pixel_values") is None:
+            visual_tensor_ids = {id(t) for _, t in visual.named_parameters(remove_duplicate=False)}
+            visual_tensor_ids |= {id(t) for _, t in visual.named_buffers(remove_duplicate=False)}
+            unexecuted_named_tensors = [
+                (name, tensor) for name, tensor in unexecuted_named_tensors if id(tensor) not in visual_tensor_ids
+            ]
+        unexecuted_resident_bytes = memory_tracker.unexecuted_param_bytes(unexecuted_named_tensors)
+        # Fifth account (PR #906 review): mirror model_runner.run_inference —
+        # ``weight_size`` extrapolates RegionMarkerWrapper representative
+        # layers ((repeat_count - 1) extra copies), while the region replay
+        # reuses the representative tensors, so add the extrapolated bytes
+        # into the stage peak to keep the stage-level peak >= weight invariant.
+        from .transformers.model import TransformerModel
+
+        represented_weight_bytes = TransformerModel.get_represented_extra_weight_size(self.stage)
+        if visual and stage_kwargs.get("pixel_values") is None:
+            # Symmetric with the visual exclusion above: text-only runs do not
+            # host the vision tower's extrapolated weight either.
+            represented_weight_bytes -= TransformerModel.get_represented_extra_weight_size(visual)
 
         return _PipelineStageRunResult(
             stage_spec=self.stage_spec,
@@ -993,8 +1038,15 @@ class StageRunner:
                 thread_name=f"PP Stage {self.stage_spec.stage_id}",
             ),
             cache_stats=cache_stats,
-            peak_memory_usage_bytes=_safe_peak_memory_usage(memory_tracker),
+            peak_memory_usage_bytes=(
+                _safe_peak_memory_usage(memory_tracker) + unexecuted_resident_bytes + represented_weight_bytes
+            ),
             weight_size_bytes=int(self.stage.weight_size),
+            intermediate_peak_bytes=memory_tracker.peak_intermediate_bytes(),
+            param_matched_peak_bytes=memory_tracker.peak_param_bytes(),
+            derived_resident_peak_bytes=memory_tracker.peak_derived_resident_bytes(),
+            unexecuted_resident_bytes=unexecuted_resident_bytes,
+            represented_weight_bytes=represented_weight_bytes,
         )
 
 
@@ -1295,6 +1347,14 @@ class PipelineRunner:
             indexer_cache_per_token_bytes=summary_cache_stats.indexer_cache_per_token_bytes,
             model_weight_size_bytes=summary_stage.weight_size_bytes if summary_stage is not None else 0,
             model_activation_size_bytes=summary_activation_bytes,
+            # Propagate the summary stage's three-account / fourth-account /
+            # fifth-account breakdown so the PP path reports measured values
+            # instead of the 0.0 dataclass defaults (review: "don't report
+            # fake zeros").
+            param_matched_size_bytes=summary_stage.param_matched_peak_bytes if summary_stage is not None else 0,
+            derived_resident_size_bytes=summary_stage.derived_resident_peak_bytes if summary_stage is not None else 0,
+            unexecuted_resident_size_bytes=summary_stage.unexecuted_resident_bytes if summary_stage is not None else 0,
+            represented_weight_size_bytes=summary_stage.represented_weight_bytes if summary_stage is not None else 0,
             stage_latency_breakdown=stage_latency_breakdown,
             stage_memory_breakdown=stage_memory_breakdown,
             pipeline_profile=pipeline_profile,
@@ -1468,14 +1528,19 @@ def _transfer_time_s_for_stage_latency(transfer: PipelineTransferStats, model_na
 
 
 def _stage_activation_memory_bytes(result: Any) -> float:
-    """Stage-local activation = peak - weight - kv - indexer, clamped to >= 0.
+    """Stage-local activation from the three-account model (Issue #463).
 
-    All four terms come from the same stage, so the subtraction is physically
-    meaningful (unlike the cross-stage ``peak - kv - weight`` in model_runner,
-    which can mix different ranks and fabricate a non-existent rank).
+    When ``intermediate_peak_bytes`` is available (set by StageRunner.run via
+    MemoryTracker), use it directly as the true activation.  Fall back to the
+    legacy ``peak - weight - kv - indexer`` subtraction when it's 0 (e.g.
+    transfer results or old-style stage results without the field).
     """
     if result is None:
         return 0.0
+    intermediate = getattr(result, "intermediate_peak_bytes", 0)
+    if intermediate > 0:
+        return float(intermediate)
+    # Legacy fallback for results that don't carry intermediate_peak_bytes.
     cache_stats = result.cache_stats
     return max(
         0.0,

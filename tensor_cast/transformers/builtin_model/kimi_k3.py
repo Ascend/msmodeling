@@ -2786,25 +2786,39 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
     # KimiMoEGate.forward — deterministic routing for simulation
     #
     # ----------------------------------------------------------------
-    # The real gate performs top-k softmax + random sampling which is
-    #      non-deterministic and untraceable. Replace with equal-weight
-    #      routing to produce deterministic shapes during graph capture.
+    # The real gate performs a weight GEMM, then top-k + renormalize +
+    #      multinomial sampling.  Only the sampling part is non-deterministic
+    #      and untraceable, so keep the GEMM (real K3 pays it every token;
+    #      dropping it underestimated decode latency and left gate.weight
+    #      as untraced dead weight) and replace the sampling with a
+    #      deterministic top-k + softmax over the same logits.
     # =================================================================
     try:
         class_ref_gate = "modeling_kimi_linear.KimiMoEGate"
         gate_cls = _get_k3_class_from_source(class_ref_gate, effective_model_id, "auto")
 
         def patched_gate_forward(self, hidden_states, **kwargs):
+            # Deterministic routing for simulation, but keeping the REAL gate
+            # GEMM: K3 executes the gate matmul every token in real
+            # deployment, so (a) the traced graph must contain it or decode
+            # latency is underestimated, and (b) ``gate.weight`` must be
+            # consumed by a traced op or it becomes unexecuted-resident
+            # dead weight in the memory accounts.  Only the untraceable
+            # part of the real gate — top-k + renormalize + multinomial
+            # sampling — is replaced by deterministic top-k over the same
+            # logits, which keeps shapes stable for graph capture.
             if hidden_states.dim() == 3:
-                bsz, seq_len, _ = hidden_states.shape
+                flat = hidden_states.reshape(-1, hidden_states.shape[-1])
             else:
-                bsz = hidden_states.shape[0]
-                seq_len = 1
-            device = hidden_states.device
-            dtype = hidden_states.dtype
+                flat = hidden_states
+            # Align dtypes before the GEMM (F.linear requires input and weight
+            # to share a dtype; hidden_states may be bf16 while gate.weight is
+            # fp32 in mixed-precision configs) and run softmax in fp32 so fp16
+            # logits cannot overflow to NaN/inf.
+            logits = torch.nn.functional.linear(flat.to(self.weight.dtype), self.weight)
             top_k = self.top_k
-            topk_idx = torch.zeros(bsz * seq_len, top_k, dtype=torch.long, device=device)
-            topk_weight = torch.ones(bsz * seq_len, top_k, dtype=dtype, device=device) / top_k
+            topk_scores, topk_idx = torch.topk(logits, top_k, dim=-1)
+            topk_weight = torch.softmax(topk_scores.float(), dim=-1).to(hidden_states.dtype)
             return topk_idx, topk_weight
 
         gate_cls.forward = patched_gate_forward
@@ -3635,10 +3649,9 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
     #        - ``peak_memory_usage_gb``  += kda_state_gb  (real GPU memory)
     #        - ``device_memory_available_gb`` -= kda_state_gb
     #        - ``kda_state_size_gb``      = kda_state_gb  (new attribute
-    #          carrying the breakdown value for printing)
-    #      Also patch ``ModelRunnerMetrics.print_info`` to print a
-    #      breakdown line clarifying that KDA state is included in the
-    #      KV cache figure above.
+    #          consumed by ``ModelRunnerMetrics.print_info`` to print the
+    #          KDA state line as a peak component alongside the four
+    #          tracker accounts)
     #
     #      ``_k3_kda_state_size_gb(model)`` returns 0.0 for non-K3 models
     #      or when ``linear_attn_config`` is missing, so the patch is a
@@ -3646,15 +3659,11 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
     #      attribute injection, no extra print line.
     # =================================================================
     try:
-        from tensor_cast.core.model_runner import (
-            ModelRunner as _K3_ModelRunner,
-            ModelRunnerMetrics as _K3_ModelRunnerMetrics,
-        )
+        from tensor_cast.core.model_runner import ModelRunner as _K3_ModelRunner
 
         if not getattr(_K3_ModelRunner, "_tensor_cast_k3_kda_accounting", False):
             _orig_run_inference_k3 = _K3_ModelRunner.run_inference
             _orig_build_pipeline_metrics_k3 = _K3_ModelRunner._build_pipeline_metrics
-            _orig_print_info_k3 = _K3_ModelRunnerMetrics.print_info
 
             def _k3_inject_kda_state(metrics, kda_gb):
                 """Mutate ``metrics`` in place to fold KDA state into the
@@ -3685,20 +3694,8 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
                 _k3_inject_kda_state(metrics, _k3_kda_state_size_gb(self.model))
                 return metrics
 
-            def _patched_print_info_k3(self):
-                _orig_print_info_k3(self)
-                kda_gb = getattr(self, "kda_state_size_gb", 0.0)
-                if kda_gb > 0:
-                    # KDA state has already been folded into the
-                    # ``KV cache`` and ``Memory available`` figures above;
-                    # surface it as a breakdown line so users can see
-                    # that KDA's fixed recurrent+conv state is not zero
-                    # memory.
-                    print(f"    KDA state (recurrent+conv, included in KV cache above): {kda_gb:.6f} GB")
-
             _K3_ModelRunner.run_inference = _patched_run_inference_k3
             _K3_ModelRunner._build_pipeline_metrics = _patched_build_pipeline_metrics_k3
-            _K3_ModelRunnerMetrics.print_info = _patched_print_info_k3
             _K3_ModelRunner._tensor_cast_k3_kda_accounting = True
             patched = True
             logger.info("Patched ModelRunner/ModelRunnerMetrics for K3 KDA state memory accounting.")

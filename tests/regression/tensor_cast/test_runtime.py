@@ -332,6 +332,27 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
 
         self.assertIs(_prims_common.dtype_to_type, original_dtype_to_type)
 
+    def test_cached_compiled_forward_registers_folded_weights_in_each_runtime(self):
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.empty((8, 8), device="meta"))
+
+            def forward(self, x):
+                return x @ (self.weight * 2)
+
+        model = Model().eval()
+        compiled = torch.compile(model, backend=get_backend(), fullgraph=True)
+        x = torch.empty((2, 8), device="meta")
+        device = TEST_DEVICE
+        for _ in range(2):
+            tracker = MemoryTracker(device)
+            with Runtime(AnalyticPerformanceModel(device), device, memory_tracker=tracker), torch.no_grad():
+                tracker.register_model_params(model)
+                compiled(x)
+            self.assertEqual(tracker.peak_param_bytes(), 8 * 8 * 4)
+            self.assertEqual(tracker.unexecuted_param_bytes(model.named_parameters()), 0)
+
     def test_attention_dit_eager(self):
         B, S, num_heads, head_dim = 2, 256, 6, 64
         dtype = torch.float16

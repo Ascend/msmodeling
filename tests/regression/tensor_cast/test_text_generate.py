@@ -105,13 +105,28 @@ class TextGenerateTestMixin:
             f"{test_name}: Model activation size should be non-negative",
         )
 
-        # Validate memory consistency: peak = weight + kv_cache + activation
-        expected_peak = result["model_weight_size_gb"] + result["kv_cache_size_gb"] + result["model_activation_size_gb"]
+        # Validate memory consistency:
+        # peak = param_matched + derived_resident + activation + unexecuted_resident
+        # + represented_weight (three-account model plus the fourth account from
+        # Issue #463 follow-up — registered weights never touched by any traced op —
+        # and the fifth account from the PR #906 review: extrapolated
+        # representative-layer weight added back to peak).
+        param_matched = result.get("param_matched_size_gb", result["model_weight_size_gb"])
+        derived_resident = result.get("derived_resident_size_gb", result["kv_cache_size_gb"])
+        unexecuted_resident = result.get("unexecuted_resident_size_gb", 0.0)
+        represented_weight = result.get("represented_weight_size_gb", 0.0)
+        expected_peak = (
+            param_matched
+            + derived_resident
+            + result["model_activation_size_gb"]
+            + unexecuted_resident
+            + represented_weight
+        )
         self.assertAlmostEqual(
             result["peak_memory_usage_gb"],
             expected_peak,
             places=2,
-            msg=f"{test_name}: Peak memory should equal weight + kv_cache + activation",
+            msg=f"{test_name}: Peak memory should equal weight + kv_cache + activation + unexecuted + represented",
         )
 
         # Validate execution time is positive
@@ -1731,12 +1746,16 @@ class TestModelRunnerMetricsPrintInfo(unittest.TestCase):
         self.metrics = ModelRunnerMetrics(
             total_device_memory_gb=24.0,
             model_weight_size_gb=5.0,
-            peak_memory_usage_gb=12.0,
+            peak_memory_usage_gb=12.6,
             kv_cache_size_gb=3.0,
             kv_cache_per_token_gb=0.001,
             model_activation_size_gb=4.0,
             reserved_memory_gb=1.0,
-            device_memory_available_gb=6.0,
+            device_memory_available_gb=5.4,
+            param_matched_size_gb=2.0,
+            derived_resident_size_gb=4.5,
+            unexecuted_resident_size_gb=1.0,
+            represented_weight_size_gb=0.6,
             tps_per_model={"analytic": 200.0},
             execution_time_s={"analytic": 0.05},
             run_time_s=0.06,
@@ -1747,12 +1766,17 @@ class TestModelRunnerMetricsPrintInfo(unittest.TestCase):
                 "compute": {"matmul": 1.5, "attention": 0.8},
             },
         )
+        # Mirror the K3 KDA-state post-hoc attribute injection: peak 12.6 =
+        # param 2.0 + derived 4.5 + activation 4.0 + unexecuted 1.0
+        # + represented 0.6 + KDA 0.5, and the KV field (3.0) = traced KV
+        # input (2.5) + KDA (0.5).
+        self.metrics.kda_state_size_gb = 0.5
 
     @patch("sys.stdout", new_callable=StringIO)
     def test_print_info_basic(self, mock_stdout):
         """Test that print_info prints the expected information."""
-        # Call the static method
-        self.metrics.print_info()
+        with self.assertLogs("tensor_cast.core.model_runner", level="INFO") as logs:
+            self.metrics.print_info()
 
         # Get the printed output
         output = mock_stdout.getvalue()
@@ -1760,10 +1784,21 @@ class TestModelRunnerMetricsPrintInfo(unittest.TestCase):
         # Check that the output contains expected elements
         self.assertIn("Total device memory: 24.000 GB", output)
         self.assertIn("Model weight size: 5.000 GB", output)
-        self.assertIn("KV cache: 3.000 GB", output)
-        self.assertIn("Model activation size: 4.000 GB", output)
+        self.assertIn("Peak memory usage: 12.600 GB", output)
+        self.assertNotIn("Param matched (traced)", output)
+        self.assertNotIn("Derived resident (non-registered inputs)", output)
+        self.assertIn("\n  KV cache: 2.500 GB\n", output)
+        self.assertIn("\n  Model activation size: 4.000 GB\n", output)
+        self.assertNotIn("Unexecuted resident (registered, not traced)", output)
+        self.assertNotIn("Represented weight (region extrapolation)", output)
+        self.assertIn(
+            "P=12.600000, param_matched=2.000000 + derived_resident=4.500000 + activation=4.000000 + "
+            "unexecuted_resident=1.000000 + represented_weight=0.600000 + kda_state=0.500000 = 12.600000",
+            logs.output[0],
+        )
+        self.assertIn("KDA state (recurrent+conv, outside trace): 0.500000 GB", output)
         self.assertIn("Reserved memory: 1.000 GB", output)
-        self.assertIn("Memory available: 6.000 GB", output)
+        self.assertIn("Memory available: 5.400 GB", output)
 
         # Check that breakdowns are printed
         self.assertIn("Stats breakdowns:", output)
@@ -1813,13 +1848,13 @@ class TestModelRunnerMetricsPrintInfo(unittest.TestCase):
         memory = payload["memory_gb"]
         self.assertAlmostEqual(memory["total_device"], 24.0)
         self.assertAlmostEqual(memory["model_weight"], 5.0)
-        self.assertAlmostEqual(memory["peak_usage"], 12.0)
+        self.assertAlmostEqual(memory["peak_usage"], 12.6)
         self.assertAlmostEqual(memory["kv_cache"], 3.0)
         self.assertAlmostEqual(memory["kv_cache_per_token"], 0.001)
         self.assertEqual(memory["kv_cache_token_capacity_factor"], 1)
         self.assertAlmostEqual(memory["model_activation"], 4.0)
         self.assertAlmostEqual(memory["reserved"], 1.0)
-        self.assertAlmostEqual(memory["available"], 6.0)
+        self.assertAlmostEqual(memory["available"], 5.4)
 
         # breakdowns_raw is the unmodified mapping
         self.assertEqual(payload["breakdowns_raw"]["memory"], {"activation": 2.0, "weights": 3.0})

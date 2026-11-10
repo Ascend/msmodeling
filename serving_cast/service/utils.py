@@ -72,7 +72,10 @@ COMMON_COLUMNS = [
 class MemoryInfo(TypedDict, total=False):
     total_device_memory_gb: float
     model_weight_size_gb: float
+    param_matched_size_gb: float
+    derived_resident_size_gb: float
     kv_cache_size_gb: float
+    forward_kv_cache_size_gb: float
     model_activation_size_gb: float
     reserved_memory_gb: float
     device_memory_available_gb: float
@@ -80,6 +83,8 @@ class MemoryInfo(TypedDict, total=False):
 
 MEMORY_KEY_TO_COLUMN = {
     "model_weight_size_gb": "weight_GB",
+    "param_matched_size_gb": "param_matched_GB",
+    "derived_resident_size_gb": "derived_resident_GB",
     "kv_cache_size_gb": "kv_cache_GB",
     "model_activation_size_gb": "activation_GB",
     "device_memory_available_gb": "avail_GB",
@@ -718,6 +723,8 @@ def build_memory_info(batch_result) -> MemoryInfo:
     return {
         "total_device_memory_gb": getattr(batch_result, "total_device_memory_gb", float("nan")),
         "model_weight_size_gb": getattr(batch_result, "model_weight_size_gb", float("nan")),
+        "param_matched_size_gb": getattr(batch_result, "param_matched_size_gb", float("nan")),
+        "derived_resident_size_gb": getattr(batch_result, "derived_resident_size_gb", float("nan")),
         "kv_cache_size_gb": getattr(batch_result, "kv_cache_size_gb", float("nan")),
         "model_activation_size_gb": getattr(batch_result, "model_activation_size_gb", float("nan")),
         "reserved_memory_gb": getattr(batch_result, "reserved_memory_gb", float("nan")),

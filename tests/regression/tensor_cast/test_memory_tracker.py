@@ -538,3 +538,67 @@ class TestMemoryTracker(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             tracker.record_op_invocation("not-an-op")
+
+
+class TestThreeAccountClassification(unittest.TestCase):
+    # Tests for the three-account peak breakdown (Issue #463).
+
+    def test_register_model_params_collects_param_ids(self):
+        tracker = MemoryTracker(TEST_DEVICE)
+        model = torch.nn.Linear(10, 10)
+        tracker.register_model_params(model)
+        self.assertGreater(len(tracker._registered_param_tensor_ids), 0)
+
+    def test_three_account_peak_invariant(self):
+        x = torch.randn(100)
+        model = torch.nn.Linear(100, 100, bias=False)
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.register_model_params(model)
+        with Runtime([], TEST_DEVICE, tracker), torch.no_grad():
+            _ = model(x)
+        tracker.analyze()
+        peak = tracker.peak_mem_usage()
+        param_matched = tracker.peak_param_bytes()
+        derived = tracker.peak_derived_resident_bytes()
+        intermediate = tracker.peak_intermediate_bytes()
+        self.assertEqual(peak, param_matched + derived + intermediate)
+        self.assertGreater(param_matched, 0)
+        self.assertGreater(intermediate, 0)
+
+    def test_intermediate_peak_is_activation(self):
+        x = torch.randn(100)
+        model = torch.nn.Linear(100, 100, bias=False)
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.register_model_params(model)
+        with Runtime([], TEST_DEVICE, tracker), torch.no_grad():
+            _ = model(x)
+        tracker.analyze()
+        activation = tracker.peak_intermediate_bytes()
+        self.assertGreater(activation, 0)
+
+    def test_unexecuted_param_bytes_counts_only_never_touched_weights(self):
+        # Fourth account (Issue #463 follow-up): weights hanging on the tree
+        # but never consumed by any traced op are unexecuted-resident.
+        x = torch.randn(100)
+        model = torch.nn.Module()
+        model.used = torch.nn.Linear(100, 100, bias=False)
+        model.dead = torch.nn.Linear(100, 100, bias=False)  # forward never touches it
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.register_model_params(model)
+        with Runtime([], TEST_DEVICE, tracker), torch.no_grad():
+            _ = model.used(x)
+        tracker.analyze()
+
+        named = list(model.named_parameters())
+        self.assertEqual(len(named), 2)
+        unexecuted = tracker.unexecuted_param_bytes(named)
+        expected = model.dead.weight.numel() * model.dead.weight.element_size()
+        self.assertEqual(unexecuted, expected)
+
+        # Sanity: the consumed weight is not double-counted as unexecuted.
+        self.assertEqual(tracker.peak_param_bytes(), model.used.weight.numel() * model.used.weight.element_size())
+
+    def test_unexecuted_param_bytes_requires_analyze(self):
+        tracker = MemoryTracker(TEST_DEVICE)
+        with self.assertRaisesRegex(RuntimeError, "analyze"):
+            tracker.unexecuted_param_bytes([])
