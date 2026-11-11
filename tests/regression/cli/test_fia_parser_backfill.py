@@ -125,7 +125,8 @@ class TestFiaReplayInference:
         assert input_shapes[1] == (4099, 1, 128, 512)
         assert input_shapes[24] == (16, 1, 1, 64)
         assert input_shapes[25] == (4099, 1, 128, 64)
-        assert inferred["input_layout"] == "BNSD_NBSD"
+        # BNSD_NBSD is the profiling layout marker, while FIA replay passes BNSD to the operator.
+        assert inferred["input_layout"] == "BNSD"
         assert inferred["num_heads"] == 16
         assert inferred["num_key_value_heads"] == 1
 
@@ -136,6 +137,7 @@ class TestFiaReplayInference:
         assert build_scalar_length_list(None) is None
         assert infer_sparse_mode(None, {}) == 0
         assert infer_sparse_mode((2048, 2048), {}) == 3
+        assert infer_sparse_mode((2048, 2048), {"Runtime sparse_mode": "0"}) == 0
         assert infer_sparse_mode(None, {"Runtime sparse_mode": "4"}) == 4
         assert infer_block_size((100, 16, 128), (2, 8), {}) == 16
         assert infer_block_size((100, 1, 128, 512), (2, 8), {}) == 128

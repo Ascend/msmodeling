@@ -290,6 +290,33 @@ class TestQueryByAttnParams:
         assert abs(lat - 64.2) < 1.0
         assert kernel == "FusedInferAttentionScore"
 
+    def test_batch_size_mismatch_4d_csv_misses(self, ds):
+        """4D CSV q pins batch at dim0: batch_size=8 vs CSV batch 4 → MISS.
+
+        Fixture row: q=(4,16,1,512), avg_seq_len=2048, 28.0us. Before the batch
+        check this row matched on (N, D) + padded-T tolerance alone.
+        """
+        params = {"q_shape_3d": (4, 16, 512), "avg_seq_len": 2048, "batch_size": 8}
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
+        assert result is None
+
+    def test_batch_size_match_4d_csv_hits(self, ds):
+        """Same 4D row with matching batch_size=4 → HIT 28.0us."""
+        params = {"q_shape_3d": (4, 16, 512), "avg_seq_len": 2048, "batch_size": 4}
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
+        assert result is not None
+        lat, kernel = result
+        assert abs(lat - 28.0) < 1.0
+        assert kernel == "FusedInferAttentionScore"
+
+    def test_batch_size_ignored_for_3d_csv(self, ds):
+        """3D CSV q carries no batch dim: batch_size must not change matching."""
+        params = {"q_shape_3d": (128, 4, 128), "avg_seq_len": 4096, "batch_size": 999}
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
+        assert result is not None
+        lat, _ = result
+        assert abs(lat - 58.2) < 1.0
+
 
 # ---- Helper: build enriched CSV with Runtime columns in tmp_path ----
 

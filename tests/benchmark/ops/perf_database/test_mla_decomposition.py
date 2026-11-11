@@ -2374,3 +2374,58 @@ def test_mla_projection_postprocess_rejects_unqueryable_inputs(case):
     info = _make_op_info(torch.ops.tensor_cast.mla_v_up_projection.default, args)
 
     assert _decompose_mla_projection_postprocess(info, {}) is None
+
+
+class TestDecomposeMLADecodeBatchSize:
+    def test_decode_attention_params_include_per_rank_batch_size(self):
+        """BNSD_NBSD anchors are indexed by the per-rank batch size."""
+        args = _make_mla_decode_args(batch_size=16, avg_seq_len=4096)
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        specs = _decompose_mla(op, {})
+        assert specs is not None
+        assert specs[0].attention_params["batch_size"] == 16
+
+
+class TestDecomposeMLAPrefillFiaOptions:
+    def test_prefill_fia_q_includes_rope_keeps_full_head_dim(self):
+        """With prefill_fia_q_includes_rope, Q keeps the RoPE dims (nope+rope)."""
+        args = _make_mla_prefill_args(
+            num_tokens=136, num_heads=16, qk_nope_head_dim=128, qk_rope_head_dim=64, kv_lora_rank=512
+        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        specs = _decompose_mla(op, {"decomposer_options": {"prefill_fia_q_includes_rope": True}})
+        assert specs is not None
+        q_shape_3d = specs[0].attention_params["q_shape_3d"]
+        assert q_shape_3d == (136, 16, 192)  # 128 nope + 64 rope
+
+    def test_prefill_fia_split_context_returns_two_specs(self):
+        """Single-batch prefill splits current-query causal and context attention."""
+        args = _make_mla_prefill_args(num_tokens=32, batch_size=1, avg_seq_len=100)
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        specs = _decompose_mla(op, {"decomposer_options": {"prefill_fia_split_context": True}})
+        assert specs is not None
+        assert len(specs) == 2
+        current, context = specs
+        assert current.attention_params["avg_seq_len"] == 32
+        assert current.attention_params["input_layout"] == "TND"
+        assert current.attention_params["sparse_mode"] == 3
+        assert context.attention_params["avg_seq_len"] == 68  # 100 - 32
+        assert context.attention_params["sparse_mode"] == 0
+
+    def test_prefill_fia_split_context_zero_context_returns_single_spec(self):
+        """context_len == 0 (no cached tokens) collapses to the causal spec only."""
+        args = _make_mla_prefill_args(num_tokens=68, batch_size=1, avg_seq_len=68)
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        specs = _decompose_mla(op, {"decomposer_options": {"prefill_fia_split_context": True}})
+        assert specs is not None
+        assert len(specs) == 1
+        assert specs[0].attention_params["avg_seq_len"] == 68
+        assert specs[0].attention_params["input_layout"] == "TND"
+
+    def test_prefill_fia_split_context_skipped_for_multi_batch(self):
+        """The split only applies to batch_size == 1."""
+        args = _make_mla_prefill_args(num_tokens=136, batch_size=2, avg_seq_len=68)
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        specs = _decompose_mla(op, {"decomposer_options": {"prefill_fia_split_context": True}})
+        assert specs is not None
+        assert len(specs) == 1

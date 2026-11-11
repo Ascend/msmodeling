@@ -760,6 +760,86 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         self._compute_index_cache[cache_key] = index
         return index
 
+    @staticmethod
+    def _extract_slot_tensor_inputs(op_invoke_info: "OpInvokeInfo") -> List[Tuple[Tuple[int, ...], torch.dtype]]:
+        """Slot-aware tensor-input extraction for matmul-style compute targets.
+
+        ``ProfilingDataSource._extract_tensor_inputs`` flattens ``List[Tensor]``
+        arguments element by element. For grouped matmuls whose ``x``/``w`` are
+        per-expert lists (e.g. grouped_matmul_quant_int4 after sink-split, with
+        14-element lists under EP=64), flattening followed by a
+        ``tc_input_count=2`` slice picks ``(x_0, x_1)`` and displaces the weight
+        slot, so every interpolation target degenerates to None. This variant
+        keeps ONE entry per argument slot instead:
+
+        * single tensor       -> its own shape/dtype (identical to flattening)
+        * single-element list -> the element's shape/dtype (identical)
+        * multi-element list  -> first slot (activations): dim-0 concatenation
+          ``(sum(M_i), *shape[1:])`` matching the CSV total-M semantics; later
+          slots (weights): leading group dim ``(len(list), *elem_shape)``
+          matching the CSV grouped rhs shape ``[G, K, N]`` and its
+          ``batch_dims=((), (G,))`` regime.
+        """
+        inputs: List[Tuple[Tuple[int, ...], torch.dtype]] = []
+        for arg in op_invoke_info.args:
+            if isinstance(arg, torch.Tensor) and arg.ndim > 0:
+                inputs.append((tuple(arg.shape), arg.dtype))
+                continue
+            if not isinstance(arg, (list, tuple)):
+                continue
+            tensors = [item for item in arg if isinstance(item, torch.Tensor) and item.ndim > 0]
+            if not tensors:
+                continue
+            if len(tensors) == 1 and len(arg) == 1:
+                shape = tuple(tensors[0].shape)
+            elif inputs:
+                shape = (len(tensors), *tensors[0].shape)
+            else:
+                shape = (sum(int(t.shape[0]) for t in tensors), *tensors[0].shape[1:])
+            inputs.append((shape, tensors[0].dtype))
+        return inputs
+
+    @staticmethod
+    def _restore_packed_int4_weight_shapes(
+        mapping: dict,
+        input_shapes: List[Tuple[int, ...]],
+        dtypes: List[torch.dtype],
+    ) -> List[Tuple[int, ...]]:
+        """Restore logical shapes of packed INT4 weight slots.
+
+        Sink-split groups W4A8 weights as per-expert packed tensors: two 4-bit
+        values per uint8/int8 byte (``[K/2, N]``) or eight per int32 word
+        (``[K/8, N]``). The packed contraction dim no longer equals the
+        activation K, so both rhs layout checks in
+        ``_extract_matmul_axes_from_shapes`` fail and the target degenerates
+        to None. op_mapping pins the affected slots with
+        ``expected_input_dtypes=DT_INT4``; restore the logical K by expanding
+        the packed dim that matches the activation K.
+        """
+        expected_input_dtypes = mapping.get("expected_input_dtypes")
+        if not isinstance(expected_input_dtypes, list) or not input_shapes:
+            return input_shapes
+        activation_shape = input_shapes[0]
+        if not activation_shape:
+            return input_shapes
+        k = activation_shape[-1]
+        if not isinstance(k, int) or k <= 0:
+            return input_shapes
+        restored = list(input_shapes)
+        for i, pinned in enumerate(expected_input_dtypes):
+            if i >= len(restored) or not isinstance(pinned, str) or pinned.strip() != "DT_INT4":
+                continue
+            shape = restored[i]
+            if len(shape) < 2 or i >= len(dtypes):
+                continue
+            pack = 8 if dtypes[i] == torch.int32 else 2
+            prefix, a, b = shape[:-2], int(shape[-2]), int(shape[-1])
+            if a * pack == k:
+                restored[i] = (*prefix, k, b)
+            elif b * pack == k:
+                restored[i] = (*prefix, a, k)
+        return restored
+
     def _build_compute_target(
         self,
         op_invoke_info: "OpInvokeInfo",
@@ -769,7 +849,12 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if kernel_type not in _INTERPOLATION_MATMUL_KERNELS:
             return None
 
-        tc_inputs = self.base._extract_tensor_inputs(op_invoke_info)
+        func_name = _normalize_func_name(op_invoke_info.func)
+        tc_inputs = (
+            self._extract_slot_tensor_inputs(op_invoke_info)
+            if mapping.get("slot_tensor_inputs")
+            else self.base._extract_tensor_inputs(op_invoke_info)
+        )
         tc_input_count = mapping.get("tc_input_count")
         if tc_input_count is not None:
             tc_inputs = tc_inputs[:tc_input_count]
@@ -795,16 +880,38 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             }
             batch_dims = ((), ())
         else:
+            if mapping.get("restore_packed_int4"):
+                input_shapes = self._restore_packed_int4_weight_shapes(
+                    mapping, input_shapes, [dtype for _, dtype in tc_inputs]
+                )
             axes_and_batch = self._extract_matmul_axes_from_shapes(kernel_type, input_shapes)
             if axes_and_batch is None:
                 return None
             axes, batch_dims, _source_layout = axes_and_batch
 
         dtype_values = []
-        for _, dtype in tc_inputs:
-            dtype_str = DTYPE_MAP.get(dtype)
-            if dtype_str is None:
-                return None
+        expected_input_dtypes = mapping.get("expected_input_dtypes")
+        for i, (_, dtype) in enumerate(tc_inputs):
+            # Quantized weights have no torch dtype of their own (pack_int4 ->
+            # uint8) or are passed through a proxy dtype (int8/int32 views,
+            # or a native activation dtype on dynamically-quantized paths), so
+            # op_mapping pins the expected profile dtype via
+            # expected_input_dtypes to keep the regime key aligned with the
+            # CSV dtype prefix (see the static_quant_linear_int4 and
+            # grouped_matmul_quant_int4 mapping notes).
+            pinned = None
+            if (
+                isinstance(expected_input_dtypes, list)
+                and i < len(expected_input_dtypes)
+                and isinstance(expected_input_dtypes[i], str)
+            ):
+                pinned = expected_input_dtypes[i].strip()
+            if pinned:
+                dtype_str = pinned
+            else:
+                dtype_str = DTYPE_MAP.get(dtype)
+                if dtype_str is None:
+                    return None
             dtype_values.append(self._dtype_key(kernel_type, dtype_str))
 
         input_count = tc_input_count if tc_input_count is not None else len(tc_inputs)
@@ -812,8 +919,15 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             ("kernel_type", kernel_type),
             ("input_count", input_count),
             ("input_dtypes", tuple(dtype_values[:input_count])),
-            ("batch_dims", batch_dims),
         ]
+        if not mapping.get("ignore_batch_dims"):
+            # Grouped matmuls carry a per-call group count (e.g. 10 hit
+            # experts) as the rhs batch dim, while the CSV anchors were
+            # collected with a fixed expert count (e.g. 14 under EP=64).
+            # The group count is routing semantics, not a shape axis; op_mapping
+            # marks these ops with ignore_batch_dims so the regime omits it
+            # and candidate matching tolerates the CSV-side field.
+            regime_fields.append(("batch_dims", batch_dims))
         if compute_subcategory == _QUANTIZED_MATMUL_SUBCATEGORY:
             expected_input_formats = mapping.get("expected_input_formats")
             if (
@@ -838,7 +952,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             )
         regime_key = make_regime_key(regime_fields)
         return InterpolationTarget(
-            func_name=_normalize_func_name(op_invoke_info.func),
+            func_name=func_name,
             kernel_type=kernel_type,
             axes=axes,
             regime_key=regime_key,
@@ -1157,6 +1271,15 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             input_shapes = input_shapes[:tc_input_count]
         if not input_shapes:
             return None, "generic_compute_input_shape_unavailable"
+        generic_policy = self._generic_compute_policy(kernel_type, policy_kernel_type)
+        if generic_policy.get("shape_normalize") == "conv_1d_bt" and len(input_shapes[0]) == 3:
+            batch, channels, tokens = input_shapes[0]
+            input_shapes[0] = (batch * tokens, channels)
+        elif generic_policy.get("shape_normalize") == "varlen_bt":
+            # Pack batched q/k/v to the CSV's (1, B*T, H, D) layout.
+            input_shapes = [
+                (1, shape[0] * shape[1], *shape[2:]) if len(shape) == 4 else shape for shape in input_shapes
+            ]
         logical_shapes = [tuple(_strip_batch_dim(shape)) for shape in input_shapes]
         if not logical_shapes[0]:
             return None, "generic_compute_input_shape_unavailable"
@@ -1488,6 +1611,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         fallback_from: str,
         interpolation_path: str,
         compute_subcategory: Optional[str] = None,
+        prefer_same_group: bool = False,
     ) -> Optional[QueryResult]:
         include_output_signature = compute_subcategory == _QUANTIZED_MATMUL_SUBCATEGORY
         if include_output_signature:
@@ -1506,6 +1630,13 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             )
             return None
         allow_extra_fields = {"output_count", "output_dtypes", "output_formats"}
+        # op_mapping marks ops whose per-call group count is routing semantics
+        # (not a shape axis) with prefer_same_group; combined with
+        # ignore_batch_dims the target regime omits batch_dims, so candidate
+        # ordering prefers the queried weight footprint.
+        prefer_same_group = prefer_same_group and "batch_dims" not in dict(target.regime_key)
+        if prefer_same_group:
+            allow_extra_fields.add("batch_dims")
         if compute_subcategory != _QUANTIZED_MATMUL_SUBCATEGORY:
             allow_extra_fields.add("input_formats")
         candidate_groups = index.candidate_groups_matching(target.regime_key, allow_extra_fields=allow_extra_fields)
@@ -1524,7 +1655,13 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return None
         attempts: list[dict[str, Any]] = []
         override = self._kernel_overrides.get(target.kernel_type, {})
-        for candidate_group in sorted(candidate_groups, key=self._compute_candidate_group_rank):
+        ordered_groups = sorted(candidate_groups, key=self._compute_candidate_group_rank)
+        if prefer_same_group:
+            # Prefer the queried weight footprint while preserving the existing
+            # format and coverage order within each tier.
+            target_batch_dims = tuple(shape[:-2] for shape in target.tc_shapes[:2])
+            ordered_groups.sort(key=lambda group: dict(group.regime_key).get("batch_dims") != target_batch_dims)
+        for candidate_group in ordered_groups:
             for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
                 candidate_group
             ):
@@ -1605,6 +1742,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 fallback_from=fallback_from,
                 interpolation_path=compute_subcategory or "multidim",
                 compute_subcategory=compute_subcategory,
+                prefer_same_group=bool(mapping.get("prefer_same_group")),
             )
             if result is not None:
                 return result

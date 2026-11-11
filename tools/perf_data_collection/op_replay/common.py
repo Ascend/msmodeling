@@ -983,3 +983,88 @@ def build_standard_argparser(
         help=argparse.SUPPRESS,
     )
     return parser
+
+
+def infer_even_split_lengths(shape: tuple[int, ...], total_tokens: int) -> list[int]:
+    """Rebuild cu_seqlens/queryStartLoc-style cumulative boundaries for varlen batches.
+
+    msprof records only the tensor shape ((B+1,) = B sequences), never the
+    values. An even split of the packed token dimension is the minimal legal
+    reconstruction; rows whose token count does not split evenly are rejected
+    because the real per-sequence boundaries were not recorded.
+    """
+    if not shape or len(shape) != 1:
+        raise ValueError(f"Expected a 1-D cu_seqlens shape, got {shape}")
+    seq_count = shape[0] - 1
+    if seq_count < 1:
+        raise ValueError(f"cu_seqlens shape {shape} implies no sequences")
+    if total_tokens % seq_count != 0:
+        raise ValueError(
+            f"Packed token count {total_tokens} does not split evenly into "
+            f"{seq_count} sequence(s); real per-sequence boundaries were not recorded"
+        )
+    per_seq = total_tokens // seq_count
+    return [per_seq * index for index in range(seq_count)] + [total_tokens]
+
+
+def run_replay_main(
+    *,
+    kernel_type: str,
+    description: str,
+    usage_examples: list[str],
+    version_help: str,
+    run_row_fn: Callable[[Path, int, dict[str, str], int], None],
+    required_columns: Collection[str] | None = None,
+) -> None:
+    """Shared CLI entry flow for single-kernel replay scripts.
+
+    Parses the standard replay arguments, locates the kernel CSVs under the
+    target database directory, optionally validates required CSV columns,
+    then replays every row through ``run_row_fn`` and prints the summary.
+    """
+    args = build_standard_argparser(
+        description=description,
+        usage_examples=usage_examples,
+        version_help=version_help,
+    ).parse_args()
+    ensure_npu_available()
+    repeat_count = get_replay_repeat_count(args.repeat_count)
+
+    target_data_dir = get_target_data_dir(
+        device=args.device,
+        vllm_ascend_version=args.vllm_version,
+        database_path=args.database_path,
+        torch_version=args.torch_version,
+        cann_version=args.cann_version,
+    )
+    csv_paths = sorted(target_data_dir.rglob(f"{kernel_type}.csv"))
+    if required_columns is not None:
+        for csv_path in csv_paths:
+            columns, _ = load_csv_rows(csv_path)
+            missing_columns = [column for column in required_columns if column not in columns]
+            if missing_columns:
+                raise RuntimeError(
+                    f"{csv_path}: missing required CSV columns {missing_columns!r}. "
+                    f"Read header: {columns!r}"
+                )
+
+    total_rows, invalid_rows, source_row_count, skipped_rows = process_replay_csvs(
+        kernel_type=kernel_type,
+        csv_paths=csv_paths,
+        repeat_count=1,
+        run_row_fn=lambda csv_path, row_index, row: run_row_fn(csv_path, row_index, row, repeat_count),
+        update_mode=args.update_mode,
+    )
+
+    if not csv_paths or source_row_count == 0:
+        raise FileNotFoundError(f"No {kernel_type}.csv rows found under {target_data_dir}")
+    if total_rows == 0:
+        print(
+            f"[WARNING] {kernel_type} replay deleted all {source_row_count} row(s) "
+            f"under {target_data_dir}."
+        )
+
+    print(f"Processed {total_rows} {kernel_type} rows under {target_data_dir}.")
+    if args.update_mode == "missing-only":
+        print(f"[SUMMARY] {kernel_type}: skipped {skipped_rows} row(s) due to missing-only mode.")
+    print_invalid_replay_summary(invalid_rows, label=kernel_type)

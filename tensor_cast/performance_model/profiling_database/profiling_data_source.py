@@ -59,7 +59,7 @@ CANN version upgrade:
 import logging
 import math
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -1248,6 +1248,8 @@ def _decompose_mla_common(
                     "avg_seq_len": avg_seq_len,
                     "sparse_mode": 0,  # decode uses no_mask
                     "num_kv_heads": 1,  # MLA compressed attention: single KV head
+                    # BNSD_NBSD anchors are indexed by the per-rank batch.
+                    "batch_size": batch_size,
                 },
                 is_attention=True,
             )
@@ -1261,14 +1263,6 @@ def _decompose_mla_common(
             logger.debug("MLA prefill: projected KV is empty, fallback to analytic")
             return None
         kv_lora_rank = args[9]
-        # Fix MISS #4: FIA prefill uses TND layout: (num_tokens, num_heads, qk_nope_head_dim).
-        # qk_head_dim = q.shape[2], qk_rope_head_dim = head_dim - kv_lora_rank,
-        # qk_nope_head_dim = qk_head_dim - qk_rope_head_dim.
-        qk_head_dim = q.shape[2]
-        qk_rope_head_dim = head_dim - kv_lora_rank
-        qk_nope_head_dim_pf = qk_head_dim - qk_rope_head_dim
-        fia_q_shape_3d = (num_tokens, num_heads, qk_nope_head_dim_pf)
-
         if attention_kernel_type == "SparseFlashAttention":
             # GLM5's SFA call consumes the latent 512-wide ql_nope tensor,
             # not the 192-wide pre-absorption MLA query.  With sequence
@@ -1336,6 +1330,12 @@ def _decompose_mla_common(
                 specs.append(tail_spec)
             return specs
         else:
+            # Some FIA implementations profile Q with the RoPE dimensions
+            # still attached, while legacy mappings query the no-PE width.
+            fia_q_head_dim = q.shape[2]
+            if not decomposer_options.get("prefill_fia_q_includes_rope"):
+                fia_q_head_dim -= head_dim - kv_lora_rank
+            fia_q_shape_3d = (num_tokens, num_heads, fia_q_head_dim)
             prefill_attn_spec = SubKernelSpec(
                 kernel_type=attention_kernel_type,
                 input_shapes=[],
@@ -1358,6 +1358,28 @@ def _decompose_mla_common(
                 },
                 is_attention=True,
             )
+
+            if decomposer_options.get("prefill_fia_split_context") and batch_size == 1:
+                # The sequence length includes the current query. The unmasked
+                # FIA branch only attends to the preceding cached tokens.
+                context_len = avg_seq_len - num_tokens
+                if context_len < 0:
+                    return None
+                prefill_attn_spec.attention_params.update(
+                    avg_seq_len=num_tokens,
+                    input_layout="TND",
+                )
+                if context_len == 0:
+                    return [prefill_attn_spec]
+                context_attn_spec = replace(
+                    prefill_attn_spec,
+                    attention_params={
+                        **prefill_attn_spec.attention_params,
+                        "avg_seq_len": context_len,
+                        "sparse_mode": 0,
+                    },
+                )
+                return [prefill_attn_spec, context_attn_spec]
 
         return [prefill_attn_spec]
 
@@ -3648,6 +3670,15 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 return None
             if tc_N != csv_N or tc_D != csv_D:
                 return None
+            # 4D CSV q is BNSD with the batch at dim0; after 3D normalization it
+            # lands in the padded-T comparison which tolerates block gaps, so a
+            # wrong-batch anchor could still hit. Pin the batch exactly when the
+            # query carries batch_size (e.g. MLA decode) and the CSV row is 4D;
+            # 3D-q datasets without batch info keep the legacy behavior.
+            target_batch = params.get("batch_size")
+            if target_batch is not None and len(csv_q_raw) == 4:
+                if int(csv_q_raw[0]) != int(target_batch):
+                    return None
 
             if col_info.has_sparse and target_sparse is not None:
                 sparse_val = row["Runtime sparse_mode"]
@@ -5107,6 +5138,11 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
     def _lookup_compute(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         if not mapping.get("kernel_type"):
+            return None
+
+        # Layout projections such as varlen packing belong to the wrapper.
+        if mapping.get("skip_base_exact"):
+            self.last_miss_reason = "base_exact_skipped_by_mapping"
             return None
 
         kernel_types = [mapping["kernel_type"]]

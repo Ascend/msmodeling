@@ -50,6 +50,7 @@ from tools.perf_data_collection.op_replay.common import (
     record_runtime_replay_case,
     reset_runtime_replay_cases,
     scalar_fill_value_for_dtype,
+    infer_even_split_lengths,
 )
 
 
@@ -668,3 +669,23 @@ class TestScalarFillValueForDtype(unittest.TestCase):
             value = scalar_fill_value_for_dtype(dtype)
             self.assertIsInstance(value, float)
             self.assertEqual(value, 0.0)
+
+
+class TestInferEvenSplitLengths(unittest.TestCase):
+    def test_even_split(self):
+        self.assertEqual(infer_even_split_lengths((3,), 16), [0, 8, 16])
+
+    def test_single_sequence(self):
+        self.assertEqual(infer_even_split_lengths((2,), 8), [0, 8])
+
+    def test_rejects_non_1d_shape(self):
+        with self.assertRaises(ValueError):
+            infer_even_split_lengths((2, 2), 16)
+
+    def test_rejects_empty_sequence_count(self):
+        with self.assertRaises(ValueError):
+            infer_even_split_lengths((1,), 16)
+
+    def test_rejects_uneven_split(self):
+        with self.assertRaises(ValueError):
+            infer_even_split_lengths((3,), 15)

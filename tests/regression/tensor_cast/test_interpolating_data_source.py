@@ -926,3 +926,242 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
         "insufficient_filtered_candidates",
         "compute_multidim_interpolation_failed",
     }
+
+
+class TestExtractSlotTensorInputs:
+    def test_single_tensor_keeps_own_shape(self):
+        op = _make_op_info("aten.mm.default", [torch.zeros((4, 8)), torch.zeros((8, 16))])
+        inputs = InterpolatingDataSource._extract_slot_tensor_inputs(op)
+        assert inputs == [((4, 8), torch.float32), ((8, 16), torch.float32)]
+
+    def test_single_element_list_unwraps(self):
+        op = _make_op_info("tensor_cast.grouped_matmul_quant_int4.default", [[torch.zeros((4, 8))]])
+        inputs = InterpolatingDataSource._extract_slot_tensor_inputs(op)
+        assert inputs == [((4, 8), torch.float32)]
+
+    def test_first_multi_element_list_concatenates_dim0(self):
+        experts = [torch.zeros((3, 8)), torch.zeros((5, 8))]
+        op = _make_op_info("tensor_cast.grouped_matmul_quant_int4.default", [experts])
+        inputs = InterpolatingDataSource._extract_slot_tensor_inputs(op)
+        assert inputs == [((8, 8), torch.float32)]
+
+    def test_later_multi_element_list_gets_group_dim(self):
+        x_experts = [torch.zeros((3, 8)), torch.zeros((5, 8))]
+        w_experts = [torch.zeros((8, 16)), torch.zeros((8, 16))]
+        op = _make_op_info("tensor_cast.grouped_matmul_quant_int4.default", [x_experts, w_experts])
+        inputs = InterpolatingDataSource._extract_slot_tensor_inputs(op)
+        assert inputs == [((8, 8), torch.float32), ((2, 8, 16), torch.float32)]
+
+    def test_non_tensor_args_are_skipped(self):
+        op = _make_op_info("aten.mm.default", [torch.zeros((4, 8)), 3, "x", None, torch.zeros((8, 16))])
+        inputs = InterpolatingDataSource._extract_slot_tensor_inputs(op)
+        assert inputs == [((4, 8), torch.float32), ((8, 16), torch.float32)]
+
+    def test_scalar_tensors_are_skipped(self):
+        op = _make_op_info("aten.mm.default", [torch.tensor(1.0), torch.zeros((8, 16))])
+        inputs = InterpolatingDataSource._extract_slot_tensor_inputs(op)
+        assert inputs == [((8, 16), torch.float32)]
+
+
+class TestRestorePackedInt4WeightShapes:
+    def test_missing_expected_dtypes_returns_input(self):
+        shapes = [(16, 64), (32, 128)]
+        result = InterpolatingDataSource._restore_packed_int4_weight_shapes({}, shapes, [torch.bfloat16, torch.int8])
+        assert result == shapes
+
+    def test_restores_leading_packed_dim(self):
+        shapes = [(16, 64), (32, 128)]
+        mapping = {"expected_input_dtypes": ["DT_BF16", "DT_INT4"]}
+        result = InterpolatingDataSource._restore_packed_int4_weight_shapes(
+            mapping, shapes, [torch.bfloat16, torch.int8]
+        )
+        assert result == [(16, 64), (64, 128)]
+
+    def test_restores_trailing_packed_dim(self):
+        shapes = [(16, 64), (128, 32)]
+        mapping = {"expected_input_dtypes": ["DT_BF16", "DT_INT4"]}
+        result = InterpolatingDataSource._restore_packed_int4_weight_shapes(
+            mapping, shapes, [torch.bfloat16, torch.int8]
+        )
+        assert result == [(16, 64), (128, 64)]
+
+    def test_int32_word_packs_eight_values(self):
+        shapes = [(16, 64), (8, 128)]
+        mapping = {"expected_input_dtypes": ["DT_BF16", "DT_INT4"]}
+        result = InterpolatingDataSource._restore_packed_int4_weight_shapes(
+            mapping, shapes, [torch.bfloat16, torch.int32]
+        )
+        assert result == [(16, 64), (64, 128)]
+
+    def test_unpinned_and_unmatched_slots_stay(self):
+        shapes = [(16, 64), (16, 64), (33, 128)]
+        mapping = {"expected_input_dtypes": ["DT_BF16", "DT_BF16", "DT_INT4"]}
+        result = InterpolatingDataSource._restore_packed_int4_weight_shapes(
+            mapping, shapes, [torch.bfloat16, torch.bfloat16, torch.int8]
+        )
+        assert result == shapes
+
+
+# --- Mapping-option-driven W4A8 behaviors (no func_name hardcoding) ---
+
+_W4A8_GMM_FUNC = "tensor_cast.grouped_matmul_quant_int4.default"
+
+_W4A8_GMM_MAPPING = {
+    "kernel_type": "GroupedMatmul",
+    "tc_input_count": 2,
+    "slot_tensor_inputs": True,
+    "restore_packed_int4": True,
+    "ignore_batch_dims": True,
+    "expected_input_dtypes": ["INT8", "DT_INT4"],
+}
+
+# Two anchor groups: 14 experts (10/20/30 us, more points -> higher default
+# rank) and 10 experts (100/200 us, matches the queried weight footprint).
+_PSG_GMM_CSV = """\
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
+"80,64;14,64,16","INT8;DT_INT4","ND;ND","80,16","DT_INT8","ND",10.0
+"160,64;14,64,16","INT8;DT_INT4","ND;ND","160,16","DT_INT8","ND",20.0
+"240,64;14,64,16","INT8;DT_INT4","ND;ND","240,16","DT_INT8","ND",30.0
+"80,64;10,64,16","INT8;DT_INT4","ND;ND","80,16","DT_INT8","ND",100.0
+"160,64;10,64,16","INT8;DT_INT4","ND;ND","160,16","DT_INT8","ND",200.0"""
+
+
+def _bare_interp_ds(tmp_path):
+    data_dir = tmp_path / "bare"
+    data_dir.mkdir()
+    (data_dir / "op_mapping.yaml").write_text('version: "test"\noperator_mappings: {}\n')
+    return InterpolatingDataSource(ProfilingDataSource(data_dir))
+
+
+def _packed_w4a8_op(func=_W4A8_GMM_FUNC):
+    x_experts = [torch.zeros((40, 64), dtype=torch.int8), torch.zeros((80, 64), dtype=torch.int8)]
+    w_experts = [torch.zeros((32, 16), dtype=torch.int8) for _ in range(10)]
+    return _make_op_info(func, [x_experts, w_experts])
+
+
+class TestBuildComputeTargetMappingOptions:
+    """_build_compute_target W4A8 behaviors follow op_mapping options, not func_name."""
+
+    def test_slot_tensor_inputs_option_enables_slot_extraction(self, tmp_path):
+        ds = _bare_interp_ds(tmp_path)
+        target = ds._build_compute_target(_packed_w4a8_op(), dict(_W4A8_GMM_MAPPING), "GroupedMatmul")
+        assert target is not None
+        assert target.tc_shapes == [(120, 64), (10, 64, 16)]
+        assert target.axes == {"M": 120.0, "K": 64.0, "N": 16.0}
+
+    def test_slot_extraction_applies_to_any_func_with_option(self, tmp_path):
+        ds = _bare_interp_ds(tmp_path)
+        op = _packed_w4a8_op(func="aten.mm.default")
+        target = ds._build_compute_target(op, dict(_W4A8_GMM_MAPPING), "GroupedMatmul")
+        assert target is not None
+        assert target.tc_shapes == [(120, 64), (10, 64, 16)]
+
+    def test_slot_extraction_skipped_without_option(self, tmp_path):
+        ds = _bare_interp_ds(tmp_path)
+        mapping = {k: v for k, v in _W4A8_GMM_MAPPING.items() if k != "slot_tensor_inputs"}
+        target = ds._build_compute_target(_packed_w4a8_op(), mapping, "GroupedMatmul")
+        assert target is not None
+        # Flattened per-expert tensors: tc_input_count=2 picks (x_0, x_1).
+        assert target.tc_shapes == [(40, 64), (80, 64)]
+
+    def test_restore_packed_int4_restores_logical_k_for_non_gmm_func(self, tmp_path):
+        ds = _bare_interp_ds(tmp_path)
+        op = _packed_w4a8_op(func="tensor_cast.static_quant_linear_int4.default")
+        target = ds._build_compute_target(op, dict(_W4A8_GMM_MAPPING), "GroupedMatmul")
+        assert target is not None
+        assert target.tc_shapes == [(120, 64), (10, 64, 16)]
+        assert target.axes == {"M": 120.0, "K": 64.0, "N": 16.0}
+
+    def test_packed_weight_degrades_without_restore_option(self, tmp_path):
+        ds = _bare_interp_ds(tmp_path)
+        mapping = {k: v for k, v in _W4A8_GMM_MAPPING.items() if k != "restore_packed_int4"}
+        target = ds._build_compute_target(_packed_w4a8_op(), mapping, "GroupedMatmul")
+        # Packed (10, 32, 16) vs activation K=64: rhs layout checks fail.
+        assert target is None
+
+    def test_expected_input_dtypes_pin_applies_to_non_gmm_func(self, tmp_path):
+        ds = _bare_interp_ds(tmp_path)
+        op = _make_op_info(
+            "aten.mm.default",
+            [torch.zeros((16, 64), dtype=torch.uint8), torch.zeros((64, 128), dtype=torch.uint8)],
+        )
+        mapping = {"kernel_type": "MatMulV2", "expected_input_dtypes": ["INT8", "INT8"]}
+        target = ds._build_compute_target(op, mapping, "MatMulV2")
+        assert target is not None
+        assert target.input_dtypes == ["INT8", "INT8"]
+
+    def test_unmapped_torch_dtype_without_pin_returns_none(self, tmp_path):
+        ds = _bare_interp_ds(tmp_path)
+        op = _make_op_info(
+            "aten.mm.default",
+            [torch.zeros((16, 64), dtype=torch.uint8), torch.zeros((64, 128), dtype=torch.uint8)],
+        )
+        target = ds._build_compute_target(op, {"kernel_type": "MatMulV2"}, "MatMulV2")
+        assert target is None
+
+    def test_ignore_batch_dims_option_omits_batch_dims_regime(self, tmp_path):
+        ds = _bare_interp_ds(tmp_path)
+        op = _make_op_info(
+            "aten.bmm.default",
+            [
+                torch.zeros((4, 16, 64), dtype=torch.bfloat16),
+                torch.zeros((4, 64, 128), dtype=torch.bfloat16),
+            ],
+        )
+        default_target = ds._build_compute_target(op, {"kernel_type": "BatchMatMulV2"}, "BatchMatMulV2")
+        assert default_target is not None
+        assert "batch_dims" in dict(default_target.regime_key)
+        ignored_target = ds._build_compute_target(
+            op, {"kernel_type": "BatchMatMulV2", "ignore_batch_dims": True}, "BatchMatMulV2"
+        )
+        assert ignored_target is not None
+        assert "batch_dims" not in dict(ignored_target.regime_key)
+
+
+def _psg_data_dir(tmp_path, mapping_yaml):
+    data_dir = tmp_path / "psg"
+    data_dir.mkdir()
+    (data_dir / "op_mapping.yaml").write_text(mapping_yaml)
+    (data_dir / "GroupedMatmul.csv").write_text(_PSG_GMM_CSV)
+    return data_dir
+
+
+def _psg_mapping_yaml(prefer_same_group: bool, func: str = _W4A8_GMM_FUNC) -> str:
+    psg_line = "    prefer_same_group: true\n" if prefer_same_group else ""
+    return (
+        'version: "test"\n'
+        "operator_mappings:\n"
+        f'  "{func}":\n'
+        "    kernel_type: GroupedMatmul\n"
+        "    tc_input_count: 2\n"
+        "    slot_tensor_inputs: true\n"
+        "    restore_packed_int4: true\n"
+        "    ignore_batch_dims: true\n"
+        f"{psg_line}"
+        "    expected_input_dtypes: [INT8, DT_INT4]\n"
+    )
+
+
+class TestPreferSameGroupOption:
+    """prefer_same_group is an op_mapping option, not a func_name check."""
+
+    def test_prefer_same_group_prefers_queried_weight_footprint(self, tmp_path):
+        ds = InterpolatingDataSource(ProfilingDataSource(_psg_data_dir(tmp_path, _psg_mapping_yaml(True))))
+        result = ds.lookup(_packed_w4a8_op())
+        assert result is not None
+        # 10-expert anchors interpolate M=120 -> 150.0; the higher-ranked
+        # 14-expert group would give 15.0 if ordering were not applied.
+        assert result.latency_us == pytest.approx(150.0)
+
+    def test_without_option_csv_batch_dims_are_not_tolerated(self, tmp_path):
+        ds = InterpolatingDataSource(ProfilingDataSource(_psg_data_dir(tmp_path, _psg_mapping_yaml(False))))
+        assert ds.lookup(_packed_w4a8_op()) is None
+
+    def test_option_applies_to_non_gmm_func(self, tmp_path):
+        other_func = "tensor_cast.static_quant_linear_int4.default"
+        ds = InterpolatingDataSource(
+            ProfilingDataSource(_psg_data_dir(tmp_path, _psg_mapping_yaml(True, func=other_func)))
+        )
+        result = ds.lookup(_packed_w4a8_op(func=other_func))
+        assert result is not None
+        assert result.latency_us == pytest.approx(150.0)

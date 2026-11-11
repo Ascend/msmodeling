@@ -116,7 +116,32 @@ ZERO_TENSOR_DTYPE_ATTRS = {
 CAUSAL_MASK_DTYPE_ATTRS = {
     "DT_INT8": "int8",
     "DT_UINT8": "uint8",
+    "DT_UNDEFINED": "int8",
 }
+
+def parse_runtime_positive_int(raw_value: str | None) -> int | None:
+    parsed = parse_runtime_int(raw_value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def parse_runtime_positive_int_list(raw_value: str | None) -> list[int] | None:
+    parsed = parse_runtime_int_list(raw_value)
+    if not parsed or any(value <= 0 for value in parsed):
+        return None
+    return parsed
+
+
+def sanitize_runtime_input_layout(raw_value: str | None) -> str:
+    cleaned = (raw_value or "").strip()
+    if cleaned.lstrip("-").isdigit():
+        return ""
+    # "BNSD_NBSD" is the profiling-database family marker (query BNSD +
+    # paged key NBSD). torch_npu only accepts single-layout enums, so map
+    # the marker onto its query-side layout before the API call.
+    if cleaned == "BNSD_NBSD":
+        return "BNSD"
+    return cleaned
+
 
 def distribute_total(total: int, bucket_count: int, *, min_value: int) -> list[int]:
     if bucket_count <= 0:
@@ -212,9 +237,11 @@ def infer_case_args(
     block_table_shape = shapes[BLOCK_TABLE_INDEX]
     query_rope_shape = shapes[QUERY_ROPE_INDEX]
 
-    runtime_input_layout = (runtime_row.get(RUNTIME_INPUT_LAYOUT, "") or "").strip()
-    runtime_num_heads = parse_runtime_int(runtime_row.get(RUNTIME_NUM_HEADS, ""))
-    runtime_num_key_value_heads = parse_runtime_int(
+    runtime_input_layout = sanitize_runtime_input_layout(
+        runtime_row.get(RUNTIME_INPUT_LAYOUT, "")
+    )
+    runtime_num_heads = parse_runtime_positive_int(runtime_row.get(RUNTIME_NUM_HEADS, ""))
+    runtime_num_key_value_heads = parse_runtime_positive_int(
         runtime_row.get(RUNTIME_NUM_KEY_VALUE_HEADS, "")
     )
 
@@ -242,7 +269,7 @@ def infer_case_args(
         }
 
     if len(query_shape) == 4 and query_rope_shape is not None:
-        input_layout = runtime_input_layout or "BNSD_NBSD"
+        input_layout = runtime_input_layout or "BNSD"
         num_heads = runtime_num_heads if runtime_num_heads is not None else query_shape[1]
         num_key_value_heads = (
             runtime_num_key_value_heads
@@ -269,7 +296,7 @@ def infer_sparse_mode(
     runtime_row: dict[str, str],
 ) -> int:
     runtime_sparse_mode = parse_runtime_int(runtime_row.get(RUNTIME_SPARSE_MODE, ""))
-    if runtime_sparse_mode is not None:
+    if runtime_sparse_mode is not None and runtime_sparse_mode >= 0:
         return runtime_sparse_mode
     if atten_mask_shape is None:
         return 0
@@ -281,7 +308,7 @@ def infer_block_size(
     block_table_shape: tuple[int, ...] | None,
     runtime_row: dict[str, str],
 ) -> int:
-    runtime_block_size = parse_runtime_int(runtime_row.get(RUNTIME_BLOCK_SIZE, ""))
+    runtime_block_size = parse_runtime_positive_int(runtime_row.get(RUNTIME_BLOCK_SIZE, ""))
     if runtime_block_size is not None:
         return runtime_block_size
     if block_table_shape is None:
@@ -328,7 +355,9 @@ def infer_seq_lens_kv(
     block_table_shape: tuple[int, ...] | None,
     runtime_row: dict[str, str],
 ):
-    runtime_values = parse_runtime_int_list(runtime_row.get(RUNTIME_ACTUAL_SEQ_LENGTHS_KV_VALUES, ""))
+    runtime_values = parse_runtime_positive_int_list(
+        runtime_row.get(RUNTIME_ACTUAL_SEQ_LENGTHS_KV_VALUES, "")
+    )
     if runtime_values is not None:
         return runtime_values
     if batch_size is None:
@@ -339,7 +368,7 @@ def infer_seq_lens_kv(
         # Prefer runtime-valid block counts when available. They are still a
         # lossy summary, but closer to the true paged decode state than the
         # previous "always one block" fallback.
-        runtime_valid_blocks = parse_runtime_int_list(
+        runtime_valid_blocks = parse_runtime_positive_int_list(
             runtime_row.get(RUNTIME_BLOCK_TABLE_VALID_BLOCKS, "")
         )
         if runtime_valid_blocks is not None:
@@ -385,7 +414,9 @@ def build_block_table_tensor(
     if seq_lens_kv is None or len(seq_lens_kv) != batch_size:
         raise ValueError("block_table requires actual_seq_lengths_kv with matching batch size")
 
-    runtime_valid_blocks = parse_runtime_int_list(runtime_row.get(RUNTIME_BLOCK_TABLE_VALID_BLOCKS, ""))
+    runtime_valid_blocks = parse_runtime_positive_int_list(
+        runtime_row.get(RUNTIME_BLOCK_TABLE_VALID_BLOCKS, "")
+    )
     if runtime_valid_blocks is not None and len(runtime_valid_blocks) != batch_size:
         raise ValueError(
             "Runtime block_table_valid_blocks length does not match block_table "
@@ -451,21 +482,26 @@ def build_row_case(row: dict[str, str]):
     sparse_mode = infer_sparse_mode(input_shapes[ATTEN_MASK_INDEX], row)
 
     atten_mask = None
-    if input_shapes[ATTEN_MASK_INDEX] is not None:
+    if sparse_mode == 3:
+        atten_mask = build_default_sparse_mode_3_mask()
+    elif input_shapes[ATTEN_MASK_INDEX] is not None:
+        mask_dtype = input_dtypes[ATTEN_MASK_INDEX]
+        if mask_dtype == "DT_UNDEFINED":
+            mask_dtype = "DT_BOOL"
         if input_shapes[ATTEN_MASK_INDEX][-2:] == (2048, 2048):
             atten_mask = build_causal_mask(
                 input_shapes[ATTEN_MASK_INDEX],
-                input_dtypes[ATTEN_MASK_INDEX],
+                mask_dtype,
             )
         else:
             atten_mask = build_zero_tensor(
                 input_shapes[ATTEN_MASK_INDEX],
-                input_dtypes[ATTEN_MASK_INDEX],
+                mask_dtype,
             )
-    elif sparse_mode == 3:
-        atten_mask = build_default_sparse_mode_3_mask()
 
-    runtime_query_lens = parse_runtime_int_list(row.get(RUNTIME_ACTUAL_SEQ_LENGTHS_VALUES, ""))
+    runtime_query_lens = parse_runtime_positive_int_list(
+        row.get(RUNTIME_ACTUAL_SEQ_LENGTHS_VALUES, "")
+    )
     query_lens_batch = build_scalar_length_list(input_shapes[ACTUAL_SEQ_LENGTHS_INDEX])
     seq_lens_batch = build_scalar_length_list(input_shapes[ACTUAL_SEQ_LENGTHS_KV_INDEX])
     query_lens = runtime_query_lens if runtime_query_lens is not None else infer_query_lens(input_shapes[QUERY_INDEX], query_lens_batch)
