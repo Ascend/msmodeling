@@ -1,4 +1,4 @@
-# Measured Serving Optimization User Guide 
+# Measured Serving Optimization User Guide
 
 ## 1 Introduction
 
@@ -166,6 +166,18 @@ The optimization configuration file is located at `./msmodeling/optix/config.tom
 | tpot_slo | Required | Latency limit of `time_per_output_token`. For example, if the limit of `time_per_output_token` is 50 ms, set it to 0.05. Value range: (0, 100], in seconds. |
 | optimizer_strategy | Optional | Optimization mode. The value is `pso` (default) or `agent`. For details, see [Optimization Modes: PSO and Agent](#6-optimization-modes-pso-and-agent). |
 | use_request_rate_calibration | Optional | Whether to perform real-world calibration on `REQUESTRATE`. The default is `true`. For details, see the following description. |
+| benchmark_run_count | Optional | Positive number of benchmark passes per candidate in `standard` mode. Defaults to `1`. For N > 1, the first N−1 passes are warmups and only the final pass is scored. Requires `use_request_rate_calibration=false`. |
+
+For one warmup pass followed by a measured pass on the same service instance, set these top-level TOML fields:
+
+```toml
+use_request_rate_calibration = false
+benchmark_run_count = 2
+```
+
+Each pass uses the same parameters and keeps the service running between passes. Only the final pass supplies the score and recorded metrics. This applies to standard-mode baseline, PSO candidate, validation and fine-tuning evaluations with single-host or multihost plugins. The `pd_disagg` workflow continues to use each phase's own `benchmark_run_count`. To approximate Decode, also enable prefix caching and keep request contents, order, count and sampling parameters identical across passes.
+
+Repeated benchmarks require the benchmark plugin to clear previous results before each pass or use a separate result directory for each pass, and to read metrics only from the current pass. Verify this behavior when using external plugins; otherwise, warmup metrics may be used for the final score.
 
 When `ttft_penalty > 0` and `tpot_penalty = 0`, the final selector chooses the group with the highest output token throughput from the verified candidates whose TTFT is strictly lower than `ttft_slo`. If no such candidate exists, it chooses the group whose TTFT is closest to the upper limit. This mode does not filter candidates by TPOT. Its SLO boundary rule is consistent with the existing TPOT-only and dual-constraint selectors.
 

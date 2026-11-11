@@ -1261,7 +1261,14 @@ def _run_optimizer(run_id: str | None = None) -> None:
         if len(_target_field) < 1:
             raise ValueError("No optimization fields were found. ")
         data_storage = DataStorage(settings.data_storage, _simu, _bench)
-        scheduler = Scheduler(_simu, _bench, data_storage, bak_path=bak_path, engine=args.engine)
+        scheduler = Scheduler(
+            _simu,
+            _bench,
+            data_storage,
+            bak_path=bak_path,
+            engine=args.engine,
+            benchmark_run_count=settings.benchmark_run_count,
+        )
         fine_tune = FineTune(
             ttft_penalty=settings.ttft_penalty,
             tpot_penalty=settings.tpot_penalty,

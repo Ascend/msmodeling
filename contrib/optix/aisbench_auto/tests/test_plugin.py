@@ -50,7 +50,9 @@ def plugin(tmp_path, monkeypatch, request):
             others="",
         ),
     )
-    monkeypatch.setattr(config_module, "settings", SimpleNamespace(output=tmp_path / "optix" / "result"))
+    monkeypatch.setattr(
+        config_module, "settings", SimpleNamespace(output=tmp_path / "optix" / "result", tpot_penalty=3.0)
+    )
     context = RuntimeContext(False, None, Path(sys.executable))
     env = dict(os.environ, PATH=os.environ["PATH"])
     bench = AisBenchAuto(config=cfg, runtime_ctx=context, deploy_env=env)
@@ -478,7 +480,9 @@ def test_config_loading_forms(plugin, monkeypatch, from_settings, as_dict):
     config.target_field = list(params())
     supplied = config.model_dump(mode="json") if as_dict else config
     monkeypatch.setattr(
-        config_module, "settings", SimpleNamespace(output=plugin.work_path / "optix" / "result", aisbench_auto=supplied)
+        config_module,
+        "settings",
+        SimpleNamespace(output=plugin.work_path / "optix" / "result", aisbench_auto=supplied, tpot_penalty=3.0),
     )
     bench = AisBenchAuto(
         config=None if from_settings else supplied,

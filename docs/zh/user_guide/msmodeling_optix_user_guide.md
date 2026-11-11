@@ -166,6 +166,18 @@ Agent 模式下，工具不在内部运行 PSO，而是从 `[agent_optimizer].ru
 |`tpot_slo`|必选| `time_per_output_token` 的限制时延。如对 `time_per_output_token` 限制为 50ms 内，则设为 0.05，取值范围：(0, 100]，单位 s。           |
 |`optimizer_strategy`|可选| 寻优模式，取值 `pso`（默认）或 `agent`，详见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。|
 |`use_request_rate_calibration`|可选| 是否对 `REQUESTRATE` 做实测校准，默认 `true`。详见下方说明。                                                                  |
+|`benchmark_run_count`|可选| `standard` 模式下每组候选的测评次数，默认 `1`，须为正整数。大于 `1` 时，前 N−1 轮预热、最后一轮计分；须同时设置 `use_request_rate_calibration=false`。|
+
+例如，在同一服务实例上先预热再正式测量，在 TOML 顶层设置：
+
+```toml
+use_request_rate_calibration = false
+benchmark_run_count = 2
+```
+
+各轮使用同一组参数，轮次之间保留服务运行，只将最后一轮指标用于评分和结果记录。该设置适用于单机和多机插件的 standard 流程，包括基线、PSO 候选、验证及微调；`pd_disagg` 模式仍使用各阶段自己的 `benchmark_run_count`。模拟 Decode 时还需开启 prefix caching，并固定各轮请求内容、顺序、请求数和采样参数。
+
+重复压测要求压测插件在每轮开始前清理上一轮结果，或使用独立的轮次结果目录，确保只读取当前轮指标。使用外部插件时请确认其满足该约定，否则正式计分可能读取到预热轮指标。
 
 当 `ttft_penalty > 0` 且 `tpot_penalty = 0` 时，最终选择器会从 TTFT 严格低于 `ttft_slo` 的已验证候选中选择输出 token 吞吐最高的一组；若没有这样的候选，则选择 TTFT 最接近上限的一组。此模式不按 TPOT 筛选候选，SLO 边界规则与现有 TPOT-only 和双约束选择器一致。
 

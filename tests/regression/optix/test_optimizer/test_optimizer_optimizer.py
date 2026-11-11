@@ -68,6 +68,7 @@ def _settings_mock() -> MagicMock:
     settings.fine_tune_mode = "concurrency_and_request_rate"
     settings.optimizer_strategy = "pso"
     settings.use_request_rate_calibration = False
+    settings.benchmark_run_count = 1
     settings.pd_disagg = PdDisaggConfig()
     return settings
 

@@ -14,7 +14,7 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 
@@ -500,6 +500,29 @@ class TestSchedulerRunMethods(unittest.TestCase):
         self.assertIs(self.data_storage.save.call_args.args[0], measured)
         self.simulator.stop.assert_called_once()
         self.assertEqual(self.benchmark.stop.call_count, 2)
+
+    @patch("time.sleep", return_value=None)
+    def test_three_passes_keep_service_running_and_discard_all_warmup_metrics(self, _):
+        self.scheduler.benchmark_run_count = 3
+        measured = PerformanceIndex(throughput=20.0)
+        phases = []
+        self.scheduler.run_simulate = MagicMock()
+        self.scheduler.monitoring_status = MagicMock(
+            side_effect=lambda *args, **kwargs: phases.append(self.scheduler.current_phase)
+        )
+        self.benchmark.get_performance_index.side_effect = lambda: (
+            measured if self.benchmark.run.call_count == 3 else PerformanceIndex(throughput=999.0)
+        )
+
+        result = self.scheduler.run(self.params, self.params_field)
+
+        self.scheduler.run_simulate.assert_called_once_with(self.params, self.params_field)
+        self.simulator.stop.assert_not_called()
+        self.assertEqual(self.benchmark.run.call_count, 3)
+        self.assertTrue(all(call == self.benchmark.run.call_args for call in self.benchmark.run.call_args_list))
+        self.benchmark.get_performance_index.assert_called_once_with()
+        self.assertIs(result, measured)
+        self.assertEqual(phases, [EarlyExitPhase.CALIBRATION, EarlyExitPhase.CALIBRATION, EarlyExitPhase.EVALUATION])
 
     @patch("time.sleep", return_value=None)
     def test_default_run_count_runs_single_measured_benchmark(self, _):
@@ -1430,6 +1453,36 @@ class TestSchedulerRerunBenchmarkOnly(unittest.TestCase):
         # The live simulator is never stopped; only the benchmark is restarted.
         self.simulator.stop.assert_not_called()
         self.benchmark.run.assert_called_once()
+
+    @patch("time.sleep", return_value=None)
+    def test_rerun_three_passes_keeps_service_running_and_uses_only_final_result(self, _):
+        self.scheduler = Scheduler(
+            simulator=self.simulator,
+            benchmark=self.benchmark,
+            data_storage=self.data_storage,
+            benchmark_run_count=3,
+        )
+        self.scheduler.monitoring_status = MagicMock()
+        phases = []
+        self.benchmark.run.side_effect = lambda *args, **kwargs: phases.append(self.scheduler.current_phase)
+        measured = PerformanceIndex(throughput=20.0)
+        self.benchmark.get_performance_index.side_effect = lambda: (
+            measured if self.benchmark.run.call_count == 3 else PerformanceIndex(throughput=999.0)
+        )
+
+        result = self.scheduler.rerun_benchmark_only(
+            self.params, self.params_field, with_request_rate=False, monitor_service=False
+        )
+
+        self.assertEqual(self.benchmark.run.call_count, 3)
+        self.benchmark.run.assert_has_calls([call(tuple(self.scheduler.simulate_run_info))] * 3)
+        self.simulator.run.assert_not_called()
+        self.simulator.stop.assert_not_called()
+        self.benchmark.get_performance_index.assert_called_once_with()
+        self.assertIs(result, measured)
+        self.assertIs(self.scheduler.last_outcome.performance_index, measured)
+        self.assertEqual(phases, [EarlyExitPhase.CALIBRATION, EarlyExitPhase.CALIBRATION, EarlyExitPhase.EVALUATION])
+        self.assertEqual(self.scheduler.monitoring_status.call_args_list, [call(monitor_service=False)] * 3)
 
     @patch("time.time")
     @patch("time.sleep")

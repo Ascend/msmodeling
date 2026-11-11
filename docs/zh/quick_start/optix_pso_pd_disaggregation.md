@@ -2,6 +2,8 @@
 
 本文以 **DeepSeek-V4-Flash + vLLM + AISBench** 为例，介绍 PD 分离参数搜索、实例配比和完整服务压测。可以直接复制[搜索配置](../use_cases/examples/optix_pd_disaggregation/search.toml)和[完整服务压测配置](../use_cases/examples/optix_pd_disaggregation/fine_tune.toml)，按下面步骤修改。
 
+在异构设备上分别搜索 P/D 参数，或使用多机 PD 混部插件测量服务单元并手动计算配比时，参见[分别搜索 P/D 参数并计算部署配比](optix_pso_pd_ratio_separate_search.md)。
+
 操作顺序：**分别搜索 P（处理输入）和 D（生成后续 token）的参数 → 按结果部署 PD 服务与 Proxy → 通过 Proxy 压测完整服务**。已有可用 PD 服务、只需调整压测负载时，直接从[第 5 步](#第-5-步通过-proxy-压测完整-pd-服务)开始。
 
 ## 一个命令运行完整流程

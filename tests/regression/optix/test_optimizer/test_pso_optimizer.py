@@ -1168,6 +1168,8 @@ class TestOptimizerMain:
     the assertions verify that every relevant setting is forwarded correctly.
     """
 
+    @pytest.mark.parametrize("benchmark_run_count", [1, 3])
+    @pytest.mark.parametrize("engine", ["mindie", "vllm", "multihost_infer"])
     @patch("optix.config.config.get_settings")
     @patch("optix.optimizer.register.register_ori_functions")
     @patch("optix.optimizer.optimizer.is_root", return_value=False)
@@ -1178,6 +1180,8 @@ class TestOptimizerMain:
         mock_is_root,
         mock_register,
         mock_get_settings,
+        benchmark_run_count,
+        engine,
     ):
         import importlib
         import sys
@@ -1204,6 +1208,7 @@ class TestOptimizerMain:
         settings.skip_pso = False
         settings.fine_tune_mode = "pd_mixed"
         settings.use_request_rate_calibration = False
+        settings.benchmark_run_count = benchmark_run_count
         settings.manage_simulator_lifecycle = True
         settings.output = MagicMock()
         settings.step_size = 0.1
@@ -1236,7 +1241,7 @@ class TestOptimizerMain:
 
         with ExitStack() as stack:
             mock_pso = stack.enter_context(patch("optix.optimizer.optimizer.PSOOptimizer"))
-            stack.enter_context(patch("optix.optimizer.scheduler.Scheduler"))
+            mock_scheduler = stack.enter_context(patch("optix.optimizer.scheduler.Scheduler"))
             stack.enter_context(patch("optix.optimizer.store.DataStorage"))
             mock_fine_tune = stack.enter_context(patch("optix.optimizer.experience_fine_tunning.FineTune"))
             stack.enter_context(
@@ -1247,16 +1252,18 @@ class TestOptimizerMain:
             )
             stack.enter_context(patch("optix.deploy_env.os.path.isfile", return_value=True))
             stack.enter_context(patch("optix.deploy_env.shutil.which", return_value="/usr/bin/ais_bench"))
-            stack.enter_context(patch.dict("optix.optimizer.register.simulates", {"mindie": _create_simulator}))
+            stack.enter_context(patch.dict("optix.optimizer.register.simulates", {engine: _create_simulator}))
             stack.enter_context(
                 patch.dict(
                     "optix.optimizer.register.benchmarks",
                     {"ais_bench": _create_benchmark},
                 )
             )
-            stack.enter_context(patch.object(sys, "argv", ["optix", "-e", "mindie", "-b", "ais_bench"]))
+            stack.enter_context(patch.object(sys, "argv", ["optix", "-e", engine, "-b", "ais_bench"]))
 
             optix_main()
+
+            assert mock_scheduler.call_args.kwargs["benchmark_run_count"] == benchmark_run_count
 
             # ---- verify PSOOptimizer construction ----
             mock_pso.assert_called_once()

@@ -16,6 +16,12 @@ tpot_slo = 0.05
 # true: use scheduler.run_with_request_rate, CONCURRENCY fixed to max. The first
 #   run uses the same maximum-pressure rule, then a finite rate is calibrated.
 use_request_rate_calibration = true
+# Standard mode: run N identical benchmark passes on the same service.
+# The first N-1 passes warm the cache; only the final pass is scored.
+# Values greater than 1 require use_request_rate_calibration=false.
+# Benchmark plugins must clear prior results or isolate outputs for each pass.
+# Read metrics only from the current pass to avoid scoring warmup results.
+benchmark_run_count = 1
 skip_pso = false
 
 # ------------------------- Select top_k for fine-tuning ------------------------------------------------

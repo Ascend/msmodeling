@@ -1408,6 +1408,7 @@ class Settings(BaseSettings):
     mem_coefficient: float = 0.8
     max_fine_tune: int = 30
     use_request_rate_calibration: bool = True
+    benchmark_run_count: int = Field(default=1, ge=1)
     manage_simulator_lifecycle: bool = True
     scaling_coefficient: float = 1.3
     step_size: float = 0.6
@@ -1443,9 +1444,12 @@ class Settings(BaseSettings):
     pd_disagg: PdDisaggConfig = Field(default_factory=PdDisaggConfig)
 
     @model_validator(mode="after")
-    def validate_pso_settings(self):
+    def validate_settings(self):
         if self.fine_tune_mode not in {"pd_mixed", "pd_disaggregation"}:
             raise ValueError("fine_tune_mode must be 'pd_mixed' or 'pd_disaggregation'.")
+        benchmark_errors = []
+        if self.use_request_rate_calibration and self.benchmark_run_count > 1:
+            benchmark_errors.append("benchmark_run_count > 1 requires use_request_rate_calibration=false.")
         repeated_pd_phases = [
             phase_name
             for phase_name in ("prefill", "decode")
@@ -1453,10 +1457,12 @@ class Settings(BaseSettings):
         ]
         if self.use_request_rate_calibration and repeated_pd_phases:
             invalid_phases = ", ".join(repeated_pd_phases)
-            raise ValueError(
+            benchmark_errors.append(
                 "pd_disagg benchmark_run_count > 1 requires use_request_rate_calibration=false; "
                 f"invalid phases: {invalid_phases}."
             )
+        if benchmark_errors:
+            raise ValueError(" ".join(benchmark_errors))
         if not self.manage_simulator_lifecycle and not self.skip_pso:
             raise ValueError("manage_simulator_lifecycle=false requires skip_pso=true.")
         if self.skip_pso:
