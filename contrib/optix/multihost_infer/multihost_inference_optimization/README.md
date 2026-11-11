@@ -462,7 +462,7 @@ msserviceprofiler optimizer -e multihost_infer -b evalscopeperf --backup
 >
 > **健康判定**：在多节点 DP 架构下，一个请求需所有节点协同才能完成。node 的 `/health` 在 worker 未就绪时也可能返回 200，因此 `health()` 在 200 之后会再匹配 node 启动日志中的就绪关键词（`ready_log_pattern`，默认 `Application startup complete`），命中才判定为 `running`。**不再发真实推理请求**——真实请求会预热模型 / 触发 CUDA Graph 捕获，污染后续 benchmark 首个请求的延迟测量。
 >
-> `ready_log_pattern` 默认取 uvicorn 的 `Application startup complete`：该行在 FastAPI lifespan 完成（含所有 data-parallel worker 的 rendezvous）之后才打印，因此可作为集群就绪信号。可按需在 `[vllm_mix]` 中覆盖为其它日志行。
+> `ready_log_pattern` 默认取 uvicorn 的 `Application startup complete`：该行在 FastAPI lifespan 完成（含所有 data-parallel worker 的 rendezvous）之后才打印，因此可作为集群就绪信号。可按需在 `[vllm_mix]` 中覆盖为其他日志行。
 
 ### 停止流程
 

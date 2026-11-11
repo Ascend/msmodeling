@@ -44,7 +44,7 @@
 | Prefix Cache 仿真 | 近似建模前缀缓存命中带来的 prefill 复用收益，评估缓存对首 token 时延的影响。 |
 | 投机解码仿真 | 支持 MTP、DFlash、DSpark，建模 proposal/draft 与 verify 的额外计算，评估投机解码对延迟与吞吐的影响。 |
 | 编译与图优化 | 对前向计算图进行编译改写，将 RMSNorm、Grouped Matmul 等典型子图融合为统一性能算子，更贴近实际部署下的执行形态。 |
-| 多流通算掩盖 | 在编译路径中通过多流调度将计算与通信拆分到不同执行流，建模流间同步开销与算通掩盖带来的端到端收益。 |
+| 多流通算掩盖 | 在编译路径中通过多流调度将计算与通信拆分到不同执行流，建模流间同步开销与通算掩盖带来的端到端收益。 |
 | 共享专家多流重叠 | 把每层共享专家分支绑定到独立 stream，按阶段与路由分支错峰重叠（入口量化对 router GEMM、gate/up 对 dispatch、激活对逐专家矩阵乘、down 对 combine），并把任一阶段掩盖不掉的实测残差以显式等待呈现在路由侧泳道。用 `--compilation-config multistream_overlap_shared_expert` 启用；与 `enable_multistream` 相互独立，检测到 `dispatch_ffn_combine` 融合时默认让位。 |
 | 量化仿真 | 分别建模 Linear、非 Expert Linear、LMHead、Attention 等路径的量化计算与访存成本，支持 W8A8、W4A8、FP8、MXFP4、HIF8 等多种策略组合。HIF8 支持 A5 上的 Dense Linear、Attention 线性投影和 MoE 专家 GMM，以及编译与 TP/EP 路径；Attention/KV 量化独立配置。MiMo V2 Flash 不支持 HIF8 KV Cache，CLI 与 Web UI 在配置解析阶段拒绝该组合；其原有 Attention 路径和独立的 Linear HIF8 不受影响。 |
 | 并行与 MoE 扩展 | 建模全局 TP / DP / EP 及细粒度并行（Embedding TP、Vision TP 等）切分后的通信与计算开销，覆盖 redundant experts、external/shared expert 等 MoE 部署形态。 |
@@ -79,7 +79,7 @@
 | 变长负载仿真 | 基于变长输入分布评估不同请求长度下的服务能力。 |
 | 跨硬件对比 | 在同一 workload 与 SLO 约束下，对多种芯片画像并行搜索并输出最优配置与吞吐对比。 |
 | 编译与融合选项 | 在寻优过程中启用编译、Sequence Parallel、MoE 融合与 Embedding TP 等优化路径，更贴近真实服务部署形态。 |
-| 多流通算掩盖 | 在启用编译的吞吐寻优路径中，通过多流调度将计算与通信拆分到不同执行流，建模流间同步开销与算通掩盖带来的端到端收益。 |
+| 多流通算掩盖 | 在启用编译的吞吐寻优路径中，通过多流调度将计算与通信拆分到不同执行流，建模流间同步开销与通算掩盖带来的端到端收益。 |
 | 结果可视化与导出 | 输出候选配置曲线、原始寻优结果与算子级 trace，便于对比不同并行与 batch 组合。 |
 | KV Cache Offload 建模 | 将 Decode 稀疏 / Prefill 层级 KV 卸载的显存与传输代价建模进吞吐寻优，评估开启后 TTFT、TPOT 与并发上限的变化。当前面向 GLM-5.2 等 DSA indexer 型模型（稀疏窗口读模型 config；indexer 缓存常驻设备、不参与卸载；PP>1 互斥）。 |
 

@@ -88,7 +88,7 @@ uv pip uninstall msmodeling
 
    > **说明：** 若不确定该调哪些参数及参数范围，可使用 **`optix-assistant` 寻优 skill**（统一入口，AGENTS.md 中已路由）的 PSO 模式，输入硬件、模型、负载和优化目标后即可获得推荐参数与搜索范围，再按实际部署环境（显存、卡数、时延要求等）核对并由其写入 `config.toml`。
 
-2. **启动寻优**：默认执行的是基于 `AISBench` 的 `vLLM` 服务化参数寻优（PSO 模式），其它用法详见 [命令参数说明](#8-命令参数说明)；如需改用 Agent 模式，见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。
+2. **启动寻优**：默认执行的是基于 `AISBench` 的 `vLLM` 服务化参数寻优（PSO 模式），其他用法详见 [命令参数说明](#8-命令参数说明)；如需改用 Agent 模式，见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。
 
     ```bash
     msmodeling optix

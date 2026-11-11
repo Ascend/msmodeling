@@ -66,7 +66,7 @@ bash serving_cast/example/pd_disaggregation/run_pd_disaggregation.sh --enable_pr
 | --- | --- | --- |
 | 只有 `both` | `pd_aggregation` | `PdAggregationServing` |
 | 同时有 `prefill` 和 `decode`，且没有 `both` | `pd_disaggregation` | `PdDisaggregationServing` |
-| 其它组合 | 非法 | 抛出 `ValueError("check instance's pd_role")` |
+| 其他组合 | 非法 | 抛出 `ValueError("check instance's pd_role")` |
 
 因此 **PD 分离的充要条件是：`prefill` 与 `decode` 两组同时存在，且不能混入 `both`**。
 

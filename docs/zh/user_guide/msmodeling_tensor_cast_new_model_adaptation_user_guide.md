@@ -139,7 +139,7 @@ reports/<case_name>/<model_type>_draft.py
 
 1. **仓库当前 `transformers` 版本已支持该模型**：直接读库内源码，通常为 `transformers.models.<model_name>.modeling_<model_name>`。
 2. **最新 `transformers` 版本已支持、但仓库锁定版本不支持**：优先推动升级仓库的 `transformers` 依赖版本（`pyproject.toml` / `uv.lock`），升级后回到情况 1；不要为了省事把新版模型代码复制进仓库。
-3. **最新 `transformers` 版本都不支持该模型**：去模型实际开源的地方获取源码（HuggingFace 模型库/remote code、vLLM 等推理框架的实现），并将模型源码作为模型专属模块落到 `tensor_cast/transformers/builtin_model/` 内适配，遵循仓库"patch/wrapper 层适配、不直接修改上游依赖"的约束。
+3. **最新 `transformers` 版本都不支持该模型**：去模型实际开源的地方获取源码（Hugging Face 模型库/remote code、vLLM 等推理框架的实现），并将模型源码作为模型专属模块落到 `tensor_cast/transformers/builtin_model/` 内适配，遵循仓库"patch/wrapper 层适配、不直接修改上游依赖"的约束。
 
 无论哪种情况，都应在实际源码中确认真实类名、模块路径、配置字段和 forward 行为，不要仅凭模型名填写 Profile 字段。
 

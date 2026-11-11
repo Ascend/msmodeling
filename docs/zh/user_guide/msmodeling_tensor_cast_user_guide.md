@@ -59,7 +59,6 @@ Prefill 模式下不添加 `--decode`（或显式指定 `--prefill`）；`--quer
 python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 4500 --device TEST_DEVICE --quantize-linear-action W8A8_DYNAMIC --compile
 ```
 
-
 #### Decode 场景
 
 Decode 场景的运行方式类似，仅需调整输入长度 `--query-length` 和请求的 context 长度 `--context-length`。未启用 MTP 时，`--query-length` 通常为 `1`；启用 MTP 时，`--query-length` 应设置为 `1 + N`（`N` 为 MTP token 数）。推荐使用统一接口 `--speculative-method mtp --num-speculative-tokens N`；原有 `--num-mtp-tokens` 目前仍可兼容使用。此时 Decode 下 `--query-length` 同样应对齐为 `N + 1`（CLI 可自动对齐）。
@@ -70,9 +69,7 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 10 --query-le
 
 MoE 模型可使用 `--quantize-non-expert-linear-action` 为 Attention 投影、dense MLP 和 shared experts 指定独立量化方式；routed experts 仍使用 `--quantize-linear-action`。
 
-
 **输出：** 性能汇总表；若设置了 `--chrome-trace-file`，还可选输出 Chrome trace 文件。
-
 
 #### 投机解码（Dflash / DSpark）
 
@@ -287,7 +284,7 @@ python -m cli.inference.image_generate black-forest-labs/FLUX.1-dev \
 
 工具仍支持直接传入 Hugging Face 或 ModelScope 的 model id，例如 `Qwen/Qwen3-32B`，并可通过
 `--remote-source` 选择来源。该 model id 模式可能在 `trust_remote_code=True` fallback 时执行远端
-Python 代码，msmodeling 不对远端代码安全性做保证；运行时会打印 `trust_remote_code` 风险提示。
+Python 代码，msmodeling 不对远端代码安全性作保证；运行时会打印 `trust_remote_code` 风险提示。
 
 ### 4.1 文本生成
 
