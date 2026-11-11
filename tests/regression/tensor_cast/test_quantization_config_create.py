@@ -86,6 +86,74 @@ class TestQuantizationConfigHelpers:
 
         assert layer_cfg.quant_type == LinearQuantType.W8A8
 
+    def test_deepseek_v4_mxfp4_without_explicit_override_keeps_only_broad_patterns(self):
+        quant_config = create_quant_config(
+            quantize_linear_action=QuantizeLinearAction.MXFP4,
+            model_type="deepseek_v4",
+            weight_group_size=32,
+            weight_quant_granularity=QuantGranularity.PER_GROUP,
+        )
+
+        assert "*.self_attn.*" not in quant_config.linear_configs
+        assert "layers.*" in quant_config.linear_configs
+
+    def test_deepseek_v4_w8a8_non_expert_uses_per_sample(self):
+        quant_config = create_quant_config(
+            quantize_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            quantize_non_expert_linear_action=QuantizeLinearAction.W8A8_DYNAMIC,
+            model_type="deepseek_v4",
+        )
+
+        attention_cfg = get_quant_config(
+            "model.layers.3.self_attn.kv_a_proj_with_mqa",
+            quant_config,
+            "default_dit",
+        )
+        shared_expert_cfg = get_quant_config(
+            "model.layers.3.mlp.shared_experts.down_proj",
+            quant_config,
+            "default_dit",
+        )
+        routed_expert_cfg = get_quant_config(
+            "model.layers.3.mlp.experts.5.down_proj",
+            quant_config,
+            "default_dit",
+        )
+
+        assert attention_cfg.dynamic_quant_granularity == QuantGranularity.PER_SAMPLE
+        assert shared_expert_cfg.dynamic_quant_granularity == QuantGranularity.PER_SAMPLE
+        assert routed_expert_cfg.dynamic_quant_granularity == QuantGranularity.PER_TENSOR
+
+    def test_other_models_keep_w8a8_non_expert_per_tensor(self):
+        quant_config = create_quant_config(
+            quantize_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            quantize_non_expert_linear_action=QuantizeLinearAction.W8A8_DYNAMIC,
+            model_type="deepseek_v3",
+        )
+
+        non_expert_cfg = get_quant_config(
+            "model.layers.3.self_attn.kv_a_proj_with_mqa",
+            quant_config,
+            "default_dit",
+        )
+
+        assert non_expert_cfg.dynamic_quant_granularity == QuantGranularity.PER_TENSOR
+
+    def test_deepseek_v4_respects_explicit_dynamic_quant_granularity(self):
+        quant_config = create_quant_config(
+            quantize_linear_action=QuantizeLinearAction.W8A8_DYNAMIC,
+            model_type="deepseek_v4",
+            dynamic_quant_granularity=QuantGranularity.PER_TENSOR,
+        )
+
+        non_expert_cfg = get_quant_config(
+            "model.layers.3.self_attn.kv_a_proj_with_mqa",
+            quant_config,
+            "default_dit",
+        )
+
+        assert non_expert_cfg.dynamic_quant_granularity == QuantGranularity.PER_TENSOR
+
     @pytest.mark.parametrize("quantize_lmhead", [False, True])
     @pytest.mark.parametrize("wrapped", [False, True])
     @pytest.mark.parametrize("action", [QuantizeLinearAction.W8A8_STATIC, QuantizeLinearAction.W8A8_DYNAMIC])

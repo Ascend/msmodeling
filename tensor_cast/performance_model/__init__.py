@@ -444,6 +444,30 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dynamic_quantize_symmetric.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    """Model absmax reduction, scale construction, and output quantization."""
+    x = op_invoke_info.args[0]
+    payload, scale = op_invoke_info.out
+    properties = op_invoke_info.get_memory_access_properties()
+
+    # Dynamic symmetric quantization performs the static quantization work
+    # plus abs/max reduction and one scale construction per reduction result.
+    # These are logical operations rather than hardware instruction counts.
+    quant_ops_per_element = 4 + int(x.dtype != torch.float32)
+    if not is_fp8_dtype(payload.dtype):
+        quant_ops_per_element += 1
+    static_quant_ops = x.numel() * quant_ops_per_element
+    reduction_ops = x.numel() + max(x.numel() - scale.numel(), 0)
+    scale_ops = scale.numel()
+    _accumulate_compute_ops(
+        properties,
+        torch.float32,
+        gp_ops=static_quant_ops + reduction_ops + scale_ops,
+    )
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dynamic_quantize_mxfp4.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     x = op_invoke_info.args[0]
@@ -2853,6 +2877,57 @@ def _estimate_default(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfil
 
 
 register_op_estimator(None, None)(_estimate_default)
+
+
+@register_op_estimator(torch.ops.tensor_cast.dynamic_quantize_symmetric.default, None)
+def _estimate_dynamic_quantize_symmetric(
+    op_invoke_info: OpInvokeInfo,
+    device_profile: DeviceProfile,
+) -> PerformanceModel.Result:
+    """Estimate dependent reduction and requantization work analytically.
+
+    Dynamic quantization cannot use the default single-envelope Roofline: the
+    output quantization depends on the absmax reduction and generated scale.
+    Charge the memory and GP envelopes sequentially instead of assuming that
+    all bytes and arithmetic overlap.  The inputs remain only tensor shapes,
+    dtypes, and device peaks; no measured latency or shape-specific multiplier
+    enters this estimator.
+    """
+    if "dims" in op_invoke_info.kwargs:
+        dims = op_invoke_info.kwargs["dims"]
+    elif len(op_invoke_info.args) > 1:
+        # The custom-op schema is (x, dims, scale_dtype, out_dtype).
+        dims = op_invoke_info.args[1]
+    else:
+        dims = []
+    if not dims:
+        return _estimate_default(op_invoke_info, device_profile)
+
+    result = _estimate_default(op_invoke_info, device_profile)
+    memory_time_s = result.statistics[StatsKey.MEMORY_ACCESS]
+    compute_time_s = result.statistics[StatsKey.COMPUTE]
+    if memory_time_s == 0 and compute_time_s == 0:
+        return result
+
+    perf_properties = op_invoke_info.get_perf_properties()
+    host_to_device_time_s = result.statistics["host_to_device_time_s"]
+    serialized_device_time_s = memory_time_s + compute_time_s
+    device_and_host_time_s = (
+        host_to_device_time_s + serialized_device_time_s
+        if perf_properties.host_to_device_serial
+        else max(serialized_device_time_s, host_to_device_time_s)
+    )
+    static_cost_time_s = result.statistics.get("static_cost_time_s", 0)
+    result.execution_time_s = device_and_host_time_s + static_cost_time_s
+    result.statistics.update(
+        {
+            "dynamic_quant_dependency_serialized": True,
+            "dynamic_quant_memory_envelope_s": memory_time_s,
+            "dynamic_quant_compute_envelope_s": compute_time_s,
+            "static_cost_time_s": static_cost_time_s,
+        }
+    )
+    return result
 
 
 def _internal_spill_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:

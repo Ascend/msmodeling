@@ -23,6 +23,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 import torch
 import torch.nn as nn
+from transformers.initialization import no_init_weights
 
 import tensor_cast.performance_model.builtin_model  # noqa: F401 — register V4 perf handlers
 
@@ -40,6 +41,7 @@ from tensor_cast.transformers.builtin_model.deepseek_v4 import (
     DeepseekV4RotaryEmbedding,
     DeepseekV4SparseAttention as BuiltinDeepseekV4SparseAttention,
 )
+from tensor_cast.transformers.utils import init_on_device_without_buffers
 from tensor_cast.layers.deepseek_v4 import (
     DeepseekV4SparseAttention,
     DeepseekV4SparseAttentionIndexer,
@@ -1292,6 +1294,34 @@ class TestDeepseekV4Model(unittest.TestCase):
         assert isinstance(model.layers[1].self_attn.indexer, DeepseekV4Indexer)
         assert hasattr(model, "embed_tokens")
         assert hasattr(model, "rotary_emb")
+
+
+@pytest.mark.nightly
+class TestDeepseekV4ModelNightly(unittest.TestCase):
+    """Full-size V4 model init (large hidden_size; too slow for default CI)."""
+
+    def test_model_initialization(self):
+        """Test model can be initialized with V4 config."""
+        config = DeepseekV4Config(
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=32,
+            num_hidden_layers=2,
+            vocab_size=128256,
+            compress_ratios=[0, 4],
+            topk_limit=8,
+            index_n_heads=8,
+            index_head_dim=128,
+            hc_mult=4,
+        )
+
+        with init_on_device_without_buffers("meta"), no_init_weights():
+            model = DeepseekV4Model(config)
+        assert hasattr(model, "embed_tokens")
+        assert hasattr(model, "layers")
+        assert hasattr(model, "norm")
+        assert hasattr(model, "rotary_emb")
+        assert len(model.layers) == 2
 
 
 class TestDeepseekV4RouteFunctions(unittest.TestCase):

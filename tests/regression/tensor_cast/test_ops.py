@@ -140,6 +140,122 @@ def test_dynamic_quantize_mxfp4_uses_per_row_block_scales_and_costs():
     assert properties.compute_ops[torch.bfloat16].gp_ops == 2 * x.numel() + scale.numel()
 
 
+def test_dynamic_quantize_symmetric_per_sample_models_scale_and_reduction_costs():
+    x = torch.empty((4, 32), device="meta", dtype=torch.bfloat16)
+    op = torch.ops.tensor_cast.dynamic_quantize_symmetric.default
+    kwargs = {"scale_dtype": torch.float32, "out_dtype": torch.int8}
+    out = op(x, [-1], **kwargs)
+    payload, scale = out
+
+    assert payload.shape == x.shape
+    assert scale.shape == (4, 1)
+
+    properties = OpInvokeInfo(
+        op,
+        (x, [-1]),
+        kwargs,
+        out,
+    ).get_perf_properties()
+    expected_gp_ops = x.numel() * 6 + x.numel() + (x.numel() - scale.numel()) + scale.numel()
+    assert properties.compute_ops[torch.float32].gp_ops == expected_gp_ops
+    assert properties.memory_write_bytes == payload.numel() * payload.element_size() + scale.numel() * 4
+
+    invoke = OpInvokeInfo(op, (x, [-1]), kwargs, out)
+    result = get_op_estimator(op, TEST_DEVICE.name)(invoke, TEST_DEVICE)
+    memory_time_s = result.statistics[StatsKey.MEMORY_ACCESS]
+    compute_time_s = result.statistics[StatsKey.COMPUTE]
+    assert result.statistics["dynamic_quant_dependency_serialized"] is True
+    assert result.execution_time_s == pytest.approx(
+        memory_time_s + compute_time_s + TEST_DEVICE.static_cost.gp_op_cost_s
+    )
+    assert result.execution_time_s > max(memory_time_s, compute_time_s) + TEST_DEVICE.static_cost.gp_op_cost_s
+
+
+def test_dynamic_quantize_symmetric_per_tensor_keeps_default_roofline():
+    x = torch.empty((4, 32), device="meta", dtype=torch.bfloat16)
+    op = torch.ops.tensor_cast.dynamic_quantize_symmetric.default
+    kwargs = {"scale_dtype": torch.float32, "out_dtype": torch.int8}
+    out = op(x, [], **kwargs)
+    invoke = OpInvokeInfo(op, (x, []), kwargs, out)
+
+    result = get_op_estimator(op, TEST_DEVICE.name)(invoke, TEST_DEVICE)
+    memory_time_s = result.statistics[StatsKey.MEMORY_ACCESS]
+    compute_time_s = result.statistics[StatsKey.COMPUTE]
+
+    assert "dynamic_quant_dependency_serialized" not in result.statistics
+    assert result.execution_time_s == pytest.approx(
+        max(memory_time_s, compute_time_s) + TEST_DEVICE.static_cost.gp_op_cost_s
+    )
+
+
+def test_dynamic_quantize_symmetric_preserves_h2d_and_extra_static_costs(monkeypatch):
+    x = torch.empty((4, 32), device="meta", dtype=torch.bfloat16)
+    op = torch.ops.tensor_cast.dynamic_quantize_symmetric.default
+    kwargs = {"scale_dtype": torch.float32, "out_dtype": torch.int8}
+    out = op(x, [-1], **kwargs)
+    invoke = OpInvokeInfo(op, (x, [-1]), kwargs, out)
+    properties = invoke.get_perf_properties()
+    properties.host_to_device_bytes = 4096
+    properties.host_to_device_serial = True
+    properties.extra_static_cost_count = 2
+    monkeypatch.setattr(invoke, "get_perf_properties", lambda: properties)
+
+    result = get_op_estimator(op, TEST_DEVICE.name)(invoke, TEST_DEVICE)
+    memory_time_s = result.statistics[StatsKey.MEMORY_ACCESS]
+    compute_time_s = result.statistics[StatsKey.COMPUTE]
+    h2d_time_s = result.statistics["host_to_device_time_s"]
+    expected_static_time_s = TEST_DEVICE.static_cost.gp_op_cost_s * 3
+
+    assert result.statistics["static_cost_time_s"] == pytest.approx(expected_static_time_s)
+    assert result.execution_time_s == pytest.approx(
+        h2d_time_s + memory_time_s + compute_time_s + expected_static_time_s
+    )
+
+
+def test_dynamic_quantize_symmetric_estimator_accepts_keyword_dims():
+    x = torch.empty((4, 32), device="meta", dtype=torch.bfloat16)
+    op = torch.ops.tensor_cast.dynamic_quantize_symmetric.default
+    positional_out = op(x, [-1], scale_dtype=torch.float32, out_dtype=torch.int8)
+    keyword_out = op(x, dims=[-1], scale_dtype=torch.float32, out_dtype=torch.int8)
+
+    positional = OpInvokeInfo(
+        op,
+        (x, [-1]),
+        {"scale_dtype": torch.float32, "out_dtype": torch.int8},
+        positional_out,
+    )
+    keyword = OpInvokeInfo(
+        op,
+        (x,),
+        {"dims": [-1], "scale_dtype": torch.float32, "out_dtype": torch.int8},
+        keyword_out,
+    )
+
+    positional_result = get_op_estimator(op, TEST_DEVICE.name)(positional, TEST_DEVICE)
+    keyword_result = get_op_estimator(op, TEST_DEVICE.name)(keyword, TEST_DEVICE)
+
+    assert keyword_result.execution_time_s == pytest.approx(positional_result.execution_time_s)
+    assert keyword_result.statistics["dynamic_quant_dependency_serialized"] is True
+
+
+def test_w8a8_qmm_reads_per_sample_scale_payload():
+    m, k, n = 4, 32, 16
+    x = torch.empty((m, k), device="meta", dtype=torch.int8)
+    w = torch.empty((k, n), device="meta", dtype=torch.int8)
+    w_scale = torch.empty((), device="meta", dtype=torch.float32)
+    op = torch.ops.tensor_cast.static_quant_linear.default
+
+    def memory_read_bytes(x_scale):
+        args = (x, w, w_scale, None, x_scale, None, None, torch.bfloat16)
+        out = op(*args)
+        return OpInvokeInfo(op, args, {}, out).get_perf_properties().memory_read_bytes
+
+    scalar_scale = torch.empty((), device="meta", dtype=torch.float32)
+    per_sample_scale = torch.empty((m, 1), device="meta", dtype=torch.float32)
+
+    assert memory_read_bytes(per_sample_scale) - memory_read_bytes(scalar_scale) == (m - 1) * 4
+
+
 def test_mxfp4_linear_uses_native_mma_without_int4_dequant():
     m, k, n, group_size = 4, 64, 8, 32
     k_groups = k // group_size

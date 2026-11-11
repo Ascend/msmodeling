@@ -169,7 +169,7 @@ class ModelDtypeResolutionTestCase(unittest.TestCase):
     @patch("tensor_cast.core.config_resolver.AutoModelConfigLoader")
     def test_config_resolver_passes_declared_dtype_to_model_config(self, loader_cls):
         loader = loader_cls.return_value
-        loader.load_config.return_value = SimpleNamespace(torch_dtype="bfloat16")
+        loader.load_config.return_value = SimpleNamespace(torch_dtype="bfloat16", model_type="deepseek_v4")
         loader.is_transformers_natively_supported = True
         user_input = MagicMock()
         user_input.model_id = "test-model"
@@ -183,6 +183,9 @@ class ModelDtypeResolutionTestCase(unittest.TestCase):
                 resolver = ConfigResolver(user_input=user_input)
                 self.assertIs(resolver.model_config.dtype, torch.bfloat16)
                 self.assertIs(resolver.model_config.is_compile_enabled, do_compile)
+
+        self.assertEqual(user_input.get_quant_config.call_count, 2)
+        user_input.get_quant_config.assert_called_with(model_type="deepseek_v4")
 
 
 class TextConfigResolutionTestCase(unittest.TestCase):

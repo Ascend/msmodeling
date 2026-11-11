@@ -26,7 +26,7 @@ from ...model_config import (
     MultiheadLatentAttentionQuantConfig,
     QuantConfig,
 )
-from ...quantize_utils import get_attention_quant_type, LinearQuantType
+from ...quantize_utils import get_attention_quant_type, LinearQuantType, QuantGranularity
 from .datatypes import QuantizeAttentionAction, QuantizeLinearAction
 
 
@@ -119,6 +119,12 @@ _BROAD_LINEAR_PATTERNS = ("layers.*", "*.layers.*", "default_dit")
 _LMHEAD_MODULE_NAME = "lm_head"
 _LMHEAD_PATTERNS = (_LMHEAD_MODULE_NAME, f"*.{_LMHEAD_MODULE_NAME}")
 
+# This policy is applied while constructing QuantConfig, rather than in a
+# ModelProfile post-resolver, because ``PER_TENSOR`` is both the public default
+# and a valid explicit user override.  After construction those two cases are
+# indistinguishable; ``setdefault`` here preserves an explicit override.
+_PER_SAMPLE_NON_EXPERT_MODELS = {"deepseek_v4"}
+
 
 def _filter_action_kwargs(action: QuantizeLinearAction, kwargs: dict) -> dict:
     """Strip MXFP4-only kwargs when the target action is not MXFP4."""
@@ -133,11 +139,24 @@ def _set_linear_patterns(quant_config: QuantConfig, patterns, quantize_linear_ac
         quant_config.linear_configs[pattern] = linear_config
 
 
+def _non_expert_quant_kwargs(
+    model_type: str | None,
+    quantize_linear_action: QuantizeLinearAction,
+    kwargs: dict,
+) -> dict:
+    """Return model-specific activation quantization settings for non-expert linears."""
+    result = _filter_action_kwargs(quantize_linear_action, kwargs)
+    if model_type in _PER_SAMPLE_NON_EXPERT_MODELS and quantize_linear_action == QuantizeLinearAction.W8A8_DYNAMIC:
+        result.setdefault("dynamic_quant_granularity", QuantGranularity.PER_SAMPLE)
+    return result
+
+
 def create_quant_config(
     quantize_linear_action: QuantizeLinearAction = QuantizeLinearAction.DISABLED,
     quantize_non_expert_linear_action: QuantizeLinearAction = QuantizeLinearAction.DISABLED,
     quantize_lmhead: bool = False,
     quantize_attention_action: QuantizeAttentionAction = QuantizeAttentionAction.DISABLED,
+    model_type: str | None = None,
     **kwargs,
 ):
     quant_config = QuantConfig()
@@ -147,11 +166,18 @@ def create_quant_config(
     # patterns must come first to override the broad action for those modules
     # (e.g. ``--quantize-linear-action MXFP4`` for experts + non-expert FP8).
     if quantize_non_expert_linear_action != QuantizeLinearAction.DISABLED:
+        effective_non_expert_action = quantize_non_expert_linear_action
+    elif model_type in _PER_SAMPLE_NON_EXPERT_MODELS and quantize_linear_action == QuantizeLinearAction.W8A8_DYNAMIC:
+        effective_non_expert_action = quantize_linear_action
+    else:
+        effective_non_expert_action = QuantizeLinearAction.DISABLED
+
+    if effective_non_expert_action != QuantizeLinearAction.DISABLED:
         _set_linear_patterns(
             quant_config,
             _NON_EXPERT_LINEAR_PATTERNS,
-            quantize_non_expert_linear_action,
-            **_filter_action_kwargs(quantize_non_expert_linear_action, kwargs),
+            effective_non_expert_action,
+            **_non_expert_quant_kwargs(model_type, effective_non_expert_action, kwargs),
         )
 
     if quantize_linear_action != QuantizeLinearAction.DISABLED:

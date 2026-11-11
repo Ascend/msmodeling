@@ -149,7 +149,7 @@ class ConfigResolver:
         self.user_input = user_input
 
         if user_input is not None:
-            quant_config = user_input.get_quant_config()
+            quant_config = user_input.get_quant_config(model_type=getattr(self.hf_config, "model_type", None))
             parallel_config = user_input.get_parallel_config()
         else:
             if parallel_config is None or quant_config is None:

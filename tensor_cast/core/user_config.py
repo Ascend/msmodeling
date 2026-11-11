@@ -420,7 +420,7 @@ class UserInputConfig:
             decode_context_parallel_size=self.dcp_size,
         )
 
-    def get_quant_config(self) -> QuantConfig:
+    def get_quant_config(self, model_type: Optional[str] = None) -> QuantConfig:
         if (
             self.quantize_linear_action == QuantizeLinearAction.DISABLED
             and self.quantize_non_expert_linear_action == QuantizeLinearAction.DISABLED
@@ -444,6 +444,7 @@ class UserInputConfig:
             quantize_non_expert_linear_action=self.quantize_non_expert_linear_action,
             quantize_lmhead=self.quantize_lmhead,
             quantize_attention_action=self.quantize_attention_action,
+            model_type=model_type,
             **extra_kwargs,
         )
 
