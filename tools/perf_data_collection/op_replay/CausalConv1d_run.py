@@ -172,6 +172,33 @@ def _flatten_numel(shape: tuple[int, ...]) -> int:
     return numel
 
 
+def run_case(case, runtime_torch=None):
+    """Run one CausalConv1d invocation for a prepared case.
+
+    Shared by run_row() and the op_microbench adapter path. ``runtime_torch``
+    is accepted so a repeated replay can reuse the modules fetched once by
+    ``run_row``. The custom op writes ``case["output"]`` in place and may
+    return None; that preallocated tensor is the measured output.
+    """
+    if runtime_torch is None:
+        runtime_torch, _ = get_runtime_modules()
+    result = runtime_torch.ops._C_ascend.npu_causal_conv1d_custom(
+        case["output"],
+        case["x"],
+        case["weight"],
+        case["conv_states"],
+        None,  # bias_opt: empty CSV slot
+        case["query_start_loc"],
+        case["cache_indices"],
+        None,  # initial_state_mode_opt: empty CSV slot
+        case["num_accepted_tokens"],
+        ACTIVATION_MODE,
+        PAD_SLOT_ID,
+        RUN_MODE,
+    )
+    return case["output"] if result is None else result
+
+
 def run_row(
     csv_path,
     row_index: int,
@@ -182,20 +209,7 @@ def run_row(
     case = build_row_case(row)
 
     for repeat_index in range(repeat_count):
-        runtime_torch.ops._C_ascend.npu_causal_conv1d_custom(
-            case["output"],
-            case["x"],
-            case["weight"],
-            case["conv_states"],
-            None,  # bias_opt: empty CSV slot
-            case["query_start_loc"],
-            case["cache_indices"],
-            None,  # initial_state_mode_opt: empty CSV slot
-            case["num_accepted_tokens"],
-            ACTIVATION_MODE,
-            PAD_SLOT_ID,
-            RUN_MODE,
-        )
+        run_case(case, runtime_torch)
         runtime_torch.npu.synchronize()
         print(
             f"[RUN] {csv_path}:{row_index} "

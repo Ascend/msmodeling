@@ -292,6 +292,39 @@ def build_row_case(row: dict[str, str]):
     }
 
 
+def run_case(case):
+    """Run one ChunkKdaFwd invocation for a prepared case.
+
+    Mirrors vllm_ascend/ops/kimi_kda.py _run_prefill exactly:
+    positional (q, k, v, g, beta, scale, chunk_size), l2norm is applied
+    OUTSIDE the operator in production so it is not repeated here.
+    Shared by run_row() and the op_microbench adapter path.
+    """
+    chunk_kda_fwd = load_chunk_kda()
+    return chunk_kda_fwd(
+        case["q"],
+        case["k"],
+        case["v"],
+        case["g"],
+        case["beta"],
+        case["scale"],
+        KDA_CHUNK_SIZE,
+        layout="BSND",
+        initial_state=case["initial_state"],
+        output_final_state=True,
+        cu_seqlens=case["cu_seqlens"],
+        chunk_indices=case["chunk_indices"],
+        safe_gate=False,
+        lower_bound=-5.0,
+        use_gate_in_kernel=True,
+        A_log=case["a_log"],
+        dt_bias=case["dt_bias"],
+        disable_recompute=False,
+        return_intermediate_states=False,
+        state_v_first=True,
+    )
+
+
 def run_row(
     csv_path,
     row_index: int,
@@ -300,44 +333,16 @@ def run_row(
 ) -> None:
     runtime_torch, _ = get_runtime_modules()
     case = build_row_case(row)
-    chunk_kda_fwd = load_chunk_kda()
-
-    def run_once():
-        # Mirrors vllm_ascend/ops/kimi_kda.py _run_prefill exactly:
-        # positional (q, k, v, g, beta, scale, chunk_size), l2norm is applied
-        # OUTSIDE the operator in production so it is not repeated here.
-        return chunk_kda_fwd(
-            case["q"],
-            case["k"],
-            case["v"],
-            case["g"],
-            case["beta"],
-            case["scale"],
-            KDA_CHUNK_SIZE,
-            layout="BSND",
-            initial_state=case["initial_state"],
-            output_final_state=True,
-            cu_seqlens=case["cu_seqlens"],
-            chunk_indices=case["chunk_indices"],
-            safe_gate=False,
-            lower_bound=-5.0,
-            use_gate_in_kernel=True,
-            A_log=case["a_log"],
-            dt_bias=case["dt_bias"],
-            disable_recompute=False,
-            return_intermediate_states=False,
-            state_v_first=True,
-        )
 
     warmup = min(2, repeat_count)
     for _ in range(warmup):
-        run_once()
+        run_case(case)
         runtime_torch.npu.synchronize()
 
     output = None
     final_state = None
     for repeat_index in range(repeat_count):
-        result = run_once()
+        result = run_case(case)
         output = result[0]
         final_state = result[1] if len(result) > 1 else None
         runtime_torch.npu.synchronize()

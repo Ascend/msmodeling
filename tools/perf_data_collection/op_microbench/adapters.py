@@ -186,6 +186,9 @@ ADAPTERS = {
     "_triton_rope_siso": _replay_spec("_triton_rope_siso", "vllm_ascend.ops.triton.rope.rope_forward_triton_siso"),
     "_triton_rope": _replay_spec("_triton_rope", "vllm_ascend.ops.triton.rope.rope_forward_triton"),
     "mla_preprocess_0_mix_aic": _replay_spec("mla_preprocess_0_mix_aic", "torch.ops._C_ascend.mla_preprocess"),
+    "CausalConv1d": _replay_spec("CausalConv1d", "torch.ops._C_ascend.npu_causal_conv1d_custom"),
+    "RecurrentKda": _replay_spec("RecurrentKda", "torch.ops._C_ascend.recurrent_kda"),
+    "ChunkKdaFwd": _replay_spec("ChunkKdaFwd", "torch.ops._C_ascend.chunk_kda_fwd"),
     # --- Elementwise / structural torch-native adapters ---
     "Sub": _replay_spec("Sub", "torch.sub"),
     "SubAiCore": _replay_spec("SubAiCore", "torch.sub"),
@@ -387,6 +390,73 @@ def _build_mla_preprocess_case(module: Any, row: dict[str, str]) -> tuple[dict[s
     return case, invoke
 
 
+def _strip_cell_quotes(value: str) -> str:
+    value = value.strip()
+    while len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1].strip()
+    return value
+
+
+def _recorded_output_count(row: dict[str, str]) -> int:
+    """Return the number of output slots recorded on a replay CSV row."""
+    shapes = _strip_cell_quotes(str(row.get("Output Shapes", "")))
+    if not shapes:
+        return 0
+    return len(shapes.split(";"))
+
+
+def _prepared_outputs(case: dict[str, Any]) -> tuple[Any, ...]:
+    """Return tensors the replay script allocated before the operator call."""
+    prepared = case.get("outputs")
+    if isinstance(prepared, (tuple, list)) and prepared:
+        return tuple(prepared)
+    if "output" in case:
+        return (case["output"],)
+    return ()
+
+
+def _result_outputs(result: Any) -> tuple[Any, ...]:
+    if result is None:
+        return ()
+    if isinstance(result, (tuple, list)):
+        return tuple(result)
+    return (result,)
+
+
+def _normalize_row_replay_outputs(result: Any, case: dict[str, Any], row: dict[str, str]) -> Any:
+    """Match a run_case result to the replay row's recorded output slots.
+
+    In-place operators return None and write a preallocated tensor. A short
+    result is extended with those prepared tensors so the worker's output-count
+    check sees one tensor per recorded slot.
+    """
+    outputs = _result_outputs(result)
+    if not outputs:
+        outputs = _prepared_outputs(case)
+    expected = _recorded_output_count(row)
+    if expected > len(outputs):
+        for item in _prepared_outputs(case):
+            if len(outputs) >= expected:
+                break
+            if all(item is not current for current in outputs):
+                outputs = (*outputs, item)
+    if not outputs:
+        return None
+    if len(outputs) == 1:
+        return outputs[0]
+    return outputs
+
+
+def _build_row_replay_case(module: Any, row: dict[str, str]) -> tuple[dict[str, Any], Any]:
+    """Adapter bridge for replay scripts exposing build_row_case + run_case."""
+    case = module.build_row_case(row)
+
+    def invoke():
+        return _normalize_row_replay_outputs(module.run_case(case), case, row)
+
+    return case, invoke
+
+
 def _build_replay_runtime_case(
     request: dict[str, Any],
     spec: AdapterSpec,
@@ -404,6 +474,8 @@ def _build_replay_runtime_case(
         replay_case, invoke = _build_ring_mla_case(module, row, runtime_torch_npu)
     elif spec.name == "mla_preprocess_0_mix_aic":
         replay_case, invoke = _build_mla_preprocess_case(module, row)
+    elif spec.name in ("CausalConv1d", "RecurrentKda", "ChunkKdaFwd"):
+        replay_case, invoke = _build_row_replay_case(module, row)
     else:
         replay = module.op
         replay.prepare()

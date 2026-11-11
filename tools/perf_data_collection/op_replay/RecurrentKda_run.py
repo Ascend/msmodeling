@@ -261,6 +261,37 @@ def build_row_case(row: dict[str, str]):
     }
 
 
+def run_case(case):
+    """Run one RecurrentKda invocation for a prepared case.
+
+    Mirrors kimi_kda.py::_run_recurrent (production decode path):
+    initial_state is updated in place; the op returns only the output.
+    num_accepted_tokens is omitted (None) — MTP accept counts were not
+    recorded, so this exercises the full-token path.
+    Shared by run_row() and the op_microbench adapter path.
+    """
+    recurrent_kda = load_recurrent_kda_op()
+    return recurrent_kda(
+        case["q"].contiguous(),
+        case["k"].contiguous(),
+        case["v"].contiguous(),
+        case["g"].contiguous(),
+        case["beta"].contiguous(),
+        case["initial_state"],
+        case["cu_seqlens"],
+        case["ssm_state_indices"],
+        case["a_log"].reshape(-1).contiguous(),
+        case["dt_bias"].contiguous(),
+        scale=case["scale"],
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=False,
+        allow_neg_eigval=False,
+        safe_gate=True,
+        lower_bound=-5.0,
+    )
+
+
 def run_row(
     csv_path,
     row_index: int,
@@ -269,33 +300,10 @@ def run_row(
 ) -> None:
     runtime_torch, _ = get_runtime_modules()
     case = build_row_case(row)
-    recurrent_kda = load_recurrent_kda_op()
 
     output = None
     for repeat_index in range(repeat_count):
-        # Mirrors kimi_kda.py::_run_recurrent (production decode path):
-        # initial_state is updated in place; the op returns only the output.
-        # num_accepted_tokens is omitted (None) — MTP accept counts were not
-        # recorded, so this exercises the full-token path.
-        output = recurrent_kda(
-            case["q"].contiguous(),
-            case["k"].contiguous(),
-            case["v"].contiguous(),
-            case["g"].contiguous(),
-            case["beta"].contiguous(),
-            case["initial_state"],
-            case["cu_seqlens"],
-            case["ssm_state_indices"],
-            case["a_log"].reshape(-1).contiguous(),
-            case["dt_bias"].contiguous(),
-            scale=case["scale"],
-            use_qk_l2norm_in_kernel=True,
-            use_gate_in_kernel=True,
-            use_beta_sigmoid_in_kernel=False,
-            allow_neg_eigval=False,
-            safe_gate=True,
-            lower_bound=-5.0,
-        )
+        output = run_case(case)
         runtime_torch.npu.synchronize()
         print(
             f"[RUN] {csv_path}:{row_index} "

@@ -219,5 +219,33 @@ class TestMain(unittest.TestCase):
                 replay.main()
 
 
+class TestRunCase(unittest.TestCase):
+    """run_case() is the single-invocation entry shared with op_microbench adapters."""
+
+    def test_invokes_op_once_with_case_tensors(self):
+        case = {
+            "q": torch.zeros((1, 16, 2, 4)),
+            "k": torch.zeros((1, 16, 2, 4)),
+            "v": torch.zeros((1, 16, 2, 4)),
+            "g": torch.zeros((1, 16, 2, 4)),
+            "beta": torch.zeros((1, 16, 2)),
+            "initial_state": torch.zeros((2, 2, 4, 4)),
+            "cu_seqlens": torch.tensor([0, 16], dtype=torch.int32),
+            "ssm_state_indices": torch.zeros((2,), dtype=torch.int32),
+            "a_log": torch.zeros((2, 4)),
+            "dt_bias": torch.zeros((8,)),
+            "scale": 0.5,
+        }
+        op = mock.MagicMock()
+        with mock.patch.object(replay, "load_recurrent_kda_op", return_value=op):
+            result = replay.run_case(case)
+        self.assertEqual(op.call_count, 1)
+        self.assertIs(result, op.return_value)
+        kwargs = op.call_args.kwargs
+        self.assertEqual(kwargs["scale"], 0.5)
+        self.assertTrue(kwargs["use_qk_l2norm_in_kernel"])
+        self.assertTrue(kwargs["safe_gate"])
+
+
 if __name__ == "__main__":
     unittest.main()

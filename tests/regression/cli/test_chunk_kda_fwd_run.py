@@ -242,5 +242,35 @@ class TestMain(unittest.TestCase):
                 replay.main()
 
 
+class TestRunCase(unittest.TestCase):
+    """run_case() is the single-invocation entry shared with op_microbench adapters."""
+
+    def test_invokes_op_once_with_case_tensors(self):
+        case = {
+            "q": torch.zeros((1, 16, 2, 4)),
+            "k": torch.zeros((1, 16, 2, 4)),
+            "v": torch.zeros((1, 16, 2, 4)),
+            "g": torch.zeros((1, 16, 2, 4)),
+            "beta": torch.zeros((1, 2, 16)),
+            "scale": 0.5,
+            "initial_state": torch.zeros((1, 2, 4, 4)),
+            "cu_seqlens": torch.tensor([0, 16], dtype=torch.int64),
+            "chunk_indices": torch.tensor([0, 0], dtype=torch.int64),
+            "a_log": torch.zeros((2,)),
+            "dt_bias": torch.zeros((8,)),
+        }
+        op = mock.MagicMock(return_value=(torch.zeros((1, 16, 2, 4)), torch.zeros((1, 2, 4, 4))))
+        with mock.patch.object(replay, "load_chunk_kda", return_value=op):
+            result = replay.run_case(case)
+        self.assertEqual(op.call_count, 1)
+        self.assertIs(result, op.return_value)
+        args = op.call_args.args
+        self.assertIs(args[0], case["q"])
+        self.assertEqual(args[6], replay.KDA_CHUNK_SIZE)
+        kwargs = op.call_args.kwargs
+        self.assertEqual(kwargs["layout"], "BSND")
+        self.assertTrue(kwargs["output_final_state"])
+
+
 if __name__ == "__main__":
     unittest.main()

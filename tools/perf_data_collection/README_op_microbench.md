@@ -1107,6 +1107,62 @@ Python API 返回 INT64 索引，standalone 校验会识别该协议差异，不
 }
 ```
 
+### `CausalConv1d`
+
+Kimi K3 short-conv decode 更新路径，自定义 kernel，走 torch.ops._C_ascend.npu_causal_conv1d_custom。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "CausalConv1d",
+  "replay_row": {
+    "Input Shapes": "\"16,2304;4,2304;;1359,10,2304;3;2,8;;2\"",
+    "Input Data Types": "DT_BF16;DT_BF16;DT_UNDEFINED;DT_BF16;INT32;INT32;DT_UNDEFINED;INT32",
+    "Input Formats": "ND;ND;NULL;ND;ND;ND;NULL;ND",
+    "Output Shapes": "\"16,2304\"",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  }
+}
+```
+
+### `RecurrentKda`
+
+Kimi K3 decode 线性注意力 recurrent 路径，走 vllm-ascend 自定义算子 torch.ops._C_ascend.recurrent_kda。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "RecurrentKda",
+  "replay_row": {
+    "Input Shapes": "\"1,16,6,128;1,16,6,128;1,16,6,128;1,16,6,128;1,16,6;166474496;3;2,8;6;768;2\"",
+    "Input Data Types": "DT_BF16;DT_BF16;DT_BF16;DT_BF16;FLOAT;FLOAT;INT32;INT32;FLOAT;FLOAT;INT32",
+    "Input Formats": "NCHW;NCHW;NCHW;NCHW;NCL;NCHW;ND;ND;ND;ND;ND",
+    "Output Shapes": "\"12288;166474496;166474496\"",
+    "Output Data Types": "DT_BF16;FLOAT;FLOAT",
+    "Output Formats": "NCHW;NCHW;NCHW"
+  }
+}
+```
+
+### `ChunkKdaFwd`
+
+Kimi K3 prefill 线性注意力 chunk 前向，triton-ascend kernel，走 torch.ops._C_ascend.chunk_kda_fwd。
+
+```json
+{
+  "schema_version": 1,
+  "kernel_type": "ChunkKdaFwd",
+  "replay_row": {
+    "Input Shapes": "\"1,8064,6,128;1,8064,6,128;1,8064,6,128;1,8064,6,128;1,6,8064;6;768;1,6,128,128;2;252\"",
+    "Input Data Types": "DT_BF16;DT_BF16;DT_BF16;DT_BF16;FLOAT;FLOAT;FLOAT;FLOAT;INT64;INT64",
+    "Input Formats": "NCHW;NCHW;NCHW;NCHW;NCL;ND;ND;NCHW;ND;ND",
+    "Output Shapes": "\"6193152;1,6,128,128;1;3096576;3096576;1;1;1;1;1;1;1;1\"",
+    "Output Data Types": "DT_BF16;FLOAT;FLOAT;DT_BF16;DT_BF16;DT_BF16;DT_BF16;DT_BF16;DT_BF16;DT_BF16;DT_BF16;DT_BF16;DT_BF16",
+    "Output Formats": "NCHW;ND;ND;NCHW;NCHW;ND;ND;ND;ND;ND;ND;ND;ND"
+  }
+}
+```
 
 ### `AddAiCore`
 

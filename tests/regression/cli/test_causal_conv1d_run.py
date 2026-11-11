@@ -206,5 +206,79 @@ class TestMain(unittest.TestCase):
                 replay.main()
 
 
+class TestRunCase(unittest.TestCase):
+    """run_case() is the single-invocation entry shared with op_microbench adapters."""
+
+    def test_invokes_custom_op_once(self):
+        case = {
+            "x": torch.zeros((16, 4)),
+            "weight": torch.zeros((4, 4)),
+            "conv_states": torch.zeros((8, 4, 4)),
+            "query_start_loc": torch.tensor([0, 8, 16], dtype=torch.int32),
+            "cache_indices": torch.zeros((2, 8), dtype=torch.int32),
+            "num_accepted_tokens": torch.tensor([8, 8], dtype=torch.int32),
+            "output": torch.zeros((16, 4)),
+        }
+        runtime_torch = mock.MagicMock()
+        with mock.patch.object(replay, "get_runtime_modules", return_value=(runtime_torch, None)):
+            returned = replay.run_case(case)
+        op_mock = runtime_torch.ops._C_ascend.npu_causal_conv1d_custom
+        self.assertEqual(op_mock.call_count, 1)
+        call_args = op_mock.call_args.args
+        self.assertIs(call_args[0], case["output"])
+        self.assertIs(call_args[1], case["x"])
+        self.assertEqual(call_args[9:], (replay.ACTIVATION_MODE, replay.PAD_SLOT_ID, replay.RUN_MODE))
+        self.assertIs(returned, op_mock.return_value)
+
+    def test_returns_preallocated_output_when_op_returns_none(self):
+        case = {
+            "output": torch.zeros((2, 2)),
+            "x": torch.zeros((2, 2)),
+            "weight": torch.zeros((2, 2)),
+            "conv_states": torch.zeros((2, 2, 2)),
+            "query_start_loc": torch.zeros((2,), dtype=torch.int32),
+            "cache_indices": torch.zeros((1, 2), dtype=torch.int32),
+            "num_accepted_tokens": torch.zeros((1,), dtype=torch.int32),
+        }
+        runtime_torch = mock.MagicMock()
+        runtime_torch.ops._C_ascend.npu_causal_conv1d_custom.return_value = None
+        with mock.patch.object(replay, "get_runtime_modules") as get_modules:
+            returned = replay.run_case(case, runtime_torch)
+        get_modules.assert_not_called()
+        self.assertIs(returned, case["output"])
+
+    def test_row_replay_bridge_pads_short_results_to_recorded_slots(self):
+        from tools.perf_data_collection.op_microbench import adapters
+
+        prepared = (object(), object(), object())
+        case = {"output": prepared[0], "outputs": prepared}
+        row = {
+            "Output Shapes": "2;4;8",
+            "Output Data Types": "DT_BF16;FLOAT;FLOAT",
+            "Output Formats": "ND;ND;ND",
+        }
+        module = SimpleNamespace(
+            build_row_case=lambda replay_row: case,
+            run_case=lambda built: None,
+        )
+        _built, invoke = adapters._build_row_replay_case(module, row)
+        self.assertEqual(invoke(), prepared)
+
+        module.run_case = lambda built: prepared[0]
+        _built, invoke = adapters._build_row_replay_case(module, row)
+        self.assertEqual(invoke(), prepared)
+
+        module.run_case = lambda built: prepared[0]
+        single_row = {"Output Shapes": '"2"', "Output Data Types": "DT_BF16", "Output Formats": "ND"}
+        _built, invoke = adapters._build_row_replay_case(module, single_row)
+        self.assertIs(invoke(), prepared[0])
+
+        empty_case: dict = {}
+        module.build_row_case = lambda replay_row: empty_case
+        module.run_case = lambda built: None
+        _built, invoke = adapters._build_row_replay_case(module, {})
+        self.assertIsNone(invoke())
+
+
 if __name__ == "__main__":
     unittest.main()
