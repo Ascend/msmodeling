@@ -140,20 +140,16 @@ class ServingTestCase(unittest.TestCase):
             self.assertFalse(serving.exceed_concurrency_limit())
 
     def test_fixed_length_load_gen_request_rate_boundaries(self):
-        load_gen = FixedLengthLoadGen(
-            model_name="test-model",
-            num_requests=1,
-            num_input_tokens=1,
-            num_output_tokens=1,
-            request_rate=0,
-        )
-        request, interval = load_gen.next_request()
-        self.assertEqual(interval, 0)
-        # next_request only pops an attempt; the request stays at the client
-        # (INITIAL) until it actually obtains a concurrency slot.
-        self.assertEqual(request.state, RequestState.INITIAL)
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            FixedLengthLoadGen(
+                model_name="test-model",
+                num_requests=1,
+                num_input_tokens=1,
+                num_output_tokens=1,
+                request_rate=0,
+            )
 
-        with self.assertRaisesRegex(ValueError, "request_rate must be non-negative"):
+        with self.assertRaisesRegex(ValueError, "finite positive"):
             FixedLengthLoadGen(
                 model_name="test-model",
                 num_requests=1,
@@ -217,38 +213,15 @@ class ServingTestCase(unittest.TestCase):
         for request in by_attempt:
             self.assertEqual(request.arrives_server_time, request.leaves_client_time)
 
-    def test_zero_rate_batches_requests_before_scheduler_runs(self):
-        self.mock_cfg.common_config.serving_config.max_concurrency = 11
-        instance_config = InstanceConfig(
-            num_instances=1,
-            num_devices_per_instance=4,
-            device_type="TEST_DEVICE",
-            pd_role="prefill_decode",
-            parallel_config=ParallelConfig(tp_size=4, dp_size=1),
-            communication_config=CommunicationConfig(),
-        )
-        inference_batches = []
-
-        def record_batch(batch, with_sampler=True):
-            if not (len(batch) == 1 and batch[0].num_input_tokens == 8192):
-                inference_batches.append(list(batch))
-            return self.fake_ret
-
-        self.mock_engine.run_inference.side_effect = record_batch
-        serving = PdAggregationServing([Instance(instance_config)])
-        load_gen = FixedLengthLoadGen(
-            model_name=self.mock_cfg.common_config.model_config.name,
-            num_requests=11,
-            num_input_tokens=2048,
-            num_output_tokens=5,
-            request_rate=0,
-        )
-
-        stime.CallableTask(main_processing, serving, load_gen)
-        stime.start_simulation()
-
-        self.assertEqual(len(inference_batches[0]), 4)
-        self.assertTrue(all(request.query_len == 2048 for request in inference_batches[0]))
+    def test_zero_rate_is_rejected_before_scheduler_runs(self):
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            FixedLengthLoadGen(
+                model_name=self.mock_cfg.common_config.model_config.name,
+                num_requests=11,
+                num_input_tokens=2048,
+                num_output_tokens=5,
+                request_rate=0,
+            )
 
     def test_pd_disaggregation_dummy_model(self):
         prefill_instance_config = InstanceConfig(

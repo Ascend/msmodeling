@@ -15,6 +15,7 @@
 # -------------------------------------------------------------------------
 
 from abc import ABC, abstractmethod
+import math
 
 from serving_cast import stime
 from serving_cast.request import Request, RequestState
@@ -65,8 +66,8 @@ class FixedLengthLoadGen(LoadGen):
         images: tuple = (),
     ):
         super().__init__(model_name)
-        if request_rate < 0:
-            raise ValueError("request_rate must be non-negative")
+        if not math.isfinite(request_rate) or request_rate <= 0:
+            raise ValueError(f"request_rate must be a finite positive number, got {request_rate}")
         self.request_rate = request_rate
         self.requests: dict[int, Request] = {}
         self.num_requests = num_requests
@@ -91,7 +92,7 @@ class FixedLengthLoadGen(LoadGen):
         first_key = next(iter(self.requests))
         request = self.requests.pop(first_key)
         request.decode_done_signal.connect(self._decode_done_callback)
-        interval = 0 if self.request_rate == 0 else 1 / self.request_rate
+        interval = 1 / self.request_rate
         return request, interval
 
     def has_request(self) -> bool:
