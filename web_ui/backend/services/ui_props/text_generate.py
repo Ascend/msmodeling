@@ -34,7 +34,7 @@ from cli.registry.modules import get_spec
 # ── Module metadata ─────────────────────────────────────────────
 
 MODULE_ID = "text_generate"
-VERSION = "2.9.18"
+VERSION = "2.9.20"
 TITLE = I18nText("文本生成", "Text Generation")
 RUNNER = "ModelRunner"
 
@@ -674,6 +674,17 @@ UI: dict[str, UIFieldProps] = {
         default=1,
         group={"zh": "高级并行", "en": "Advanced Parallelism"},
         control="number",
+    ),
+    "language-model-only": UIFieldProps(
+        label=I18nText("仅语言模型", "Language Model Only"),
+        tooltip=I18nText(
+            "关闭多模态输入，并从设备常驻权重中排除视觉塔和已注册的多模态连接层。不能与图像输入参数同时使用。",
+            "Disable multimodal inputs and exclude the vision tower and registered multimodal connectors from device-resident model weights. Cannot be combined with image input options.",
+        ),
+        default=False,
+        group={"zh": "多模态", "en": "Multimodal"},
+        control="switch",
+        hidden=True,
     ),
     "image-batch-size": UIFieldProps(
         label=I18nText("图像批大小", "Image Batch Size"),
