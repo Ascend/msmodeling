@@ -835,7 +835,7 @@ class TestDesImagePayload(unittest.TestCase):
             num_requests=2,
             num_input_tokens=512,
             num_output_tokens=8,
-            request_rate=0.0,
+            request_rate=1.0,
             images=specs,
         )
         self.assertTrue(all(req.images == specs for req in gen.requests.values()))
@@ -883,7 +883,7 @@ class TestDesImageConfig(unittest.TestCase):
             num_requests=2,
             num_input_tokens=512,
             num_output_tokens=8,
-            request_rate=0.0,
+            request_rate=1.0,
             images=[{"height": 1080, "width": 1920, "image_id": "a"}, [720, 1280]],
         )
         gen = get_load_gen(cfg)
@@ -900,7 +900,7 @@ class TestDesImageConfig(unittest.TestCase):
             num_requests=1,
             num_input_tokens=512,
             num_output_tokens=8,
-            request_rate=0.0,
+            request_rate=1.0,
         )
         gen = get_load_gen(cfg)
         self.assertEqual(next(iter(gen.requests.values())).images, ())
@@ -1193,7 +1193,7 @@ class TestDesImageConfigValidation(unittest.TestCase):
             num_requests=1,
             num_input_tokens=512,
             num_output_tokens=8,
-            request_rate=0.0,
+            request_rate=1.0,
             images=images,
         )
 
