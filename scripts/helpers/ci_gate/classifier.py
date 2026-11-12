@@ -135,7 +135,8 @@ def classify_changes(
     def _track_unscoped(filepath: str) -> None:
         unscoped_python.append(filepath)
 
-    for entry in expand_rename_entries(diff.entries, line_map):
+    expanded = expand_rename_entries(diff.entries, line_map)
+    for entry in expanded:
         paths = _entry_paths(entry)
         config.extend(path for path in paths if is_config_path(path, policy))
 
@@ -165,6 +166,9 @@ def classify_changes(
         del_source=tuple(del_source),
         modified_source=modified_source,
         unscoped_python=tuple(sorted(set(unscoped_python))),
+        changed_paths=tuple(
+            sorted({path for entry in expanded for path in (entry.old_path, entry.new_path) if path is not None})
+        ),
     )
 
 

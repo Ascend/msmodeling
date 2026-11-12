@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
@@ -113,9 +114,9 @@ def collect_test_node_ids(targets: Sequence[str], *, marker: str | None) -> tupl
     return _collect_with_marker(targets, marker=marker)
 
 
-def collect_all_test_node_ids(targets: Sequence[str]) -> tuple[str, ...]:
+def collect_all_test_node_ids(targets: Sequence[str], *, root: Path | None = None) -> tuple[str, ...]:
     """Collect pytest node ids from *targets*, including npu, nightly, and network."""
-    return _collect_with_marker(targets, marker=None)
+    return _collect_with_marker(targets, marker=None, root=root)
 
 
 def _collect_subprocess_env(node_id_file: str) -> dict[str, str]:
@@ -163,13 +164,18 @@ def _collect_pytest_cmd(targets: Sequence[str], *, marker: str | None) -> list[s
     ]
 
 
-def _run_collect_only(targets: Sequence[str], *, marker: str | None) -> subprocess.CompletedProcess[str]:
+def _run_collect_only(
+    targets: Sequence[str],
+    *,
+    marker: str | None,
+    root: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     fd, node_id_file = tempfile.mkstemp(prefix="msmodeling-collect-", suffix=".txt")
     os.close(fd)
     try:
         proc = subprocess.run(
             _collect_pytest_cmd(targets, marker=marker),
-            cwd=REPO_ROOT,
+            cwd=root if root is not None else REPO_ROOT,
             env=_collect_subprocess_env(node_id_file),
             capture_output=True,
             text=True,
@@ -191,11 +197,16 @@ def _run_collect_only(targets: Sequence[str], *, marker: str | None) -> subproce
     return proc
 
 
-def _collect_with_marker(targets: Sequence[str], *, marker: str | None) -> tuple[str, ...]:
+def _collect_with_marker(
+    targets: Sequence[str],
+    *,
+    marker: str | None,
+    root: Path | None = None,
+) -> tuple[str, ...]:
     if not targets:
         return ()
 
-    proc = _run_collect_only(targets, marker=marker)
+    proc = _run_collect_only(targets, marker=marker, root=root)
     if proc.returncode not in (0, 5):
         detail = (proc.stderr or proc.stdout or "").strip()
         raise ConfigError(f"pytest collect-only failed (exit {proc.returncode})" + (f": {detail}" if detail else ""))
@@ -203,8 +214,23 @@ def _collect_with_marker(targets: Sequence[str], *, marker: str | None) -> tuple
     return _node_ids_from_collect(proc)
 
 
+def _node_id_matches_target(node_id: str, targets: frozenset[str]) -> bool:
+    """Keep an exact node id, or a parametrized id of a requested function.
+
+    Impact rules name ``path::test_func``. Pytest collects
+    ``path::test_func[param]`` when that function is parametrized.
+    """
+    if node_id in targets:
+        return True
+    bracket = node_id.find("[")
+    return bracket > 0 and node_id[:bracket] in targets
+
+
 def filter_collectable_node_ids(targets: Sequence[str], *, marker: str | None) -> tuple[str, ...]:
-    """Return collectable node ids; drop stale ids instead of failing the batch."""
+    """Return collectable node ids; drop stale ids instead of failing the batch.
+
+    A requested function id expands to the parametrized node ids pytest collects.
+    """
     if not targets:
         return ()
     if not all("::" in target for target in targets):
@@ -220,7 +246,7 @@ def filter_collectable_node_ids(targets: Sequence[str], *, marker: str | None) -
     batch_ids = _node_ids_from_collect(proc)
     if batch_ids:
         target_set = frozenset(targets)
-        return tuple(node_id for node_id in batch_ids if node_id in target_set)
+        return tuple(node_id for node_id in batch_ids if _node_id_matches_target(node_id, target_set))
 
     not_found = _parse_not_found_node_ids(proc.stderr or "")
     if not_found:

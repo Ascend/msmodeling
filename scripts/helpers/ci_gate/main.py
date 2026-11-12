@@ -56,7 +56,9 @@ from scripts.helpers.ci_gate.models import (
     TestRunWave,
 )
 from scripts.helpers.ci_gate.policy import (
+    impact_tests_for_paths,
     is_test_exempt,
+    paths_matching_impact_rules,
     validate_gate_policy_if_changed,
 )
 from scripts.helpers.ci_gate.policy_drift import gate_exemption_drift, iter_rename_pairs
@@ -235,11 +237,28 @@ def build_ci_gate_plan(
 ) -> CiGatePlan:
     test_map = baseline.test_map
     roots = baseline.roots
-    full_suite = bool(changes.config)
+    changed_paths = changes.changed_paths or tuple(
+        dict.fromkeys(
+            (
+                *changes.config,
+                *changes.new_test,
+                *changes.del_test,
+                *changes.modified_test,
+                *changes.new_source,
+                *changes.del_source,
+                *(path for path, _lines in changes.modified_source),
+                *changes.unscoped_python,
+            )
+        )
+    )
+    impact_tests = impact_tests_for_paths(changed_paths, baseline.policy)
+    matched_paths = paths_matching_impact_rules(changes.new_source, baseline.policy)
+    unclassified_new_sources = set(_product_paths(changes.new_source, roots)) - matched_paths
+    full_suite = bool(changes.config or unclassified_new_sources)
 
     deleted_source_tests: frozenset[str] = frozenset()
     changed_test_nodes: frozenset[str] = frozenset()
-    regression_tests: frozenset[str] = frozenset()
+    regression_tests: frozenset[str] = impact_tests
 
     if _product_paths(changes.del_source, roots):
         step = deleted_source_step if deleted_source_step is not None else gate_deleted_source(changes, test_map, roots)
@@ -268,7 +287,7 @@ def build_ci_gate_plan(
                 check_mapping=False,
             )
         )
-        regression_tests = mod_step.tests - deleted_source_tests
+        regression_tests = regression_tests | (mod_step.tests - deleted_source_tests)
 
     return CiGatePlan(
         deleted_source_tests=deleted_source_tests,
@@ -353,9 +372,12 @@ def _run_pytest(
             len(targets),
             marker,
         )
-        collectable_set = frozenset(filter_collectable_node_ids(targets, marker=marker))
-        collectable = [target for target in targets if target in collectable_set]
-        skipped = [target for target in targets if target not in collectable_set]
+        collectable = list(filter_collectable_node_ids(targets, marker=marker))
+        skipped = [
+            target
+            for target in targets
+            if not any(node_id == target or node_id.startswith(f"{target}[") for node_id in collectable)
+        ]
         if skipped:
             logger.info("Skipping non-collectable pytest node(s): %s", ", ".join(skipped))
         if not collectable:

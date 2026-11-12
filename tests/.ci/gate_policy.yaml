@@ -24,6 +24,27 @@ configs:
     - "tests/**/conftest.py"
   exclude: []
 
+impact_rules:
+  - id: op-replay-registry-consistency
+    paths:
+      - "tools/perf_data_collection/op_replay/**/*_run.py"
+      - "tools/perf_data_collection/op_microbench/adapters.py"
+    tests:
+      - "tests/regression/cli/test_run_op_microbench.py::test_registered_adapters_reference_existing_op_replay_scripts"
+    reason: "Replay scripts and ADAPTERS must remain consistent."
+
+  - id: cli-web-ui-schema-consistency
+    paths:
+      - "cli/registry/**/*.py"
+      - "web_ui/backend/services/ui_props/**/*.py"
+      - "web_ui/backend/services/json_adapter.py"
+    tests:
+      - "tests/regression/web_ui/test_integrity.py::test_all_fields_have_ui_props"
+      - "tests/regression/web_ui/test_integrity.py::test_validator_has_ui_entry"
+      - "tests/regression/web_ui/test_integrity.py::test_validator_ui_fields_exist"
+      - "tests/regression/web_ui/test_integrity.py::test_ui_choices_is_subset_of_param_choices"
+    reason: "CLI registry fields, validators, and Web UI metadata must remain consistent."
+
 exemptions:
   sources:
     - symbols:

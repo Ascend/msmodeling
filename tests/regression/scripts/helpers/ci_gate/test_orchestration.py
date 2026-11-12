@@ -146,6 +146,47 @@ def test_run_pytest_node_targets_filter_via_collect_only(
     assert captured["build_marker"] == "not npu"
 
 
+def test_run_pytest_runs_expanded_parametrized_node_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    parent = "tests/regression/web_ui/test_integrity.py::test_all_fields_have_ui_props"
+    expanded = (f"{parent}[text_generate]", f"{parent}[throughput_optimizer]")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.filter_collectable_node_ids",
+        lambda *_args, **_kwargs: expanded,
+    )
+
+    def _fake_build(
+        _python: str,
+        run_targets: list[str],
+        *,
+        marker: str,
+        collected_count: int,
+        **_kwargs: object,
+    ) -> list[str]:
+        captured["run_targets"] = list(run_targets)
+        captured["collected_count"] = collected_count
+        captured["build_marker"] = marker
+        return ["pytest"]
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.build_pytest_cmd", _fake_build)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main._execute_pytest",
+        lambda *_args, **_kwargs: FakeCompleted(0, "", ""),
+    )
+
+    with caplog.at_level(logging.INFO, logger="ci_gate"):
+        code = _run_pytest([parent], marker="not npu and not nightly and not network")
+
+    assert code == 0
+    assert captured["run_targets"] == list(expanded)
+    assert captured["collected_count"] == 2
+    assert "Skipping non-collectable" not in caplog.text
+
+
 def test_run_pytest_stale_node_targets_skip_wave(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

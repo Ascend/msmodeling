@@ -127,6 +127,7 @@ def test_classify_changes_rename_product_is_delete_plus_add() -> None:
     )
     assert result.del_source == ("tensor_cast/foo.py",)
     assert result.new_source == ("tensor_cast/bar.py",)
+    assert result.changed_paths == ("tensor_cast/bar.py", "tensor_cast/foo.py")
 
 
 def test_expand_rename_partial_adds_modified_lines() -> None:

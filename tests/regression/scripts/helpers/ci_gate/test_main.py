@@ -38,6 +38,7 @@ from scripts.helpers.ci_gate.models import (
     Baseline,
     ChangeSet,
     CiGatePolicy,
+    ImpactRule,
     SourceExemption,
     TestExemption,
 )
@@ -157,6 +158,45 @@ def test_plan_modified_source_selects_regression_tests(baseline: Baseline, tmp_p
     cs = ChangeSet.build(modified_source={"cli/main.py": frozenset({2})})
     plan = build_ci_gate_plan(tmp_path, cs, baseline)
     assert "tests/regression/cli/test_run.py::test_run" in plan.regression_tests
+
+
+def test_plan_structural_impact_rule_selects_test(baseline: Baseline) -> None:
+    policy = baseline.policy.__class__(
+        sources=baseline.policy.sources,
+        tests=baseline.policy.tests,
+        configs=baseline.policy.configs,
+        source_exemptions=baseline.policy.source_exemptions,
+        test_exemptions=baseline.policy.test_exemptions,
+        approvers=baseline.policy.approvers,
+        impact_rules=(
+            ImpactRule(
+                id="op-replay-registry",
+                paths=("tools/perf_data_collection/op_replay/**/*_run.py",),
+                tests=("tests/regression/cli/test_run_op_microbench.py::test_registry",),
+                reason="registry must match scripts",
+            ),
+        ),
+    )
+    cs = ChangeSet.build(
+        new_source=("tools/perf_data_collection/op_replay/NewOp_run.py",),
+        changed_paths=("tools/perf_data_collection/op_replay/NewOp_run.py",),
+    )
+
+    plan = build_ci_gate_plan(Path("/tmp"), cs, Baseline(test_map=baseline.test_map, policy=policy))
+
+    assert plan.full_suite is False
+    assert plan.regression_tests == frozenset({"tests/regression/cli/test_run_op_microbench.py::test_registry"})
+
+
+def test_plan_unclassified_new_source_falls_back_to_full_suite(baseline: Baseline) -> None:
+    cs = ChangeSet.build(
+        new_source=("tools/new_unmapped_module.py",),
+        changed_paths=("tools/new_unmapped_module.py",),
+    )
+
+    plan = build_ci_gate_plan(Path("/tmp"), cs, baseline)
+
+    assert plan.full_suite is True
 
 
 def test_plan_deleted_source_selects_guard_tests(baseline: Baseline) -> None:

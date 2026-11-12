@@ -32,6 +32,7 @@ from scripts.helpers._config import ConfigError
 from scripts.helpers.ci_gate.models import (
     CiGatePolicy,
     ExpiredExemptionReport,
+    ImpactRule,
     PathPatterns,
     SourceExemption,
     TestDiscovery,
@@ -102,11 +103,40 @@ class ExemptionsDoc(BaseModel):
     tests: list[TestExemptionDoc] = Field(default_factory=list)
 
 
+class ImpactRuleDoc(BaseModel):
+    id: str
+    paths: list[str]
+    tests: list[str]
+    reason: str
+
+    @field_validator("id", "reason")
+    @classmethod
+    def non_empty_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value
+
+    @field_validator("paths")
+    @classmethod
+    def valid_paths(cls, value: list[str]) -> list[str]:
+        return _validate_pattern_list(value)
+
+    @field_validator("tests")
+    @classmethod
+    def valid_tests(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("must not be empty")
+        for test_id in value:
+            _parse_test_exemption_id(test_id, label="impact rule test id")
+        return value
+
+
 class GatePolicyDoc(BaseModel):
     schema_version: int | None = None
     roots: list[str]
     tests: ScopeDoc
     configs: ScopeDoc
+    impact_rules: list[ImpactRuleDoc] = Field(default_factory=list)
     exemptions: ExemptionsDoc = Field(default_factory=ExemptionsDoc)
 
     @field_validator("roots")
@@ -132,6 +162,14 @@ class GatePolicyDoc(BaseModel):
                 file_part = raw.split("::", 1)[0]
                 if not is_gate_test_path(file_part, _patterns_to_discovery(tests)):
                     raise ValueError(f"test exemption file {file_part!r} is not a collectible test module")
+        ids = [rule.id for rule in self.impact_rules]
+        if len(ids) != len(set(ids)):
+            raise ValueError("impact rule ids must be unique")
+        for rule in self.impact_rules:
+            for test_id in rule.tests:
+                file_part = test_id.split("::", 1)[0]
+                if not is_gate_test_path(file_part, _patterns_to_discovery(tests)):
+                    raise ValueError(f"impact rule test file {file_part!r} is not a collectible test module")
         return self
 
 
@@ -287,6 +325,33 @@ def _validate_loaded_exemptions(repo_root: Path, policy: CiGatePolicy, doc: Gate
         raise ConfigError("\n".join(errors))
 
 
+def _impact_rule_node_collected(test_id: str, collected_nodes: frozenset[str]) -> bool:
+    if test_id in collected_nodes:
+        return True
+    prefix = f"{test_id}["
+    return any(node_id.startswith(prefix) for node_id in collected_nodes)
+
+
+def _validate_loaded_impact_rules(repo_root: Path, policy: CiGatePolicy) -> None:
+    rules = tuple((rule, test_id) for rule in policy.impact_rules for test_id in rule.tests)
+    if not rules:
+        return
+    test_files = tuple(dict.fromkeys(test_id.split("::", 1)[0] for _rule, test_id in rules))
+    missing = [path for path in test_files if not (repo_root / path).is_file()]
+    if missing:
+        raise ConfigError(f"impact rule test file does not exist: {missing[0]}")
+    from scripts.helpers.common.pytest_runner import collect_all_test_node_ids
+
+    collected_nodes = frozenset(collect_all_test_node_ids(test_files, root=repo_root))
+    unknown = [
+        f"impact rule {rule.id!r} test {test_id!r} is not a collectible test node ({rule.reason})"
+        for rule, test_id in rules
+        if not _impact_rule_node_collected(test_id, collected_nodes)
+    ]
+    if unknown:
+        raise ConfigError("\n".join(unknown))
+
+
 def _missing_test_exemption_nodes(
     repo_root: Path,
     doc: GatePolicyDoc,
@@ -300,20 +365,20 @@ def _missing_test_exemption_nodes(
     return False
 
 
-def _parse_test_exemption_id(raw: str) -> str:
+def _parse_test_exemption_id(raw: str, *, label: str = "test exemption id") -> str:
     if "[" in raw:
-        raise ValueError(f"test exemption id must not contain '[': {raw!r}")
+        raise ValueError(f"{label} must not contain '[': {raw!r}")
     if not raw.startswith("tests/") or "::" not in raw:
-        raise ValueError(f"invalid test exemption id: {raw!r}")
+        raise ValueError(f"invalid {label}: {raw!r}")
     file_part, node_part = raw.split("::", 1)
     if "::" in file_part:
-        raise ValueError(f"invalid test exemption id: {raw!r}")
+        raise ValueError(f"invalid {label}: {raw!r}")
     if node_part.count("::") > 1:
-        raise ValueError(f"invalid test exemption id: {raw!r}")
+        raise ValueError(f"invalid {label}: {raw!r}")
     if not file_part.endswith(".py") or not node_part:
-        raise ValueError(f"invalid test exemption id: {raw!r}")
+        raise ValueError(f"invalid {label}: {raw!r}")
     if _CLASS_ONLY_TEST_NODE.match(node_part):
-        raise ValueError("test exemption id must target a test function or method, not a class")
+        raise ValueError(f"{label} must target a test function or method, not a class")
     return raw
 
 
@@ -376,6 +441,10 @@ def _doc_to_policy(doc: GatePolicyDoc, approvers: frozenset[str]) -> CiGatePolic
         sources=PathPatterns(include_patterns=roots, exclude_patterns=()),
         tests=_scope_to_patterns(doc.tests),
         configs=_scope_to_patterns(doc.configs),
+        impact_rules=tuple(
+            ImpactRule(id=rule.id, paths=tuple(rule.paths), tests=tuple(rule.tests), reason=rule.reason)
+            for rule in doc.impact_rules
+        ),
         source_exemptions=_expand_source_exemptions(doc.exemptions.sources, roots),
         test_exemptions=_expand_test_exemptions(doc.exemptions.tests),
         approvers=approvers,
@@ -431,6 +500,7 @@ def _load_gate_policy_uncached(repo_root: Path) -> CiGatePolicy:
     policy_doc = _load_policy_doc(policy_path)
     policy = _doc_to_policy(policy_doc, frozenset(approvers_doc.approvers))
     _validate_loaded_exemptions(repo_root, policy, policy_doc)
+    _validate_loaded_impact_rules(repo_root, policy)
     return policy
 
 
@@ -489,6 +559,26 @@ def matches_path_patterns(path: str, patterns: PathPatterns) -> bool:
     if bool(exclude_spec.match_file(path)):
         return False
     return bool(include_spec.match_file(path))
+
+
+def impact_tests_for_paths(paths: tuple[str, ...], policy: CiGatePolicy) -> frozenset[str]:
+    """Return tests declared for structural dependencies matching changed paths."""
+    selected: set[str] = set()
+    for rule in policy.impact_rules:
+        spec = pathspec.PathSpec.from_lines("gitignore", rule.paths)
+        if any(spec.match_file(path) for path in paths):
+            selected.update(rule.tests)
+    return frozenset(selected)
+
+
+def paths_matching_impact_rules(paths: tuple[str, ...], policy: CiGatePolicy) -> frozenset[str]:
+    """Return changed paths covered by at least one structural impact rule."""
+    matched: set[str] = set()
+    specs = tuple(pathspec.PathSpec.from_lines("gitignore", rule.paths) for rule in policy.impact_rules)
+    for path in paths:
+        if any(spec.match_file(path) for spec in specs):
+            matched.add(path)
+    return frozenset(matched)
 
 
 def is_gate_test_path(path: str, discovery: TestDiscovery) -> bool:

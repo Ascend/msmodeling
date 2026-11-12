@@ -38,6 +38,16 @@ class TestDiscovery:
 
 
 @dataclass(frozen=True, slots=True)
+class ImpactRule:
+    """Tests selected when a changed path matches a structural dependency."""
+
+    id: str
+    paths: tuple[str, ...]
+    tests: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class SourceExemption:
     file: str
     symbol: str
@@ -80,6 +90,7 @@ class CiGatePolicy:
     source_exemptions: tuple[SourceExemption, ...]
     test_exemptions: tuple[TestExemption, ...]
     approvers: frozenset[str]
+    impact_rules: tuple[ImpactRule, ...] = ()
 
     @property
     def roots(self) -> tuple[str, ...]:
@@ -114,6 +125,7 @@ class ChangeSet:
     modified_source: tuple[tuple[str, frozenset[int]], ...]
     modified_test: tuple[str, ...] = ()
     unscoped_python: tuple[str, ...] = ()
+    changed_paths: tuple[str, ...] = ()
 
     @classmethod
     def build(
@@ -127,6 +139,7 @@ class ChangeSet:
         modified_source: dict[str, frozenset[int]] | None = None,
         modified_test: tuple[str, ...] = (),
         unscoped_python: tuple[str, ...] = (),
+        changed_paths: tuple[str, ...] = (),
     ) -> ChangeSet:
         mod = tuple(sorted((path, lines) for path, lines in (modified_source or {}).items()))
         return cls(
@@ -138,6 +151,7 @@ class ChangeSet:
             modified_source=mod,
             modified_test=modified_test,
             unscoped_python=unscoped_python,
+            changed_paths=changed_paths,
         )
 
 

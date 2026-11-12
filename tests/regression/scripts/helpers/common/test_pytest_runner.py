@@ -18,7 +18,9 @@
 
 from __future__ import annotations
 
+import ast
 import os
+from pathlib import Path
 
 import pytest
 
@@ -246,6 +248,41 @@ def test_filter_collectable_node_ids_exit_four_unparseable_stderr_raises(
     monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
     with pytest.raises(ConfigError, match="unparseable stderr"):
         filter_collectable_node_ids(("tests/regression/cli/test_a.py::test_a",), marker="not npu")
+
+
+def test_filter_collectable_node_ids_expands_parametrized_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = "tests/regression/web_ui/test_integrity.py::test_all_fields_have_ui_props"
+    expanded = f"{parent}[text_generate]"
+    unrelated = "tests/regression/web_ui/test_integrity.py::test_other[text_generate]"
+
+    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
+        del cmd
+        return FakeCompleted(0, f"{expanded}\n{unrelated}\n", "")
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
+    assert filter_collectable_node_ids((parent,), marker="not npu") == (expanded,)
+
+
+def test_web_ui_integrity_targets_are_parametrized() -> None:
+    path = Path("tests/regression/web_ui/test_integrity.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    parametrized = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(dec, ast.Call) and getattr(dec.func, "attr", None) == "parametrize"
+            for dec in node.decorator_list
+        )
+    }
+    assert parametrized == {
+        "test_all_fields_have_ui_props",
+        "test_validator_has_ui_entry",
+        "test_validator_ui_fields_exist",
+        "test_ui_choices_is_subset_of_param_choices",
+    }
 
 
 def test_filter_collectable_node_ids_exit_five_returns_empty(

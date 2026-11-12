@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 from scripts.helpers._config import ConfigError
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.ci_gate.policy import (
+    impact_tests_for_paths,
     is_gate_test_path,
     is_policy_config_path,
     load_gate_policy,
@@ -71,6 +72,80 @@ def test_load_gate_policy_reads_sources_tests_configs(tmp_path: Path) -> None:
     assert policy.roots == DEFAULT_GATE_ROOTS
     assert policy.tests.include_patterns[0].startswith("tests/")
     assert policy.configs.include_patterns == DEFAULT_CONFIG_INCLUDE
+
+
+def test_repository_policy_maps_cli_registry_changes_to_web_ui_integrity_tests() -> None:
+    policy = load_gate_policy(REPO_ROOT)
+
+    selected = impact_tests_for_paths(("cli/registry/modules/text_generate.py",), policy)
+
+    assert "tests/regression/web_ui/test_integrity.py::test_all_fields_have_ui_props" in selected
+    assert "tests/regression/web_ui/test_integrity.py::test_validator_has_ui_entry" in selected
+
+
+def test_load_gate_policy_reads_structural_impact_rules(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _write_gate_policy(repo)
+    policy_path = repo / "tests" / ".ci" / "gate_policy.yaml"
+    raw = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    raw["impact_rules"] = [
+        {
+            "id": "registry-consistency",
+            "paths": ["tools/plugins/**/*.py"],
+            "tests": ["tests/regression/cli/test_plugins.py::test_registry"],
+            "reason": "plugins must be registered",
+        }
+    ]
+    policy_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    test_file = repo / "tests" / "regression" / "cli" / "test_plugins.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("def test_registry():\n    pass\n", encoding="utf-8")
+
+    policy = load_gate_policy(repo)
+
+    assert impact_tests_for_paths(("tools/plugins/new.py",), policy) == frozenset(
+        {"tests/regression/cli/test_plugins.py::test_registry"}
+    )
+
+
+def test_load_gate_policy_rejects_unknown_impact_rule_node(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _write_gate_policy(repo)
+    policy_path = repo / "tests" / ".ci" / "gate_policy.yaml"
+    raw = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    raw["impact_rules"] = [
+        {
+            "id": "registry-consistency",
+            "paths": ["tools/plugins/**/*.py"],
+            "tests": ["tests/regression/cli/test_plugins.py::test_missing_node"],
+            "reason": "plugins must be registered",
+        }
+    ]
+    policy_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    test_file = repo / "tests" / "regression" / "cli" / "test_plugins.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("def test_registry():\n    pass\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="is not a collectible test node"):
+        load_gate_policy(repo)
+
+
+def test_load_gate_policy_rejects_duplicate_impact_rule_ids(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _write_gate_policy(repo)
+    policy_path = repo / "tests" / ".ci" / "gate_policy.yaml"
+    raw = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    rule = {
+        "id": "duplicate",
+        "paths": ["tools/plugins/**/*.py"],
+        "tests": ["tests/regression/cli/test_plugins.py::test_registry"],
+        "reason": "plugins must be registered",
+    }
+    raw["impact_rules"] = [rule, rule]
+    policy_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="impact rule ids must be unique"):
+        load_gate_policy(repo)
 
 
 def test_load_gate_policy_requires_roots(tmp_path: Path) -> None:
