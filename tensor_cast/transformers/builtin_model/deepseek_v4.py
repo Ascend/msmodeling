@@ -50,6 +50,18 @@ _LAYER_TYPE_TO_RATIO = {value: key for key, value in _RATIO_TO_LAYER_TYPE.items(
 logger = logging.getLogger(__name__)
 
 
+_UNQUANTIZED_LINEAR_PATTERNS = (r"re:.*self_attn(?:\._inner)?\.o_proj$",)
+
+
+def resolve_deepseek_v4_quant_config(quant_config):
+    """Keep DeepSeek-V4 ``wo_b`` aligned with the deployed BF16 module policy."""
+    excluded = quant_config.modules_to_not_convert
+    for pattern in _UNQUANTIZED_LINEAR_PATTERNS:
+        if pattern not in excluded:
+            excluded.append(pattern)
+    return quant_config
+
+
 def make_v41_identity_pre_mix(hidden_states: torch.Tensor, hc_mult: int) -> torch.Tensor:
     """Initialize V4.1 HC routing so the first attention reads stream zero."""
     pre_mix = torch.zeros(*hidden_states.shape[:-2], int(hc_mult), dtype=torch.float32, device=hidden_states.device)
@@ -117,6 +129,7 @@ register_model_profile(
         mla_field_names_override=MlaFieldNames(kv_b_proj=None),
         mla_module_class_type=DeepseekV4SparseAttention,
         patch_method=patch_method_for_deepseek_v4,
+        quant_config_resolver=resolve_deepseek_v4_quant_config,
         moe_gate_router=route_deepseek_v4_gate,
     )
 )

@@ -48,6 +48,16 @@ from ..transformers.utils import AutoModelConfigLoader
 logger = logging.getLogger(__name__)
 
 
+def _resolve_model_quant_config(model_type: str | None, quant_config: QuantConfig) -> QuantConfig:
+    """Apply the model profile's quantization overrides, when present."""
+    profile = get_model_profile(model_type) if model_type else None
+    resolver = getattr(profile, "quant_config_resolver", None)
+    if resolver is None:
+        return quant_config
+    resolved = resolver(quant_config)
+    return quant_config if resolved is None else resolved
+
+
 def _resolve_text_config(hf_config):
     """Return a nested text config when the HF config exposes one."""
     get_text_config = getattr(hf_config, "get_text_config", None)
@@ -143,9 +153,10 @@ class ConfigResolver:
         Raises:
             ValueError: If user_input is None and either parallel_config or quant_config is None.
         """
-        self.model_id = model_id or user_input.model_id
+        self.model_id = model_id or (user_input.model_id if user_input is not None else "")
         auto_loader = AutoModelConfigLoader()
-        self.hf_config = auto_loader.load_config(self.model_id, remote_source=user_input.remote_source)
+        load_config_kwargs = {"remote_source": user_input.remote_source} if user_input is not None else {}
+        self.hf_config = auto_loader.load_config(self.model_id, **load_config_kwargs)
         self.user_input = user_input
 
         if user_input is not None:
@@ -154,6 +165,7 @@ class ConfigResolver:
         else:
             if parallel_config is None or quant_config is None:
                 raise ValueError("When the user input is None,quant_config and parallel_config can not be None")
+        quant_config = _resolve_model_quant_config(getattr(self.hf_config, "model_type", None), quant_config)
 
         self.model_config = ModelConfig(
             parallel_config,

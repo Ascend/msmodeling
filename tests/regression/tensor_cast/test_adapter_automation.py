@@ -1484,6 +1484,12 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
         self.assertFalse(report.passed)
         self.assertIn("mla_field_names_override", {issue.field for issue in report.issues})
 
+    def test_profile_validation_rejects_non_callable_quant_config_resolver(self):
+        report = validate_profile(ModelProfile(model_type="invalid_quant_resolver", quant_config_resolver="invalid"))
+
+        self.assertFalse(report.passed)
+        self.assertIn("quant_config_resolver", {issue.field for issue in report.issues})
+
     def test_register_model_profile_rejects_empty_model_type(self):
         with self.assertRaises(ValueError):
             register_model_profile(ModelProfile(model_type=""))

@@ -1543,10 +1543,13 @@ class TestDeepseekV4MlaHooks(unittest.TestCase):
         assert "model.layers.*.self_attn.indexer.weights_proj" in plan
 
     def test_build_o_proj_tp_plan_extras_registers_v4_projections(self):
-        params = {"tp_group": MagicMock(), "global_tp_group": MagicMock()}
+        params = {"tp_group": MagicMock(), "global_tp_group": MagicMock(), "disable_tp": True}
         plan = DeepseekV4SparseAttention.build_o_proj_tp_plan_extras("model.layers", params, MagicMock())
         assert "model.layers.*.self_attn.wo_a" in plan
         assert "model.layers.*.self_attn.o_proj" not in plan
+        parallel_type, o_proj_params = plan["model.layers.*.o_proj"]
+        assert parallel_type == "rowwise"
+        assert o_proj_params["disable_tp"] is False
 
     def test_v4_attention_wrapper_skips_legacy_kv_b_setup(self):
         inner = TestDeepseekV4SparseAttention()._create_mock_inner_module(ratio=4, use_indexer=True)
@@ -1577,6 +1580,58 @@ class TestDeepseekV4BuiltinModelRegistration(unittest.TestCase):
         mla_config = profile.build_mla_config()
         assert mla_config is not None
         assert mla_config.field_names.kv_b_proj is None
+
+    def test_model_profile_keeps_wo_b_unquantized(self):
+        from tensor_cast.core.quantization.config import create_quant_config
+        from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
+        from tensor_cast.layers.quant_linear import TensorCastQuantLinear
+        from tensor_cast.quantize_utils import LinearQuantType, quantize_linear_modules
+        from tensor_cast.transformers.custom_model_registry import get_model_profile
+
+        profile = get_model_profile("deepseek_v4")
+        quant_config = create_quant_config(
+            quantize_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            quantize_non_expert_linear_action=QuantizeLinearAction.W8A8_DYNAMIC,
+        )
+
+        resolved = profile.quant_config_resolver(quant_config)
+        profile.quant_config_resolver(resolved)
+
+        pattern = r"re:.*self_attn(?:\._inner)?\.o_proj$"
+        assert pattern in resolved.modules_to_not_convert
+        assert resolved.modules_to_not_convert.count(pattern) == 1
+        assert "*.self_attn.q_a_proj" not in resolved.modules_to_not_convert
+
+        layer = nn.Module()
+        layer.self_attn = nn.Module()
+        layer.self_attn.q_a_proj = nn.Linear(16, 8, bias=False)
+        layer.self_attn.o_proj = nn.Linear(8, 16, bias=False)
+        layer.mlp = nn.Module()
+        layer.mlp.experts = nn.ModuleList([nn.Module()])
+        layer.mlp.experts[0].down_proj = nn.Linear(8, 16, bias=False)
+        root = nn.Module()
+        root.layers = nn.ModuleList([layer])
+        mtp_block = nn.Module()
+        mtp_block.self_attn = nn.Module()
+        mtp_block.self_attn.o_proj = nn.Linear(8, 16, bias=False)
+        mtp_block.self_attn._inner = nn.Module()
+        mtp_block.self_attn._inner.o_proj = nn.Linear(8, 16, bias=False)
+        mtp_layer = nn.Module()
+        mtp_layer.mtp_block = mtp_block
+        root.mtp = nn.Module()
+        root.mtp.layers = nn.ModuleList([mtp_layer])
+
+        quantize_linear_modules(root, TensorCastQuantLinear, resolved, default_config_name=None, strip_module_fn=None)
+
+        assert isinstance(root.layers[0].self_attn.o_proj, nn.Linear)
+        assert isinstance(root.mtp.layers[0].mtp_block.self_attn.o_proj, nn.Linear)
+        assert isinstance(root.mtp.layers[0].mtp_block.self_attn._inner.o_proj, nn.Linear)
+        assert not isinstance(root.mtp.layers[0].mtp_block.self_attn.o_proj, TensorCastQuantLinear)
+        assert not isinstance(root.mtp.layers[0].mtp_block.self_attn._inner.o_proj, TensorCastQuantLinear)
+        assert isinstance(root.layers[0].self_attn.q_a_proj, TensorCastQuantLinear)
+        assert root.layers[0].self_attn.q_a_proj.quant_config.quant_type == LinearQuantType.W8A8
+        assert isinstance(root.layers[0].mlp.experts[0].down_proj, TensorCastQuantLinear)
+        assert root.layers[0].mlp.experts[0].down_proj.quant_config.quant_type == LinearQuantType.W4A8
 
     def test_config_normalize_methods(self):
         """Test config normalization methods."""

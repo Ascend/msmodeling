@@ -95,6 +95,49 @@ def test_deepseek_v4_theory_uses_packed_token_layout() -> None:
     assert outputs["theory:output:lm_head:lm_head_select"] == (1, 3, 4096)
 
 
+def test_deepseek_v4_theory_keeps_o_projection_input_unquantized() -> None:
+    base = _deepseek_v4_context()
+    context = replace(
+        base,
+        phase=ExecutionPhase.DECODE,
+        batch_size=1,
+        query_length=3,
+        context_length=128,
+        model_config={**base.model_config, "num_mtp_tokens": 2},
+        quantization_config={
+            "enabled": True,
+            "action": "W8A8_DYNAMIC",
+            "linear_input_dtype": "int8",
+        },
+    )
+    spec = create_model_diagnostics_application().spec_provider.get(context)
+    regions = build_theory_regions(
+        context,
+        spec,
+        selected_layers={"language": (0,), "mtp": (0,)},
+        selected_stage_regions=(),
+    )
+    calls = {call.source_reference: call for call in flatten_theory_calls(regions)}
+
+    q_a_input = next(
+        tensor.dtype
+        for tensor in calls["theory:language:L0:attention_preproj:q_a_projection"].tensors
+        if tensor.slot == INPUT[0]
+    )
+    o_projection_input = next(
+        tensor.dtype
+        for tensor in calls["theory:language:L0:attention_o:o_projection"].tensors
+        if tensor.slot == INPUT[0]
+    )
+    mtp_o_projection_input = next(
+        tensor.dtype for tensor in calls["theory:mtp:L0:attention_o:o_projection"].tensors if tensor.slot == INPUT[0]
+    )
+
+    assert q_a_input == "int8"
+    assert o_projection_input == "bfloat16"
+    assert mtp_o_projection_input == "bfloat16"
+
+
 def test_deepseek_v4_theory_selects_compression_stages_by_layer_type() -> None:
     base = _deepseek_v4_context()
     context = replace(

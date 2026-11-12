@@ -161,7 +161,9 @@ stages:
           OUTPUT[0]: {shape: "[Log, T, Or / Log]", dtype: ACT}
       - name: o_projection
         tensors:
-          INPUT[0]: {shape: "[T, Or]", dtype: LINEAR_IN}
+          # DeepSeek-V4 keeps wo_b/o_proj in the model activation dtype even
+          # when the other linear modules use W8A8/W4A8 quantization.
+          INPUT[0]: {shape: "[T, Or]", dtype: ACT}
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [bmm]

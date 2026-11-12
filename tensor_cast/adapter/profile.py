@@ -175,6 +175,8 @@ def validate_profile(profile: Any) -> ProfileValidationReport:
 
     if profile.patch_method is not None and not callable(profile.patch_method):
         issues.append(ProfileValidationIssue("patch_method", "must be callable"))
+    if profile.quant_config_resolver is not None and not callable(profile.quant_config_resolver):
+        issues.append(ProfileValidationIssue("quant_config_resolver", "must be callable"))
     if profile.custom_expert_module_type is not None and not callable(profile.custom_expert_module_type):
         issues.append(ProfileValidationIssue("custom_expert_module_type", "must be callable"))
 

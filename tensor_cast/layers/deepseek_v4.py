@@ -20,7 +20,7 @@ from ..model_config import MlaConfig
 from ..parallel_group import ParallelGroup, ParallelGroupManager
 from ..utils import exact_division
 from .attention import AttentionMetadataBase
-from . import COLWISE_LINEAR
+from . import COLWISE_LINEAR, ROWWISE_LINEAR
 from .mla import (
     DeepseekSparseAttention,
     MultiheadLatentAttentionTensorCast,
@@ -388,9 +388,15 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
 
     @classmethod
     def build_o_proj_tp_plan_extras(cls, prefix: str, params: dict, config_info) -> dict[str, tuple[str, dict]]:
-        from .mla import tp_plan_module_path
+        from .mla import tp_plan_module_path, tp_plan_nested_module_path
 
         return {
+            # V4's grouped wo_a emits an o-proj-TP-local activation.  Keep wo_b
+            # row-sharded even when generic DSA context parallelism is enabled.
+            tp_plan_nested_module_path(prefix, "o_proj"): (
+                ROWWISE_LINEAR,
+                {**dict(params), "disable_tp": False},
+            ),
             tp_plan_module_path(prefix, "self_attn.wo_a"): (COLWISE_LINEAR, {**dict(params), "dim": 1}),
         }
 

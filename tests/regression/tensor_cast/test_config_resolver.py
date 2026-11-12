@@ -24,10 +24,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from tensor_cast.core.config_resolver import ConfigResolver, _resolve_model_dtype, _resolve_text_config
+from tensor_cast.core.config_resolver import (
+    ConfigResolver,
+    _resolve_model_dtype,
+    _resolve_model_quant_config,
+    _resolve_text_config,
+)
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
-from tensor_cast.model_config import ParallelConfig
+from tensor_cast.model_config import ParallelConfig, QuantConfig
 
 
 def _make_resolver(
@@ -202,6 +207,47 @@ class TextConfigResolutionTestCase(unittest.TestCase):
     def test_falls_back_to_outer_config(self):
         config = SimpleNamespace(dspark_block_size=5)
         self.assertIs(_resolve_text_config(config), config)
+
+
+class ModelQuantConfigResolutionTestCase(unittest.TestCase):
+    @patch("tensor_cast.core.config_resolver.get_model_profile")
+    def test_applies_model_profile_quant_config_resolver(self, get_profile):
+        quant_config = QuantConfig()
+        resolved_config = QuantConfig()
+        resolver = MagicMock(return_value=resolved_config)
+        get_profile.return_value = SimpleNamespace(quant_config_resolver=resolver)
+
+        result = _resolve_model_quant_config("deepseek_v4", quant_config)
+
+        resolver.assert_called_once_with(quant_config)
+        self.assertIs(result, resolved_config)
+
+    @patch("tensor_cast.core.config_resolver.get_model_profile", return_value=None)
+    def test_keeps_config_when_model_has_no_profile_override(self, _get_profile):
+        quant_config = QuantConfig()
+
+        self.assertIs(_resolve_model_quant_config("qwen3", quant_config), quant_config)
+
+    @patch("tensor_cast.core.config_resolver.get_model_profile")
+    @patch("tensor_cast.core.config_resolver.AutoModelConfigLoader")
+    def test_direct_quant_config_applies_model_profile_resolver(self, loader_cls, get_profile):
+        loader = loader_cls.return_value
+        loader.load_config.return_value = SimpleNamespace(model_type="deepseek_v4")
+        loader.is_transformers_natively_supported = True
+        source_config = QuantConfig()
+        resolved_config = QuantConfig()
+        profile_resolver = MagicMock(return_value=resolved_config)
+        get_profile.return_value = SimpleNamespace(quant_config_resolver=profile_resolver)
+
+        resolver = ConfigResolver(
+            model_id="test-model",
+            parallel_config=ParallelConfig(),
+            quant_config=source_config,
+        )
+
+        loader.load_config.assert_called_once_with("test-model")
+        profile_resolver.assert_called_once_with(source_config)
+        self.assertIs(resolver.model_config.quant_config, resolved_config)
 
 
 class DsaCpStructureTestCase(unittest.TestCase):
