@@ -19,6 +19,9 @@
 import argparse
 import csv
 import unittest
+from unittest.mock import patch
+
+import pytest
 
 from tools.perf_data_collection.op_replay import merge_shard_results
 from tools.perf_data_collection.signature_utils import canonicalize_shape_columns, get_sig
@@ -51,6 +54,7 @@ from tools.perf_data_collection.op_replay.common import (
     reset_runtime_replay_cases,
     scalar_fill_value_for_dtype,
     infer_even_split_lengths,
+    write_csv_rows,
 )
 
 
@@ -342,6 +346,64 @@ def test_repeats_use_fresh_rows_and_copy_back_only_declared_fields(tmp_path):
     with csv_path.open("r", encoding="utf-8-sig") as csv_file:
         written = list(csv.DictReader(csv_file))
     assert written == [{"Input Shapes": '"1,1"', MICROBENCH_DURATION: "2"}]
+
+
+@pytest.mark.parametrize("drop_invalid", [False, True])
+def test_replay_persists_new_duration_column_without_overwriting_profiling(tmp_path, drop_invalid):
+    target = tmp_path / "ScatterNdUpdateV2.csv"
+    rows = [{"Input Shapes": "1,2", "Profiling Average Duration(us)": "0"}]
+    if drop_invalid:
+        rows.append({"Input Shapes": "bad", "Profiling Average Duration(us)": "0"})
+    write_csv_rows(target, list(rows[0]), rows)
+
+    def measure(_path, _index, row):
+        if row["Input Shapes"].strip('"') == "bad":
+            raise ValueError("invalid replay shape")
+        row[MICROBENCH_DURATION] = "12.5"
+        row["private temporary field"] = "discard"
+
+    _, invalid, _, _ = process_replay_csvs(
+        kernel_type="ScatterNdUpdateV2",
+        csv_paths=[target],
+        repeat_count=1,
+        run_row_fn=measure,
+        copy_back_fields=(MICROBENCH_DURATION,),
+    )
+    with target.open(encoding="utf-8-sig", newline="") as handle:
+        saved = list(csv.DictReader(handle))
+    assert len(invalid) == int(drop_invalid)
+    assert saved == [{"Input Shapes": '"1,2"', "Profiling Average Duration(us)": "0", MICROBENCH_DURATION: "12.5"}]
+
+
+@pytest.mark.parametrize("duration", ["0", "-1", "nan", "inf"])
+def test_replay_rejects_invalid_direct_measurement(tmp_path, duration):
+    target = tmp_path / "Example.csv"
+    write_csv_rows(target, ["Input Shapes"], [{"Input Shapes": "1,2"}])
+    original = target.read_bytes()
+
+    def measure(_path, _index, row):
+        row[MICROBENCH_DURATION] = duration
+
+    _, failures, _, _ = process_replay_csvs(
+        kernel_type="Example",
+        csv_paths=[target],
+        repeat_count=1,
+        run_row_fn=measure,
+        copy_back_fields=(MICROBENCH_DURATION,),
+    )
+    assert len(failures) == 1
+    assert target.read_bytes() == original
+
+
+def test_atomic_csv_write_preserves_input_when_replace_fails(tmp_path):
+    target = tmp_path / "Example.csv"
+    write_csv_rows(target, ["Input Shapes"], [{"Input Shapes": "1,2"}])
+    original = target.read_bytes()
+    with patch("tools.perf_data_collection.op_replay.common.os.replace", side_effect=OSError("disk error")):
+        with pytest.raises(OSError, match="disk error"):
+            write_csv_rows(target, ["Input Shapes"], [{"Input Shapes": "3,4"}])
+    assert target.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [target]
 
 
 if __name__ == "__main__":

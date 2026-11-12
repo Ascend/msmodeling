@@ -38,6 +38,8 @@ def test_runtime_metadata_centralizes_profiler_contract():
     assert metadata.profiler_task_type == "MIX_AIC"
     assert metadata.profiler_kernel_prefix == "mla_preprocess_0_mix_aic"
     assert runtime_aware_operator_names() == {
+        "Compressor",
+        "SparseAttnSharedkv",
         "LightningIndexer",
         "SparseFlashAttention",
         "mla_preprocess_0_mix_aic",

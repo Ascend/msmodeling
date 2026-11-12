@@ -32,6 +32,7 @@ class RuntimeSignatureMode(str, Enum):
     SHAPE = "shape"
     CASE_ID = "case_id"
     ATTENTION_RUNTIME = "attention_runtime"
+    REQUEST_RUNTIME = "request_runtime"
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,14 @@ class OperatorMetadata:
 
 
 _OPERATORS = (
+    OperatorMetadata("Compressor", runtime_signature_mode=RuntimeSignatureMode.REQUEST_RUNTIME),
+    OperatorMetadata("SparseAttnSharedkv", runtime_signature_mode=RuntimeSignatureMode.REQUEST_RUNTIME),
+    OperatorMetadata("HcPre"),
+    OperatorMetadata("HcPost"),
+    OperatorMetadata("InplacePartialRotaryMul"),
+    OperatorMetadata("MoeGatingTopKHash"),
+    OperatorMetadata("ScatterNdUpdateV2"),
+    OperatorMetadata("VllmQuantLightningIndexer"),
     # --- Manual / collective adapters (not case-shardable) ---
     OperatorMetadata("DispatchFFNCombine", supports_case_sharding=False),
     OperatorMetadata("FusedInferAttentionScore", supports_case_sharding=False),

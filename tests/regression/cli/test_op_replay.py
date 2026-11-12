@@ -57,6 +57,64 @@ def test_get_replay_repeat_count_direct_coverage():
         get_replay_repeat_count(0)
 
 
+@pytest.mark.parametrize("swiglu_limit", [0.0, 10.0])
+def test_v4_grouped_replay_preserves_counts_and_uses_custom_clamped_api(monkeypatch, swiglu_limit):
+    up = import_op_replay_script("GroupedMatmulSwigluQuant_run.py")
+    down = import_op_replay_script("GroupedMatmul_run.py")
+    custom_api = object()
+    fake_torch = SimpleNamespace(
+        tensor=lambda values, **kwargs: SimpleNamespace(npu=lambda: list(values)),
+        ops=SimpleNamespace(_C_ascend=SimpleNamespace(grouped_matmul_swiglu_quant_weight_nz=custom_api)),
+    )
+    for module in (up, down):
+        monkeypatch.setattr(module, "get_runtime_modules", lambda: (fake_torch, None))
+        monkeypatch.setattr(module, "resolve_runtime_dtype", lambda value: value)
+    assert down._build_group_list_tensor(10, 3, "INT64", values=[2, 5, 3], group_list_type=1) == [2, 5, 3]
+    assert up._build_group_list_tensor(10, 3, "INT64", fake_torch, values=[2, 7, 10]) == [2, 7, 10]
+    with pytest.raises(ValueError, match="conserve"):
+        down._build_group_list_tensor(10, 3, "INT64", values=[2, 5, 2], group_list_type=1)
+    with pytest.raises(ValueError, match="cumulative"):
+        up._build_group_list_tensor(10, 3, "INT64", fake_torch, values=[2, 1, 10])
+    monkeypatch.setattr(up, "init_runtime", lambda: None)
+    monkeypatch.setattr(up, "build_input_tensor", lambda shape, *args: SimpleNamespace(shape=shape))
+    monkeypatch.setattr(up, "_build_weight_tensor", lambda *args: object())
+    monkeypatch.setattr(up, "_build_scale_tensor", lambda *args: object())
+    monkeypatch.setattr(up.op, "resolve_api", lambda: pytest.fail("V4 must resolve the custom Ascend API"))
+    case = up.build_case(
+        {
+            "Input Shapes": "10,128;3,4,8,16,32;3,128;10;3",
+            "Input Data Types": "INT8;INT8;FLOAT;FLOAT;INT64",
+            "Input Formats": "ND;FRACTAL_NZ;ND;ND;ND",
+            "Runtime grouped_contract": "ascend_v4_grouped_v1",
+            "Runtime group_list_type": "0",
+            "Runtime group_list_values": "[2,7,10]",
+            "Runtime swiglu_limit": str(swiglu_limit),
+        }
+    )
+    assert case["api"] is custom_api
+    assert case["kwargs"]["group_list"] == [2, 7, 10]
+    assert case["kwargs"]["swiglu_limit"] == swiglu_limit
+    assert case["kwargs"]["bias"] is None
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        {"Runtime swiglu_limit": "10"},
+        {"Runtime grouped_contract": "unknown", "Runtime swiglu_limit": "10"},
+        *[
+            {"Runtime grouped_contract": "ascend_v4_grouped_v1", "Runtime swiglu_limit": value}
+            for value in ("", "nan", "inf", "-1", "bad")
+        ],
+    ],
+)
+def test_v4_grouped_replay_rejects_incomplete_or_invalid_clamp_before_npu_init(monkeypatch, runtime):
+    module = import_op_replay_script("GroupedMatmulSwigluQuant_run.py")
+    monkeypatch.setattr(module, "init_runtime", lambda: pytest.fail("Invalid metadata must fail before NPU init"))
+    with pytest.raises(ValueError, match="Runtime (grouped_contract|swiglu_limit)"):
+        module.build_case(runtime)
+
+
 def test_worker_device_selection_fails_closed(monkeypatch):
     class FakeNpu:
         @staticmethod

@@ -24,6 +24,7 @@ aliases, parameter slots, and DispatchFFNCombine EP size.
 
 from __future__ import annotations
 
+import json
 import re
 
 DISPATCH_FFN_OP = "DispatchFFNCombine"
@@ -31,6 +32,21 @@ MATMUL_FAMILY_OPS = {"MatMulV2", "MatMulV3", "MatMulCommon"}
 RUNTIME_CASE_ID = "Runtime case_id"
 CASE_ID_ONLY_RUNTIME_OPS = {"mla_preprocess_0_mix_aic"}
 RUNTIME_AWARE_OPS = {"LightningIndexer", "SparseFlashAttention", *CASE_ID_ONLY_RUNTIME_OPS}
+V4_RUNTIME_OPS = {"Compressor", "SparseAttnSharedkv"}
+V4_INDEXER_RUNTIME_COLUMNS = (
+    "Runtime phase",
+    "Runtime query_lengths",
+    "Runtime kv_lengths",
+    "Runtime actual_seq_lengths_values",
+    "Runtime actual_seq_lengths_kv_values",
+)
+GROUPED_RUNTIME_OPS = {"GroupedMatmul", "GroupedMatmulSwigluQuant"}
+GROUPED_RUNTIME_SIGNATURE_COLUMNS = (
+    "Runtime grouped_contract",
+    "Runtime group_list_type",
+    "Runtime group_list_values",
+    "Runtime swiglu_limit",
+)
 FIA_OP = "FusedInferAttentionScore"
 FIA_RUNTIME_SIGNATURE_COLUMNS = (
     "Runtime actual_seq_lengths_shape",
@@ -167,6 +183,27 @@ def get_runtime_signature_context(
     resolved_op_name = normalize_op_name(
         (op_name or row.get("OP Type", "") or row.get("OP State", "") or "").strip().strip('"')
     )
+    if resolved_op_name == "VllmQuantLightningIndexer":
+        return {
+            column: str(row.get(column, "") or "").strip()
+            for column in V4_INDEXER_RUNTIME_COLUMNS
+            if str(row.get(column, "") or "").strip()
+        }
+    if resolved_op_name in GROUPED_RUNTIME_OPS:
+        context = {
+            column: (row.get(column, "") or "").strip()
+            for column in GROUPED_RUNTIME_SIGNATURE_COLUMNS
+            if (row.get(column, "") or "").strip()
+        }
+        if "Runtime swiglu_limit" in context:
+            context["Runtime swiglu_limit"] = str(float(context["Runtime swiglu_limit"]))
+        if "Runtime group_list_values" in context:
+            context["Runtime group_list_values"] = json.dumps(
+                json.loads(context["Runtime group_list_values"]), separators=(",", ":")
+            )
+        return context
+    if resolved_op_name in V4_RUNTIME_OPS:
+        return {"Runtime v4_workload": (row.get("Runtime v4_workload", "") or "").strip()}
     if resolved_op_name != FIA_OP:
         return {}
     return {
@@ -380,6 +417,20 @@ def get_sig(
     if resolved_op_name == FIA_OP:
         runtime_context = get_runtime_signature_context(row, resolved_op_name)
         vals = vals + tuple(runtime_context.get(column, "") for column in FIA_RUNTIME_SIGNATURE_COLUMNS)
+    if resolved_op_name in GROUPED_RUNTIME_OPS:
+        runtime_context = get_runtime_signature_context(row, resolved_op_name)
+        if runtime_context:
+            vals = vals + tuple(runtime_context.get(column, "") for column in GROUPED_RUNTIME_SIGNATURE_COLUMNS)
+    if resolved_op_name in V4_RUNTIME_OPS:
+        runtime = (row.get("Runtime v4_workload", "") or "").strip()
+        if runtime:
+            runtime = json.dumps(json.loads(runtime), sort_keys=True, separators=(",", ":"))
+        vals = vals + (runtime,)
+
+    if resolved_op_name == "VllmQuantLightningIndexer":
+        context = get_runtime_signature_context(row, resolved_op_name)
+        if context:
+            vals = vals + tuple(context.get(column, "") for column in V4_INDEXER_RUNTIME_COLUMNS)
 
     if resolved_op_name in RUNTIME_AWARE_OPS:
         case_id = (row.get(RUNTIME_CASE_ID, "") or "").strip()

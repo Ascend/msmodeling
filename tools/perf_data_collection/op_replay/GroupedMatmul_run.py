@@ -29,6 +29,8 @@ Usage:
 
 from __future__ import annotations
 
+import json
+
 try:
     from .common import (
         FRACTAL_NZ_FORMAT_ID,
@@ -66,16 +68,31 @@ def _build_scale_tensor(shape, dtype_name: str, input_format: str):
     return tensor
 
 
-def _build_group_list_tensor(total_tokens: int, num_groups: int, dtype_name: str):
+def _build_group_list_tensor(total_tokens: int, num_groups: int, dtype_name: str, *, values=None, group_list_type=0):
     runtime_torch, _ = get_runtime_modules()
     dtype = resolve_runtime_dtype(dtype_name)
     base = total_tokens // num_groups
     remainder = total_tokens % num_groups
+    if values is not None:
+        if (
+            not isinstance(values, list)
+            or len(values) != num_groups
+            or any(type(value) is not int or value < 0 for value in values)
+        ):
+            raise ValueError("GroupedMatmul group-list values must be nonnegative expert counts or boundaries")
+        valid = (
+            sum(values) == total_tokens
+            if group_list_type == 1
+            else (values[-1] == total_tokens and all(a <= b for a, b in zip(values, values[1:])))
+        )
+        if not valid:
+            raise ValueError("GroupedMatmul group-list does not conserve packed tokens")
+        return runtime_torch.tensor(values, dtype=dtype).npu()
     cumulative = []
     running_total = 0
     for idx in range(num_groups):
         running_total += base + (1 if idx < remainder else 0)
-        cumulative.append(running_total)
+        cumulative.append(base + (1 if idx < remainder else 0) if group_list_type == 1 else running_total)
     return runtime_torch.tensor(cumulative, dtype=dtype).npu()
 
 
@@ -100,9 +117,7 @@ def build_case(row: dict[str, str]):
     dtypes = [normalize_dtype_name(d) for d in split_metadata_field(row["Input Data Types"])]
     formats = split_metadata_field(row["Input Formats"])
     output_dtypes = [
-        normalize_dtype_name(d)
-        for d in split_metadata_field(row.get("Output Data Types", ""))
-        if d.strip()
+        normalize_dtype_name(d) for d in split_metadata_field(row.get("Output Data Types", "")) if d.strip()
     ]
 
     def _tensor(pos):
@@ -119,22 +134,23 @@ def build_case(row: dict[str, str]):
         raise ValueError("GroupedMatmul requires a non-empty weight shape")
     weight = _build_grouped_weight_tensor(weight_shape, dtypes[1], formats[1])
     scale_shape = parse_shape_or_none(shapes[3]) if len(shapes) > 3 else None
-    scale = (
-        _build_scale_tensor(scale_shape, dtypes[3], formats[3])
-        if scale_shape is not None
-        else None
-    )
+    scale = _build_scale_tensor(scale_shape, dtypes[3], formats[3]) if scale_shape is not None else None
     group_list_shape = parse_shape_or_none(shapes[7]) if len(shapes) > 7 else None
+    group_list_type = int(row.get("Runtime group_list_type") or 0)
+    if group_list_type not in (0, 1):
+        raise ValueError("GroupedMatmul replay supports count or cumulative group lists")
+    values_text = row.get("Runtime group_list_values", "")
+    values = json.loads(values_text) if values_text and str(values_text).strip().lower() != "nan" else None
     group_list = (
-        _build_group_list_tensor(x.shape[0], group_list_shape[0], dtypes[7])
+        _build_group_list_tensor(
+            x.shape[0], group_list_shape[0], dtypes[7], values=values, group_list_type=group_list_type
+        )
         if group_list_shape is not None
         else None
     )
     per_token_scale_shape = parse_shape_or_none(shapes[8]) if len(shapes) > 8 else None
     per_token_scale = (
-        _build_scale_tensor(per_token_scale_shape, dtypes[8], formats[8])
-        if per_token_scale_shape is not None
-        else None
+        _build_scale_tensor(per_token_scale_shape, dtypes[8], formats[8]) if per_token_scale_shape is not None else None
     )
 
     api = op.resolve_api()
@@ -142,7 +158,7 @@ def build_case(row: dict[str, str]):
         "x": [x],
         "weight": [weight],
         "split_item": 2,
-        "group_list_type": 0,
+        "group_list_type": group_list_type,
         "group_type": 0,
         "group_list": group_list,
     }

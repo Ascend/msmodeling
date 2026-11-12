@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import csv
 from typing import TYPE_CHECKING
 
 import pytest
@@ -101,10 +102,13 @@ def test_resolve_api_supports_nested_torch_paths(monkeypatch: pytest.MonkeyPatch
     assert resolved() == "softmax"
 
 
+@pytest.mark.parametrize("warmup_count,repeat_count", [(0, 1), (1, 3), (5, 2)])
 def test_main_replays_each_row_repeat_count_times(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    warmup_count: int,
+    repeat_count: int,
 ):
     csv_path = tmp_path / "Add.csv"
     csv_path.write_text(
@@ -116,7 +120,7 @@ def test_main_replays_each_row_repeat_count_times(
 
     monkeypatch.setattr(replay_framework, "ensure_npu_available", lambda: None)
     monkeypatch.setattr(replay_framework, "get_target_data_dir", lambda **_: tmp_path)
-    monkeypatch.setattr(replay_framework, "get_replay_repeat_count", lambda _: 3)
+    monkeypatch.setattr(replay_framework, "get_replay_repeat_count", lambda _: repeat_count)
     monkeypatch.setattr(replay_framework.OpReplay, "synchronize", lambda self: None)
 
     # run_row uses NPU event timing; patch get_runtime_modules so the test
@@ -155,14 +159,20 @@ def test_main_replays_each_row_repeat_count_times(
 
     monkeypatch.setattr(
         "sys.argv",
-        ["Add_run.py", "--database-path", str(tmp_path)],
+        ["Add_run.py", "--database-path", str(tmp_path), "--warmup-count", str(warmup_count)],
     )
 
     op.main()
 
     output = capsys.readouterr().out
-    # run_row does warmup(2) + timed(3) = 5 total run_case calls
-    assert len(calls) == 5
+    assert len(calls) == warmup_count + repeat_count
+    with csv_path.open(newline="", encoding="utf-8") as stream:
+        saved = next(csv.DictReader(stream))
+    assert float(saved["Average Duration(us)"]) == 1.0
+    assert int(saved["Microbench Warmup Count"]) == warmup_count
+    assert int(saved["Microbench Repeat Count"]) == repeat_count
+    assert float(saved["Microbench Std Duration(us)"]) == 0.0
+    assert saved["Microbench Source"] == "npu_event_mean"
     # process_repeat_count is 1 (run_row handles repeats internally), so
     # total_rows = 1 row x 1 outer repeat = 1
     assert "Processed 1 Add rows" in output
@@ -249,6 +259,18 @@ def test_runtime_row_warms_up_then_records_measurements(monkeypatch: pytest.Monk
     assert len(calls) == 5
     assert recorded[0]["warmup_count"] == 3
     assert recorded[0]["repeat_count"] == 2
+
+
+def test_grouped_runtime_case_without_explicit_id_uses_row_identity(tmp_path):
+    from tools.perf_data_collection.op_replay.replay_framework import RuntimeReplayCase
+
+    path = tmp_path / "GroupedMatmulSwigluQuant.csv"
+    row = {"Runtime grouped_contract": "ascend_v4_grouped_v1", "Runtime swiglu_limit": "10"}
+    first = RuntimeReplayCase("GroupedMatmulSwigluQuant", path, 2, row)
+    second = RuntimeReplayCase("GroupedMatmulSwigluQuant", path, 3, {**row, "Runtime swiglu_limit": "0"})
+    assert first.case_id and second.case_id and first.case_id != second.case_id
+    assert first.signature_context["Runtime swiglu_limit"] == "10.0"
+    assert RuntimeReplayCase("GroupedMatmulSwigluQuant", path, 2, {}).case_id == ""
 
 
 def test_runtime_replay_case_owns_fallback_identity_and_signature_context(

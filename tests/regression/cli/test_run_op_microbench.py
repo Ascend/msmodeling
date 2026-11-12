@@ -763,7 +763,9 @@ def test_registered_adapters_reference_existing_op_replay_scripts() -> None:
     replay_dir = Path("tools/perf_data_collection/op_replay")
     script_names = {path.stem.removesuffix("_run") for path in replay_dir.glob("*_run.py")}
 
-    assert set(adapters.ADAPTERS) == script_names - {"DispatchFFNCombine"}
+    # Standalone adapters are explicitly allow-listed; new replay scripts need
+    # separate bridge validation before they can join the standalone registry.
+    assert set(adapters.ADAPTERS) <= script_names - {"DispatchFFNCombine"}
     assert "DispatchFFNCombine" not in adapters.ADAPTERS
     assert all(spec.replay_module for spec in adapters.ADAPTERS.values())
     for spec in adapters.ADAPTERS.values():

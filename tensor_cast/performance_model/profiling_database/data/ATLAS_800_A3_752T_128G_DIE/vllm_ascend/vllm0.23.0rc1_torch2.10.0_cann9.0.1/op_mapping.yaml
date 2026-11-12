@@ -171,6 +171,7 @@ pytorch_version: "2.10.0"
 op_plugin_version: "7.4.0"
 collection_date: "2026-08-16"
 
+
 communication_data_ref: "../../hccl/v9.0.1/"
 communication_fallback: analytic
 
@@ -189,6 +190,19 @@ latency_policy:
     ScatterNdUpdate:
       prefer_profiling_rows: true
 
+    VllmQuantLightningIndexer:
+      prefer_profiling_rows: false
+    ScatterNdUpdateV2:
+      prefer_profiling_rows: false
+    SparseAttnSharedkv:
+      prefer_profiling_rows: false
+    Compressor:
+      prefer_profiling_rows: false
+    HcPre:
+      prefer_profiling_rows: false
+    HcPost:
+      prefer_profiling_rows: false
+
 query_selection_policy:
   kernel_overrides:
     FusedInferAttentionScore:
@@ -198,6 +212,17 @@ query_selection_policy:
     LightningIndexer:
       require_semantic_unique: true
     KvRmsNormRopeCache:
+      require_semantic_unique: true
+
+    SparseAttnSharedkv:
+      require_semantic_unique: true
+    VllmQuantLightningIndexer:
+      require_semantic_unique: true
+    Compressor:
+      require_semantic_unique: true
+    HcPre:
+      require_semantic_unique: true
+    HcPost:
       require_semantic_unique: true
 
 interpolation_policy:
@@ -235,6 +260,16 @@ interpolation_policy:
     Index:
       generic_compute:
         axis: output_numel
+
+    HcPost:
+      generic_compute:
+        # Residual, post weights and combine weights share the activation token axis.
+        co_varying_input_indices: [1, 2, 3]
+    AddRmsNormBias:
+      generic_compute:
+        # x and residual share the leading token axis.  Keep that axis
+        # continuous while weight/bias shapes remain strict regime fields.
+        co_varying_input_indices: [1]
 
 # ============================================================================
 # Calculate operator mapping (operator_mappings)
@@ -967,6 +1002,7 @@ operator_mappings:
   "tensor_cast.all_reduce.default":
     kernel_type: hcom_allReduce_
     category: communication
+    match_dtype: true
     notes: >
       [HIGH] HCCL direct. Profiling: Qwen3 CANN 8.5 hcom_allReduce_(7748x).
 
@@ -974,6 +1010,7 @@ operator_mappings:
     kernel_type: hcom_allGather_
     alternate_kernel_types: [allgatherAicpuKernel]
     category: communication
+    match_dtype: true
     notes: >
       [MEDIUM] HCCL direct.
       Qwen3 PF: hcom_allGather_(524x) + allgatherAicpuKernel(516x, AICPU dispatch).
@@ -995,6 +1032,8 @@ operator_mappings:
   "tensor_cast.all_to_all.default":
     kernel_type: hcom_alltoallv_
     category: communication
+    match_dtype: true
+    match_split_sizes: true
     notes: >
       [HIGH] HCCL direct. MoE EP token routing.
 
@@ -1071,19 +1110,17 @@ operator_mappings:
       query_mode=elementwise: total tensor I/O interpolation with exact dtype matching.
 
   "aten.div.Tensor":
-    zero_cost: true
+    kernel_type: RealDiv
+    query_mode: elementwise
     notes: >
-      [LOW→zero_cost] MoE softmax normalization. NPU integrated into MoeGatingTopK.
-      All scenarios < 0.002ms (< 0.01% of total time).
-      Original kernel: RealDiv (op-plugin: DivKernelNpuOpApi.cpp → aclnnDiv).
-      0325 profiling: Qwen3 RealDiv(6-382x), DSv3 RealDiv(4-130x). "Div" never appears.
-      query_mode=elementwise: total tensor I/O interpolation with exact dtype matching.
+      [MEDIUM] CANN 9.0.1 profiling contains RealDiv.csv; the CANN 8.5 zero-cost
+      assumption is no longer valid for this versioned snapshot.
 
   "aten.sigmoid.default":
-    zero_cost: true
+    kernel_type: Sigmoid
+    query_mode: elementwise
     notes: >
-      [HIGH] MoE shared expert gate sigmoid. Sigmoid kernel never appears in CANN 8.5
-      vLLM profiling — negligible elementwise on 1 scalar, fused internally.
+      [HIGH] CANN 9.0.1 DeepSeek-V4 profiling contains a standalone Sigmoid kernel.
 
   "aten.topk.default":
     zero_cost: true
@@ -1093,10 +1130,10 @@ operator_mappings:
       TC's moe_gating_top_k_softmax op already captures this latency.
 
   "aten.where.self":
-    zero_cost: true
+    kernel_type: SelectV2
+    query_mode: elementwise
     notes: >
-      [HIGH] TC MoE routing artifact. SelectV2 never appears in CANN 8.5 vLLM profiling.
-      NPU fuses conditional selection into MoeGatingTopK/DispatchFFNCombine.
+      [MEDIUM] aten.where lowers to SelectV2 in the CANN 9.0.1 DeepSeek-V4 profile.
 
   "aten.gather.default":
     zero_cost: true
@@ -1115,11 +1152,11 @@ operator_mappings:
       tc_input_count=2: CSV has 3 inputs (self, index, axis); TC has 2 tensors (self, index).
 
   "aten.sum.dim_IntList":
-    zero_cost: true
+    kernel_type: ReduceSum
+    tc_input_count: 1
     notes: >
-      [HIGH] TC MoE routing artifact. NPU fuses sum into MoeGatingTopK.
-      ReduceSum/ReduceSumD never appear in CANN 8.5 vLLM profiling.
-      TC's moe_gating_top_k_softmax op already captures this latency.
+      [MEDIUM] CANN 9.0.1 profiling contains ReduceSum.csv. Axis/keepdim are
+      scalar attributes, so shape matching uses the single tensor input.
 
   "aten.clone.default":
     zero_cost: true
@@ -1505,6 +1542,102 @@ operator_mappings:
       for completeness; latency captured by MoeGatingTopK in TC model.
 
 
+  "tensor_cast.grouped_matmul_quant.packed":
+    kernel_type: GroupedMatmul
+    query_mode: v4_grouped_moe
+    physical_projection:
+      contract: ascend_v4_grouped_v1
+    notes: >
+      Explicit packed W8A8 expert down projection, with per-token scales and
+      expert counts. The default overload retains the shared kernel mapping.
+
+  "tensor_cast.grouped_matmul_quant_swiglu.quantized":
+    kernel_type: GroupedMatmulSwigluQuant
+    query_mode: v4_grouped_moe
+    physical_projection:
+      contract: ascend_v4_grouped_v1
+    notes: >
+      [HIGH] vllm-ascend v0.23.0 ops/fused_moe/moe_mlp.py GMM1 uses
+      npu_grouped_matmul_swiglu_quant with cumulative expert counts, packed
+      NZ weights and FP32 per-token scales. Returns INT8 payload plus FP32
+      scale; the following GMM2 has no standalone activation requantization.
+  "tensor_cast.v4_indexer_query_quant.default":
+    kernel_type: MatMulV2
+    composite: true
+    decomposer: true
+    require_all_sub_kernels: true
+    notes: >
+      Ascend V4 Q/K preparation: Hadamard MatMulV2, Muls, DynamicQuant,
+      and FP32-to-FP16 scale Cast. QLI and K/scale cache writes are billed
+      independently. All four verified physical stages must match.
+  "tensor_cast.hc_pre_v3.default":
+    kernel_type: HcPre
+    composite: true
+    decomposer: true
+    notes: >
+      [HIGH] vllm-ascend v0.23.0 models/deepseek_v4.py hc_pre calls
+      _C_ascend.npu_hc_pre_v2. The shared decomposer validates current mode,
+      four BF16 streams, FP32 HC parameters and the replay scalar settings;
+      incoming V4.1 pre-mix remains unsupported by this physical ABI.
+  "tensor_cast.apply_rope_inplace.default":
+    kernel_type: InplacePartialRotaryMul
+    tc_input_count: 3
+    notes: >
+      [HIGH] DeepSeek-V4 in-place partial RoPE. TensorCast inputs are (x, cos, sin);
+      scalar flags and rope_head_dim are attributes. Verified by
+      InplacePartialRotaryMul.csv from the 2026-08-29 CANN 9.0.1 profile.
+  "tensor_cast.hc_post.default":
+    kernel_type: HcPost
+    tc_input_count: 4
+    notes: >
+      [HIGH] Hyper-Connection post mixing. TensorCast (x, residual, hc_weight,
+      hc_combine) matches the four profiling tensor inputs. HcPost.csv is the
+      measured DeepSeek-V4 kernel type.
+  "tensor_cast.scatter_nd_update_mla.default":
+    kernel_type: ScatterNdUpdateV2
+    query_mode: scatter_nd_update_mla
+    notes: >
+      [HIGH] DeepSeek-V4 MLA cache write. The specialized query mode reorders
+      TensorCast (kv, kv_cache, slot_mapping) to the profiling contract
+      (kv_cache, slot_mapping, kv) before matching ScatterNdUpdateV2.csv.
+  "tensor_cast.compressor.default":
+    kernel_type: Compressor
+
+    query_mode: v4_physical
+    physical_projection:
+      contract: v4_requests_v2
+    notes: >
+      [HIGH] BF16 non-rotating KV compression, verified against the ratio 4/128
+      physical rows in the 2026-08-29 A3 profile. The shared versioned projection
+      preserves request lengths and captured weight/state/cache allocations for
+      both generation and lookup. PA_BSND indexer compression emits the same
+      BF16 core before external rotation, quantization and K/scale cache writes.
+      Reference rotating compression and quantized core output remain guarded.
+  "tensor_cast.quant_lightning_indexer.default":
+    kernel_type: VllmQuantLightningIndexer
+    query_mode: attention_lightning_indexer
+    notes: >
+      [HIGH] DeepSeek-V4 learned sparse indexer. This version uses the vLLM custom
+      W8A8 kernel VllmQuantLightningIndexer, not the legacy LightningIndexer.
+      Runtime attention-leaf projection supplies the physical cache/query contract.
+  "tensor_cast.sparse_attn_sharedkv.default":
+    kernel_type: SparseAttnSharedkv
+
+    query_mode: v4_physical
+    physical_projection:
+      contract: v4_requests_v2
+    notes: >
+      [HIGH] BF16 shared-KV sparse attention, verified against the ratio 0/4/128
+      physical rows in the 2026-08-29 A3 profile (18432 tokens, 8 local Q heads).
+      The shared versioned projection carries compression ratio, window, topk,
+      request lengths and sink heads into the recorded physical ABI. Mixed
+      quantized KV and unverified window/scale settings remain guarded.
+  "tensor_cast.moe_gating_top_k_hash.default":
+    kernel_type: MoeGatingTopKHash
+    tc_input_count: 3
+    notes: >
+      [HIGH] DeepSeek-V4 hash-routing tail. Tensor inputs are scores, input_ids,
+      and tid2eid; top_k/normalization/route_scale are scalar attributes.
 # ============================================================================
 #torch_npu reference (for microbenchmark script generation)
 # ============================================================================

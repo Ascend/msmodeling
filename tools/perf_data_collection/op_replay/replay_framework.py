@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import statistics
 from typing import Any, Protocol
 
 try:
@@ -60,9 +61,9 @@ except ImportError:
 
 # signature_utils is a top-level module under tools/perf_data_collection/.
 try:
-    from signature_utils import get_case_shard_key
+    from signature_utils import GROUPED_RUNTIME_OPS, get_case_shard_key, get_runtime_signature_context
 except ImportError:
-    from ..signature_utils import get_case_shard_key
+    from ..signature_utils import GROUPED_RUNTIME_OPS, get_case_shard_key, get_runtime_signature_context
 
 
 RUNTIME_SIGNATURE_CONTEXT_COLUMNS = (
@@ -80,6 +81,7 @@ RUNTIME_SIGNATURE_CONTEXT_COLUMNS = (
     "Runtime num_heads",
     "Runtime sparse_mode",
     "Runtime source_profile",
+    "Runtime v4_workload",
 )
 
 
@@ -111,16 +113,18 @@ class RuntimeReplayCase:
     @property
     def case_id(self) -> str:
         case_id = (self.row.get("Runtime case_id", "") or "").strip()
-        if not case_id and self.exact_runtime_match:
+        grouped_runtime = self.kernel_type in GROUPED_RUNTIME_OPS and get_runtime_signature_context(
+            self.row, self.kernel_type
+        )
+        if not case_id and (self.exact_runtime_match or grouped_runtime):
             return f"{self.kernel_type}:{self.csv_path}:{self.row_index}"
         return case_id
 
     @property
     def signature_context(self) -> dict[str, str]:
         return {
-            column: self.row.get(column, "")
-            for column in RUNTIME_SIGNATURE_CONTEXT_COLUMNS
-            if column in self.row
+            **{column: self.row.get(column, "") for column in RUNTIME_SIGNATURE_CONTEXT_COLUMNS if column in self.row},
+            **get_runtime_signature_context(self.row, self.kernel_type),
         }
 
 
@@ -151,10 +155,10 @@ class OpReplay:
         prepare: Callable[[], None] | None = None,
         build_case: Callable[[dict[str, str]], dict[str, Any]] | None = None,
         run_case: Callable[[dict[str, Any]], Any] | None = None,
-        format_success: Callable[[str, int, dict[str, str], dict[str, Any], Any], str]
-        | None = None,
+        format_success: Callable[[str, int, dict[str, str], dict[str, Any], Any], str] | None = None,
         exact_runtime_match: bool = False,
         runtime_warmup_count: int = 0,
+        aggregation: str = "min",
     ):
         self.kernel_type = kernel_type
         self.api_path = api_path
@@ -172,13 +176,18 @@ class OpReplay:
         if runtime_warmup_count < 0:
             raise ValueError("runtime_warmup_count must be non-negative")
         self.runtime_warmup_count = runtime_warmup_count
+        if aggregation not in {"min", "mean"}:
+            raise ValueError("aggregation must be 'min' or 'mean'")
+        self.aggregation = aggregation
 
     def build_argparser(self):
-        return build_standard_argparser(
+        parser = build_standard_argparser(
             description=self.description,
             usage_examples=self.usage_examples,
             version_help=self.version_help,
         )
+        parser.add_argument("--warmup-count", type=int, default=None, help="Warmup iterations, independent of repeats.")
+        return parser
 
     def resolve_api(self):
         if not self.api_path:
@@ -203,19 +212,12 @@ class OpReplay:
 
     def build_inputs(self, row: dict[str, str]) -> list[Any]:
         init_runtime()
-        input_shapes = [
-            parse_shape(item) for item in parse_list_field(row["Input Shapes"])
-        ]
+        input_shapes = [parse_shape(item) for item in parse_list_field(row["Input Shapes"])]
         input_formats = parse_list_field(row["Input Formats"])
-        input_dtypes = [
-            normalize_dtype_name(item)
-            for item in parse_list_field(row["Input Data Types"])
-        ]
+        input_dtypes = [normalize_dtype_name(item) for item in parse_list_field(row["Input Data Types"])]
 
         if self.input_count is not None and len(input_shapes) != self.input_count:
-            raise ValueError(
-                f"{self.kernel_type} expects exactly {self.input_count} inputs, got {len(input_shapes)}"
-            )
+            raise ValueError(f"{self.kernel_type} expects exactly {self.input_count} inputs, got {len(input_shapes)}")
 
         tensors: list[Any] = []
         for index, shape in enumerate(input_shapes):
@@ -246,9 +248,7 @@ class OpReplay:
         if self._run_case_override is not None:
             return self._run_case_override(case)
         if case["api"] is None:
-            raise ValueError(
-                f"{self.kernel_type} replay requires api or custom run_case"
-            )
+            raise ValueError(f"{self.kernel_type} replay requires api or custom run_case")
         return case["api"](*case["inputs"], **case["kwargs"])
 
     def synchronize(self) -> None:
@@ -324,6 +324,7 @@ class OpReplay:
                 warmup_count=warmup_count,
                 repeat_count=repeat_count,
                 signature_context=replay_case.signature_context,
+                aggregation=self.aggregation,
             )
 
     def run_row(
@@ -333,6 +334,7 @@ class OpReplay:
         row: dict[str, str],
         *,
         repeat_count: int = 1,
+        warmup_count: int = 2,
     ) -> None:
         """Run one kernel row with direct NPU event timing.
 
@@ -344,8 +346,9 @@ class OpReplay:
         """
         case = self.build_case(row)
 
-        # Warm up (2 iterations or repeat_count, whichever is smaller)
-        warmup = min(2, repeat_count)
+        if repeat_count <= 0 or warmup_count < 0:
+            raise ValueError("repeat_count must be positive and warmup_count non-negative")
+        warmup = warmup_count
         for _ in range(warmup):
             self.run_case(case)
             self.synchronize()
@@ -364,6 +367,10 @@ class OpReplay:
 
         avg_duration = sum(durations) / len(durations)
         row["Average Duration(us)"] = f"{avg_duration:.6f}"
+        row["Microbench Warmup Count"] = str(warmup)
+        row["Microbench Repeat Count"] = str(repeat_count)
+        row["Microbench Std Duration(us)"] = f"{statistics.pstdev(durations):.6f}"
+        row["Microbench Source"] = "npu_event_mean"
 
         self._record_runtime_case(
             csv_path,
@@ -407,6 +414,9 @@ class OpReplay:
     def main(self) -> None:
         args = self.build_argparser().parse_args()
         repeat_count = get_replay_repeat_count(args.repeat_count)
+        warmup_count = args.warmup_count
+        if warmup_count is not None and warmup_count < 0:
+            raise ValueError("--warmup-count must be non-negative")
         shard = ShardSpec(
             count=getattr(args, "case_shard_count", 1),
             index=getattr(args, "case_shard_index", 0),
@@ -431,6 +441,8 @@ class OpReplay:
             return not shard.accepts(shard_key)
 
         if self.runtime_warmup_count:
+            if warmup_count is not None:
+                self.runtime_warmup_count = warmup_count
 
             def run_row_fn(csv_path, row_index, row):
                 self.run_runtime_row(
@@ -444,7 +456,13 @@ class OpReplay:
         else:
 
             def run_row_fn(csv_path, row_index, row):
-                self.run_row(csv_path, row_index, row, repeat_count=repeat_count)
+                self.run_row(
+                    csv_path,
+                    row_index,
+                    row,
+                    repeat_count=repeat_count,
+                    warmup_count=2 if warmup_count is None else warmup_count,
+                )
 
             process_repeat_count = 1
 
@@ -455,15 +473,18 @@ class OpReplay:
             run_row_fn=run_row_fn,
             update_mode=args.update_mode,
             should_skip_row=should_skip_row,
-            copy_back_fields=(MICROBENCH_DURATION,),
+            copy_back_fields=(
+                MICROBENCH_DURATION,
+                "Microbench Warmup Count",
+                "Microbench Repeat Count",
+                "Microbench Std Duration(us)",
+                "Microbench Source",
+            ),
         )
 
         print(
-            f"Processed {total_rows} {self.kernel_type} rows from {len(csv_paths)} csv file(s) "
-            f"under {target_data_dir}."
+            f"Processed {total_rows} {self.kernel_type} rows from {len(csv_paths)} csv file(s) under {target_data_dir}."
         )
         if args.update_mode == "missing-only":
-            print(
-                f"[SUMMARY] {self.kernel_type}: skipped {skipped_rows} row(s) due to missing-only mode."
-            )
+            print(f"[SUMMARY] {self.kernel_type}: skipped {skipped_rows} row(s) due to missing-only mode.")
         print_invalid_replay_summary(invalid_rows, label=self.kernel_type)
