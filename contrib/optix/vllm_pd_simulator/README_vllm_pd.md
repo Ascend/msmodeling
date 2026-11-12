@@ -66,7 +66,7 @@
 在开始部署前，请逐项确认以下环境已就绪：
 
 - 各节点 SSH 服务已启动，且可从主节点连通
-- 各节点已安装 NPU 驱动，CANN 环境已加载（对应环境变量 `PD_CANN_HOME`）
+- 各节点已安装 NPU 驱动，CANN 环境已加载
 - 各节点已安装 vLLM 与 vllm-ascend，模型文件已就位
 - 主节点已安装 Python 3.10+ 与 fabric（>= 2.0）
 - 节点间 HCCL / RDMA 链路正常，KV 传输端口（`kv_port`）互通
@@ -355,7 +355,6 @@ SSH agent 或标准默认密钥完成免密认证；`Host` 别名、`ProxyJump` 
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PD_CANN_HOME` | `/usr/local/Ascend/cann-9.0.0` | 远端 CANN 安装路径 |
 | `PD_CONDA_NAME` | - | 远端 Conda 环境名 |
 | `PD_CONDA_HOME` | - | 远端 Conda 安装路径 |
 | `PD_KV_CONNECTOR` | `MooncakeLayerwiseConnector` | KV Connector 类型 |

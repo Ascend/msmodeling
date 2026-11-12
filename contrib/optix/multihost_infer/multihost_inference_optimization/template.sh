@@ -20,24 +20,48 @@
 # Startup script for node {{ NODE_RANK }} ({{ NODE_ROLE }})
 # Generated at: {{ GENERATE_TIME }}
 # ============================================================
-ASCEND_ENV="/usr/local/Ascend/ascend-toolkit/set_env.sh"
-if [ -f "$ASCEND_ENV" ]; then
-    source "$ASCEND_ENV"
+_cann_env=""
+if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
+    _cann_env="/usr/local/Ascend/ascend-toolkit/set_env.sh"
+elif [ -f /usr/local/Ascend/cann/set_env.sh ]; then
+    _cann_env="/usr/local/Ascend/cann/set_env.sh"
+elif compgen -G "/usr/local/Ascend/cann-*/set_env.sh" >/dev/null; then
+    _cann_env="$(ls -d /usr/local/Ascend/cann-*/set_env.sh | tail -1)"
+fi
+
+if [ -n "$_cann_env" ]; then
+    source "$_cann_env"
+    _cann_rc=$?
+    if [ "$_cann_rc" -ne 0 ]; then
+        echo "[ERROR] failed to load CANN env: $_cann_env (exit $_cann_rc)" >&2
+        exit "$_cann_rc"
+    fi
 else
-    echo "[ERROR] Ascend toolkit env not found: $ASCEND_ENV" >&2
-    #exit 1
+    echo "[WARN] no CANN set_env.sh matched; tried ascend-toolkit, cann, cann-*" >&2
+fi
+
+ATB_ENV="/usr/local/Ascend/nnal/atb/set_env.sh"
+if [ -f "$ATB_ENV" ]; then
+    source "$ATB_ENV"
+    _atb_rc=$?
+    if [ "$_atb_rc" -ne 0 ]; then
+        echo "[ERROR] failed to load ATB env: $ATB_ENV (exit $_atb_rc)" >&2
+        exit "$_atb_rc"
+    fi
+else
+    echo "[WARN] ATB env not found: $ATB_ENV" >&2
 fi
 
 CONDA_PROFILE="/opt/mamba/etc/profile.d/conda.sh"
 if [ -f "$CONDA_PROFILE" ]; then
     source "$CONDA_PROFILE"
 else
-    echo "[ERROR] conda profile not found: $CONDA_PROFILE" >&2
+    echo "[WARN] conda profile not found: $CONDA_PROFILE" >&2
     #exit 1
 fi
 
 if ! conda activate ascend-infer; then
-    echo "[ERROR] failed to activate conda env: ascend-infer" >&2
+    echo "[WARN] failed to activate conda env: ascend-infer" >&2
     #exit 1
 fi
 
