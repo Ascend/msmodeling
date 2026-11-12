@@ -1946,8 +1946,13 @@ def _resolve_v4_kv_cache_size(
     # window + compressed cache (ratio>0). Standard MLA layers have neither.
     is_v4_sparse_layer = window_size > 0 or compress_ratio > 0
     if is_v4_sparse_layer and batch_size is not None and total_kv_tokens is not None:
-        # Sliding-window ring buffer: window_size slots per request.
-        window_slots = batch_size * window_size
+        # Ascend prefill stages every new row before windowed attention reads
+        # the pages. Reference backends only retain the tail ring buffer.
+        window_slots = (
+            total_kv_tokens
+            if getattr(attention_layer, "use_paged_kv_cache", False) is True
+            else batch_size * window_size
+        )
         # Compressed KV: the reference Compressor pools every `compress_ratio`
         # consecutive tokens into a single cache row, so the compressed segment
         # holds total_kv_tokens // compress_ratio slots across the batch.

@@ -31,6 +31,17 @@ from .quant_linear import TensorCastQuantLinear
 from .utils import apply_static_quant_linear, ModelWrapperBase
 
 
+def _write_v4_paged_kv(
+    rows: torch.Tensor,
+    cache: torch.Tensor,
+    seq_lens: Optional[torch.Tensor],
+    boundary_rows: int = 0,
+) -> torch.Tensor:
+    """Publish compressor scratch rows through the Ascend paged Scatter ABI."""
+    indices = torch.empty(rows.shape[0] * rows.shape[1], dtype=torch.int32, device=rows.device)
+    return torch.ops.tensor_cast.scatter_nd_update_mla(rows, cache, indices, 128, seq_lens, "PA_BSND", boundary_rows)
+
+
 # ============================================================
 # V4 MoE gate routing helpers
 # ============================================================
@@ -390,6 +401,10 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
     def build_o_proj_tp_plan_extras(cls, prefix: str, params: dict, config_info) -> dict[str, tuple[str, dict]]:
         from .mla import tp_plan_module_path, tp_plan_nested_module_path
 
+        group_params = {**dict(params), "dim": 1}
+        if getattr(config_info, "model_type", None) == "deepseek_v4":
+            # wo_a stores [groups * rank, per_group_input]: shard whole groups.
+            group_params.update(dim=0, head_num=config_info.o_groups)
         return {
             # V4's grouped wo_a emits an o-proj-TP-local activation.  Keep wo_b
             # row-sharded even when generic DSA context parallelism is enabled.
@@ -397,7 +412,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                 ROWWISE_LINEAR,
                 {**dict(params), "disable_tp": False},
             ),
-            tp_plan_module_path(prefix, "self_attn.wo_a"): (COLWISE_LINEAR, {**dict(params), "dim": 1}),
+            tp_plan_module_path(prefix, "self_attn.wo_a"): (COLWISE_LINEAR, group_params),
         }
 
     def __init__(
@@ -416,7 +431,10 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
             decode_only,
             parallel_group_manager=parallel_group_manager,
         )
+        self.tp_group = tp_group
         self.compress_ratio = getattr(self._inner, "compress_ratio", 0)
+        self.use_paged_kv_cache = bool(mla_config.use_paged_kv_cache)
+        self.indexer_cache_dtype = torch.int8 if self.use_paged_kv_cache else None
         self.use_indexer = bool(getattr(self._inner, "use_indexer", False))
         self.use_compressor = bool(getattr(self._inner, "use_compressor", False))
         self.hc_mult = getattr(getattr(self._inner, "config", None), "hc_mult", 1)
@@ -480,10 +498,11 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                     self._inner.indexer,
                     config=getattr(self._inner, "config", None),
                 ),
-                tp_group=tp_group,
+                tp_group=None if self.use_paged_kv_cache else tp_group,
                 compress_ratio=self.compress_ratio,
             )
             self._index_head_dim = int(self.indexer.head_dim)
+            self.indexer.use_paged_kv_cache = self.use_paged_kv_cache
 
     @property
     def qk_rope_head_dim(self) -> int:
@@ -504,16 +523,15 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         ``sparse_attn_sharedkv`` to keep the entire KV producer chain live.
 
         Write semantics:
+            - Ascend paged cache: single scatter of every new Prefill KV row
             - ``sl <= W``:  single scatter of the full window entry
             - ``sl > W`` with ``cutoff == 0``: tail-``W`` fills the cache exactly
             - ``sl > W`` with ``cutoff > 0``: two-scatter split to match the
               circular-buffer semantics of the reference implementation
 
-        The final ``kv_attn_handle + tensor * 0`` expression in the caller is
-        NOT a no-op: it binds the two tensors to the same graph node so that
-        ``torch.compile``'s dead-code elimination cannot prune the upstream
-        KV producer chain (wkv → kv_norm → RoPE → scatter).  Both operands
-        are live because their sum is consumed by ``sparse_attn_sharedkv``.
+        The caller passes the post-write handle to ``sparse_attn_sharedkv``
+        and uses existing order barriers where a control dependency is needed,
+        preserving the producer chain without charging artificial arithmetic.
         """
         W = int(self.window_size)
         kv_for_attn = kv_window_entry
@@ -521,6 +539,14 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
 
         if kv_cache is None:
             return kv_for_attn, kv_attn_handle
+
+        if self.use_paged_kv_cache:
+            # Ascend prefill stages every new KV row in the paged cache. The
+            # attention window restricts reads; it does not truncate this write.
+            kv_cache = torch.ops.tensor_cast.scatter_nd_update_mla(
+                kv_window_entry, kv_cache, slot_mapping, W, meta_seq_lens, "PA_BSND"
+            )
+            return kv_for_attn, kv_cache
 
         if sl <= W:
             kv_cache = torch.ops.tensor_cast.scatter_nd_update_mla(
@@ -741,7 +767,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         # (4096, q_lora_rank+head_dim) GEMM. Without this anchoring, inductor
         # collapses the two distinct first-linears into one wider node and
         # the KV first-linear vanishes from the trace.
-        kv_input = hidden_states + q_states[..., :1, :1].reshape(batch_size, seq_length, 1).to(hidden_states.dtype) * 0
+        kv_input = torch.ops.tensor_cast._internal_order_barrier(hidden_states, q_states)
         kv = apply_static_quant_linear(kv_input, self.kv_a_proj_with_mqa).view(batch_size, seq_length, head_dim)
         kv_normed = torch.ops.tensor_cast.rms_norm(
             kv,
@@ -889,8 +915,8 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
             elif self.use_indexer and self.indexer is not None and indexer_cache is not None:
                 # Keep the indexer branch anchored to the post-KV tensor so
                 # torch.compile cannot DCE or hoist the learned-indexer segment.
-                indexer_hidden_states = hidden_states + kv_window_entry[..., :1].to(hidden_states.dtype) * 0
-                indexer_q_a_normed = q_a_normed + kv_window_entry[..., :1].to(q_a_normed.dtype) * 0
+                indexer_hidden_states = torch.ops.tensor_cast._internal_order_barrier(hidden_states, kv_window_entry)
+                indexer_q_a_normed = torch.ops.tensor_cast._internal_order_barrier(q_a_normed, kv_window_entry)
                 if is_v41 and csa2_state is not None and role is not None:
                     owner = role.index_k_owner
                     indexer_cache = csa2_state.index_k_by_source.get(owner, indexer_cache)
@@ -958,6 +984,12 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
             "attention_sink",
             torch.empty(0, dtype=q_states.dtype, device=q_states.device),
         )
+        if attn_sink.numel() and attn_sink.shape[0] != n_local_heads:
+            # The learned sink follows the same head shard as Q, not the token shard.
+            if attn_sink.shape[0] != n_local_heads * self.tp_group.world_size:
+                raise ValueError("V4 attention sink does not match the local Q head shard")
+            start = self.tp_group.rank_in_group * n_local_heads
+            attn_sink = attn_sink[start : start + n_local_heads]
         softmax_scale = float(getattr(self._inner, "softmax_scale", getattr(self._inner, "scaling", head_dim**-0.5)))
         attention_op = torch.ops.tensor_cast.sparse_attn_sharedkv
         attention_quant_kwargs = {}
@@ -972,6 +1004,16 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                 q_states = q_states.to(torch.bfloat16)
                 compressor_quant_kwargs = {"kv_scale": self.quant_config.kv_scale, "kv_format": "hif8"}
                 attention_quant_kwargs.update(compressor_quant_kwargs)
+        if self.use_paged_kv_cache and not is_v41 and not compressor_quant_kwargs:
+            compressor_quant_kwargs = {"cache_layout": "PA_BSND"}
+            attention_quant_kwargs["cache_layout"] = "PA_BSND"
+        attention_quant_kwargs.update(
+            compress_ratio=int(self.compress_ratio),
+            window_size=W,
+            compress_topk=int(compress_topk_indices.shape[-1]) if self.compress_ratio else 0,
+            seq_lens=meta_seq_lens,
+            query_lens=meta_query_lens,
+        )
         # 4-6. scatter + compressor + sparse_attn (model.py:518-533).
         slot_mapping = attention_meta.slot_mapping if attention_meta is not None else None
         # V4 compressors consume full sequence lengths; only CSA2 attention
@@ -1063,8 +1105,30 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                             )
                 else:
                     kv_compress, kv_cache = compressor_result
+                    if compressor_quant_kwargs.get("cache_layout") == "PA_BSND":
+                        kv_cache = _write_v4_paged_kv(
+                            kv_compress,
+                            kv_cache,
+                            meta_seq_lens,
+                            batch_size * max(0, kv_compress.shape[1] - sl // self.compress_ratio),
+                        )
+                        # The physical boundary row is written to cache but is
+                        # not an extra active compressed key for attention.
+                        kv_compress = kv_compress[:, : sl // self.compress_ratio]
                 if not is_v41:
-                    kv_for_attn = torch.cat([kv_for_attn, kv_compress], dim=1)
+                    if compressor_quant_kwargs.get("cache_layout") == "PA_BSND":
+                        # Ascend attention reads two paged caches; no merged KV
+                        # tensor is materialized. Keep only its logical shape.
+                        logical_kv = torch.empty(
+                            batch_size,
+                            sl + kv_compress.shape[1],
+                            head_dim,
+                            dtype=kv_for_attn.dtype,
+                            device=kv_for_attn.device,
+                        )
+                        kv_for_attn = torch.ops.tensor_cast._internal_order_barrier(logical_kv, kv_cache)
+                    else:
+                        kv_for_attn = torch.cat([kv_for_attn, kv_compress], dim=1)
                     kv_attn_handle = (
                         compressed_kv_cache if compressor_op == torch.ops.tensor_cast.csa2_compressor else kv_cache
                     )
@@ -1142,6 +1206,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                     slot_mapping,
                     sl,
                     meta_seq_lens,
+                    "PA_BSND" if self.use_paged_kv_cache else "BND",
                 )
                 kv_for_attn = kv_cache
             if self.use_compressor and kv_cache is not None and not is_v41:
@@ -1209,7 +1274,9 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                     kv_for_attn = kv_for_attn
                     kv_attn_handle = compressed_kv_cache
                 else:
-                    _, kv_cache = compressor_result
+                    kv_compress, kv_cache = compressor_result
+                    if compressor_quant_kwargs.get("cache_layout") == "PA_BSND":
+                        kv_cache = _write_v4_paged_kv(kv_compress, kv_cache, meta_seq_lens)
                     kv_for_attn = kv_cache
             if is_v41:
                 candidate_mask = None
@@ -1290,16 +1357,21 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         )
         # bsgd, grd -> bsgr
         o_grouped = torch.einsum("bsgd,grd->bsgr", o_grouped, wo_a_grouped)
-        # `o_proj`/`wo_b` is wrapped as RowParallel via transformations.py, so
-        # its forward already performs the single output all-reduce that matches
-        # the reference row-parallel path. Doing another explicit reduce here
-        # would double-count communication in the cost model.
+        # RowParallel wo_b owns the output all-reduce.
         attn_output = self.o_proj(o_grouped.flatten(2))  # wo_b
         # Cast back to hidden_states dtype: mirrors V3.2 behavior where the attention
         # output dtype is anchored to the model working precision (bf16/fp16), so
         # float8_e4m3fn from the KV/cache stream does not pollute the hidden-state
         # flow through hc_post into MTP's RMSNorm layers.
         return attn_output.to(hidden_states.dtype), None
+
+
+class DeepseekV4AscendSparseAttention(DeepseekV4SparseAttention):
+    """vLLM-Ascend keeps Indexer projections replicated, independently of Q TP."""
+
+    @classmethod
+    def build_tp_plan_extras(cls, prefix: str, params: dict, config_info) -> dict[str, tuple[str, dict]]:
+        return {}
 
 
 class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
@@ -1323,6 +1395,7 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
         self._topk_limit = _resolve_sparse_topk_limit(indexer, topk_limit=topk_limit)
         self.tp_group = tp_group
         self.compress_ratio = int(compress_ratio)
+        self.use_paged_kv_cache = False
 
     @property
     def num_heads(self) -> int:
@@ -1384,9 +1457,8 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
         batch_size, seq_length = hidden_states.shape[:-1]
         rd = int(self.qk_rope_head_dim)
 
-        # `wq_b` / `weights_proj` are now sharded up front by
-        # transformations.py for V4 only, matching the reference
-        # ColumnParallelLinear layout and keeping compile-time graphs simpler.
+        # V4 keeps wq_b/weights_proj replicated; other variants may shard them
+        # through their TP plan. Derive the head count from the actual output.
         q_proj = apply_static_quant_linear(qa_normed, self.wq_b)
         num_local_heads = exact_division(q_proj.shape[-1], self.head_dim)
         q_states = q_proj.view(batch_size, seq_length, num_local_heads, self.head_dim)
@@ -1394,6 +1466,7 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
             "deepseek_v41",
             "deepseek_v41_text",
         )
+        query_scale = None
         if is_v41_indexer:
             config = getattr(self._inner, "config", None)
             q_states = torch.ops.tensor_cast.csa2_compressed_rope(
@@ -1406,9 +1479,11 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
             query_payload, query_scale = torch.ops.tensor_cast.csa2_query_quant(q_states, 32)
         else:
             torch.ops.tensor_cast.apply_rope_inplace(q_states, cos, sin, True, False, rd)
+            if self.use_paged_kv_cache:
+                q_states, query_scale = torch.ops.tensor_cast.v4_indexer_query_quant(q_states)
 
-        # Query FP4 quant/dequant is shape-preserving and charged by the
-        # indexer semantic operator over the full query tensor.
+        # The reference FP4 preparation is absorbed by the semantic core.
+        # Ascend has already emitted Hadamard/INT8 preparation explicitly.
 
         # `self.compressor(x, start_pos)` — runs AFTER the q-side ops, matching
         # reference model.py:417. Writes the indexer-local compressed KV cache
@@ -1425,7 +1500,7 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
                 in ("deepseek_v41", "deepseek_v41_text")
                 else torch.ops.tensor_cast.compressor
             )
-            _, indexer_cache = compressor_op(
+            compressed_kv, state_handle = compressor_op(
                 hidden_states,
                 indexer_cache,
                 self.compress_ratio,
@@ -1434,7 +1509,26 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
                 True,
                 seq_lens_meta,
                 query_lens_meta,
+                **({"cache_layout": "PA_BSND"} if self.use_paged_kv_cache else {}),
             )
+            if self.use_paged_kv_cache:
+                boundary_rows = (
+                    batch_size * max(0, compressed_kv.shape[1] - seq_length // self.compress_ratio)
+                    if not _is_decode_attention_batch(seq_length, attention_meta, batch_size)
+                    else 0
+                )
+                key, key_scale = torch.ops.tensor_cast.v4_indexer_query_quant(compressed_kv)
+                indexer_cache = _write_v4_paged_kv(key, state_handle, seq_lens_meta, boundary_rows)
+                if indexer_scale_cache is None:
+                    indexer_scale_cache = torch.empty(
+                        *indexer_cache.shape[:-1], 1, dtype=torch.float16, device=indexer_cache.device
+                    )
+                indexer_scale_cache = _write_v4_paged_kv(
+                    key_scale.unsqueeze(-1), indexer_scale_cache, seq_lens_meta, boundary_rows
+                )
+                indexer_cache = torch.ops.tensor_cast._internal_order_barrier(indexer_cache, indexer_scale_cache)
+            else:
+                indexer_cache = state_handle
 
         # weights = weights_proj(x) * (softmax_scale * n_heads ** -0.5).
         weights = apply_static_quant_linear(hidden_states, self.weights_proj) * (
@@ -1471,6 +1565,8 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
                 is_candidate_source,
                 uses_candidates,
             )
+        if self.use_paged_kv_cache:
+            weights = weights.to(torch.float16)
         return torch.ops.tensor_cast.quant_lightning_indexer(
             q_states,
             weights,
@@ -1479,6 +1575,8 @@ class DeepseekV4SparseAttentionIndexer(ModelWrapperBase):
             int(self.tp_group.world_size) if self.tp_group is not None else 1,
             seq_lens_meta,
             query_lens_meta,
+            "PA_BSND" if self.use_paged_kv_cache else "BND",
+            query_scale,
         )
 
 

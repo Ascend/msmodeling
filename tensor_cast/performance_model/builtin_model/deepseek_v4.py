@@ -82,6 +82,11 @@ def _(
     batch, rows_written = kv.shape[0], kv.shape[1]
     per_row_bytes = kv.shape[-1] * kv.element_size()
     properties.memory_write_bytes += batch * rows_written * per_row_bytes
+    kwargs = op_invoke_info.kwargs if isinstance(op_invoke_info.kwargs, dict) else {}
+    layout = op_invoke_info.args[5] if len(op_invoke_info.args) > 5 else kwargs.get("cache_layout", "BND")
+    if layout == "PA_BSND":
+        # Physical block/offset indices are two INT32 values per new row.
+        properties.memory_read_bytes += batch * rows_written * 8
     return properties
 
 
@@ -106,6 +111,32 @@ def _(
     coff = 2 if compress_ratio == 4 else 1
     overlap = coff == 2
     proj_out_dim = coff * head_dim
+
+    layout = (
+        op_invoke_info.args[10] if len(op_invoke_info.args) > 10 else op_invoke_info.kwargs.get("cache_layout", "BND")
+    )
+    if layout == "PA_BSND":
+        # Paged Compressor(cache_mode=1) consumes BF16 x and two
+        # BF16 weights, updates FP32 state and returns a BF16 scratch stream.
+        # Hadamard/quantization and all paged K/scale writes are caller ops.
+        properties = op_invoke_info.get_memory_access_properties(
+            exclude_input_ids={"kv_cache", "seq_lens", "query_lens"}, exclude_output_ids={1}
+        )
+        properties.memory_read_bytes += 2 * hidden_size * proj_out_dim * hidden_states.element_size()
+        requests = int(query_lens.numel()) if query_lens is not None else batch
+        # State retains the overlap/tail window, not the entire allocated pool.
+        state_rows = requests * coff * compress_ratio
+        properties.memory_readwrite_bytes += state_rows * proj_out_dim * 2 * 4
+        produced = op_invoke_info.out[0].numel() // head_dim
+        mma_ops = 4 * batch * seq_len * hidden_size * proj_out_dim
+        _accumulate_compute_ops(properties, torch.bfloat16, mma_ops=mma_ops)
+        pool_elements = batch * seq_len * proj_out_dim
+        _accumulate_compute_ops(
+            properties,
+            torch.float32,
+            gp_ops=pool_elements * 7 + produced * (_rmsnorm_ops(1, head_dim) + rope_head_dim * 5),
+        )
+        return properties
 
     # Per-request (seq_len_i, query_len_i) pairs. Falls back to one synthetic
     # request whose start_pos comes from `max(seq_lens) - seq_len` when only
@@ -142,7 +173,7 @@ def _(
         per_req = [(seq_len, seq_len)]
 
     properties = op_invoke_info.get_memory_access_properties(
-        exclude_input_ids={1, 4},
+        exclude_input_ids={1, 4, "seq_lens", "query_lens"},
         exclude_output_ids={0, 1},
     )
     # wkv + wgate: two fp32 Linears x -> coff*d (model.py:323-324).
@@ -232,7 +263,12 @@ def _(
         gp_ops += rows * rope_head_dim * 5
         if rotate:
             log2_d = max(int(math.log2(max(head_dim, 1))), 1)
-            gp_ops += rows * head_dim * (log2_d + 1)  # Hadamard + scale multiply
+            if kv_cache.dtype == torch.int8:
+                # Ascend uses a dense Hadamard linear before INT8 quantization.
+                _accumulate_compute_ops(properties, torch.bfloat16, mma_ops=2 * rows * head_dim * head_dim)
+                gp_ops += rows * head_dim
+            else:
+                gp_ops += rows * head_dim * (log2_d + 1)
             # FIXED: fp4_act_quant (kernel.py:129-183) does: reduce_absmax +
             # fast_round_scale (bit ops: log2_ceil + pow2) + clamp + cast + mul.
             # ~5-6 ops/elem (was 3, undercounted).
@@ -245,6 +281,11 @@ def _(
         else:
             gp_ops += rows * nope_head_dim * 3
         properties.memory_write_bytes += batch * total_post_compress_rows * kv_cache.shape[-1] * kv_cache.element_size()
+        if rotate and kv_cache.dtype == torch.int8:
+            # The Ascend INT8 index cache stores a separate FP16 scale per row.
+            # This semantic compressor owns both writes; do not add them again
+            # to the QLI score/top-k core below.
+            properties.memory_write_bytes += rows * 2
 
     _accumulate_compute_ops(
         properties,
@@ -311,6 +352,22 @@ def _(
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.v4_indexer_query_quant.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    """Charge the Ascend Hadamard matmul and INT8 query quantization once."""
+    q = op_invoke_info.args[0]
+    elements, dim = q.numel(), q.shape[-1]
+    properties = op_invoke_info.get_memory_access_properties()
+    properties.memory_read_bytes += dim * dim * q.element_size()
+    # rotate_activation is MatMul then Muls, followed by DynamicQuant and
+    # FP32->FP16 scale Cast. Both BF16 intermediates are materialized.
+    properties.memory_readwrite_bytes += elements * q.element_size() * 4
+    properties.memory_readwrite_bytes += (elements // dim) * 8
+    _accumulate_compute_ops(properties, q.dtype, mma_ops=2 * elements * dim)
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=6 * elements)
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.quant_lightning_indexer.default)
 def _(
     op_invoke_info: OpInvokeInfo,
@@ -325,9 +382,9 @@ def _(
 
     The reference (ds-model-v4-flash inference/model.py:402-433) also performs
     `rotate_activation(q)` and `fp4_act_quant(q, fp4_block_size, True)` between
-    the q-RoPE and the compressor write. tensor_cast has no standalone semantic
-    op for either; the wrapper does not surface them in the trace, so their
-    FLOPs/bytes are charged here as elementwise gp work over the full q tensor.
+    the q-RoPE and the compressor write. These remain absorbed for reference
+    BF16 inputs. Ascend INT8 inputs have a separate preparation producer, so
+    this handler counts only the score/top-k core for that contract.
 
     This op therefore models, in reference order:
         rotate_activation(q)                            # gp over q
@@ -380,7 +437,15 @@ def _(
         except Exception:
             query_lens_list = None
 
+    kwargs = op_invoke_info.kwargs if isinstance(op_invoke_info.kwargs, dict) else {}
+    cache_layout = op_invoke_info.args[7] if len(op_invoke_info.args) > 7 else kwargs.get("cache_layout", "BND")
     cache_capacity = int(indexer_cache.shape[-2])
+    if cache_layout == "PA_BSND":
+        if indexer_cache.ndim != 3:
+            raise ValueError("V4 paged indexer cache must have shape [pages, block_size, dim]")
+        cache_capacity = int(indexer_cache.shape[0] * indexer_cache.shape[1])
+    elif cache_layout != "BND":
+        raise ValueError(f"Unsupported V4 indexer cache layout: {cache_layout}")
     if seq_lens_list is not None and query_lens_list is not None and len(seq_lens_list) == len(query_lens_list):
         request_cache_work = []
         for total_seq_len, query_len in zip(seq_lens_list, query_lens_list):
@@ -395,7 +460,8 @@ def _(
             request_cache_work = [(batch * seq_len, batch * seq_len, active_len, topk_w)]
     else:
         max_seq_len = _safe_max_int(seq_lens)
-        active_cache_len_guess = max(max_seq_len // 4, 1) if max_seq_len is not None else seq_len
+        unknown_length_bound = cache_capacity if cache_layout == "PA_BSND" else seq_len
+        active_cache_len_guess = max(max_seq_len // 4, 1) if max_seq_len is not None else unknown_length_bound
         active_len = max(1, min(cache_capacity, active_cache_len_guess))
         topk_w = max(1, min(topk_limit, active_len))
         request_cache_work = [(batch * seq_len, batch * seq_len, active_len, topk_w)]
@@ -423,24 +489,38 @@ def _(
     # fast_round_scale (bit ops: log2_ceil + pow2) + clamp + cast + mul.
     # ~5-6 ops/elem (was 1, severely undercounted).
     fp4_act_quant_gp = q_elements * 5
+    if q_states.dtype == torch.int8:
+        # Query preparation is an explicit producer for the Ascend core.
+        rotate_activation_gp = 0
+        fp4_act_quant_gp = 0
 
     # qK score einsum across the active compressed-cache prefix.
-    qk_score_mma = batch * num_heads * head_dim * score_pair_count * 2
-    score_reduce_gp = batch * num_heads * score_pair_count * 3
-    score_elements_total = batch * score_pair_count
+    # Request query lengths already sum across the batch (the fallback also
+    # uses batch*seq_len). Multiplying by batch again double-counts requests.
+    qk_score_mma = num_heads * head_dim * score_pair_count * 2
+    score_reduce_gp = num_heads * score_pair_count * 3
+    score_elements_total = score_pair_count
+    properties.memory_read_bytes += sum(
+        active * head_dim * indexer_cache.element_size() for _, _, active, _ in request_cache_work
+    )
+    if q_states.dtype == torch.int8:
+        properties.memory_read_bytes += sum(active * 2 for _, _, active, _ in request_cache_work)
     if tp_world_size > 1 and num_heads > 0:
         all_reduce_score_bytes = score_elements_total * q_states.element_size()
         properties.memory_readwrite_bytes += all_reduce_score_bytes * 2
     # Prefill-only mask-add: applied per-request to its own `query_len_i` rows.
-    score_mask_gp = batch * prefill_score_pair_count * 3
-    topk_gp = batch * topk_work
+    score_mask_gp = prefill_score_pair_count * 3
+    topk_gp = topk_work
     # Postprocess on topk indices: prefill performs `where(mask, -1, topk_idxs + offset)`,
     # decode performs `topk_idxs += offset`.
-    topk_postprocess_gp *= batch
     _accumulate_compute_ops(
         properties,
         q_states.dtype,
         mma_ops=qk_score_mma,
+    )
+    _accumulate_compute_ops(
+        properties,
+        torch.float32 if q_states.dtype == torch.int8 else q_states.dtype,
         gp_ops=(
             rotate_activation_gp + fp4_act_quant_gp + score_reduce_gp + score_mask_gp + topk_gp + topk_postprocess_gp
         ),
@@ -546,7 +626,7 @@ def _(
 
     # KV payload and topk index traffic are modeled below with sparse-attention
     # gather semantics; exclude them from generic full-tensor input reads.
-    exclude_input_ids = {"kv", "topk_indices"}
+    exclude_input_ids = {"kv", "topk_indices", "seq_lens", "query_lens"}
     if len(op_invoke_info.args) > 6 or "kv_dependency" in op_invoke_info.kwargs:
         exclude_input_ids.add("kv_dependency")
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids=exclude_input_ids)

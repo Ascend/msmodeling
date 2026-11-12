@@ -26,10 +26,11 @@ import torch
 import torch.nn.functional as F
 
 from .. import ops  # noqa: F401
-from ..model_config import MoEConfig
+from ..model_config import LinearQuantType, MoEConfig, QuantGranularity, QuantScheme
 from ..parallel_group import _DEFAULT_PG, ParallelGroup
 from .internal import mark_lane_begin, mark_lane_end
 from .utils import ModelWrapperBase
+from .quant_linear import TensorCastQuantLinear
 
 logger = logging.getLogger(__name__)
 
@@ -666,6 +667,61 @@ class FusedMoETensorCast(FusedMoEBase):
             self.num_local_experts = num_local_experts
             self.expert_idx_start = expert_idx_start
 
+        # W8A8 AllToAllv sends quantized activations and
+        # scales before the expert GMMs. Resolve this once, outside Dynamo.
+        self._quantized_dispatch_experts = []
+        if (
+            moe_config.dispatch_with_quant
+            and ep_group.world_size > 1
+            and num_external_shared_experts == 0
+            and self.experts is not None
+            and self.experts._is_module_list
+        ):
+            for expert in self.experts.experts:
+                linears = [getattr(expert, name, None) for name in ("gate_proj", "up_proj", "down_proj")]
+                compatible = True
+                resolved = []
+                for linear in linears:
+                    if isinstance(linear, ModelWrapperBase):
+                        if getattr(linear, "tp_size", 1) != 1 or getattr(linear, "gather_slice_data", False):
+                            compatible = False
+                            break
+                        linear = linear.unwrap()
+                    if not isinstance(linear, TensorCastQuantLinear):
+                        compatible = False
+                        break
+                    qc = linear.quant_config
+                    if (
+                        qc.quant_type != LinearQuantType.W8A8
+                        # The generic CLI recipe defaults to PER_TENSOR. This
+                        # backend owns activation quantization: the dispatcher
+                        # and fused GMM1 both emit per-token FP32 scales.
+                        or qc.dynamic_quant_granularity
+                        not in (QuantGranularity.PER_TENSOR, QuantGranularity.PER_SAMPLE)
+                        or qc.dynamic_quant_scheme != QuantScheme.SYMMETRIC
+                        or linear.activation_scale is not None
+                        or linear.weight_offset is not None
+                        or linear.bias is not None
+                        or linear.weight_dtype != torch.bfloat16
+                        or qc.out_dtype not in (None, torch.bfloat16)
+                    ):
+                        compatible = False
+                        break
+                    resolved.append(linear)
+                if not compatible:
+                    self._quantized_dispatch_experts = []
+                    break
+                self._quantized_dispatch_experts.append(tuple(resolved))
+        self._dispatch_swiglu_limit = (
+            float(
+                moe_config.swiglu_limit
+                if moe_config.swiglu_limit is not None
+                else getattr(self.experts.experts[0], "swiglu_limit", 0.0)
+            )
+            if self._quantized_dispatch_experts
+            else 0.0
+        )
+
     def _run_shared_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.shared_experts is None:
             raise RuntimeError("_run_shared_experts called but shared_experts is None")
@@ -828,6 +884,11 @@ class FusedMoETensorCast(FusedMoEBase):
         num_tokens = topk_indices.numel()
         split_sizes = self.get_split_sizes(num_tokens, self.top_k)
 
+        if self._quantized_dispatch_experts and hidden_states.dtype == torch.bfloat16:
+            return self._forward_quantized_ep(
+                hidden_states, topk_indices, topk_weights, split_sizes, skip_shared_experts
+            )
+
         if self.num_external_shared_experts > 0:
             expert_indices = torch.cat(
                 [
@@ -900,3 +961,62 @@ class FusedMoETensorCast(FusedMoEBase):
             final_hidden_states = final_hidden_states + self._run_shared_experts(hidden_states)
 
         return final_hidden_states.to(hidden_states.dtype)
+
+    def _forward_quantized_ep(self, hidden_states, expert_indices, expert_weights, split_sizes, skip_shared_experts):
+        """W8A8 AllToAllv/GMM boundaries; routing split approximation is unchanged."""
+        counts = torch.histc(expert_indices, bins=self.num_global_experts, min=0, max=self.num_global_experts)
+        counts = self.ep_group.all_gather(counts.to(torch.int32), dim=0)
+        x = torch.ops.tensor_cast._internal_order_barrier(hidden_states, counts)
+        x = torch.ops.tensor_cast.init_routing_v2(x, expert_indices, self.allow_dispatch_ffn_combine)
+        x, scales = torch.ops.tensor_cast.dynamic_quantize_symmetric(
+            x, [-1], scale_dtype=torch.float32, out_dtype=torch.int8
+        )
+        received_scales = self.ep_group.all_to_all(scales.reshape(-1), split_sizes[1], split_sizes[0])
+        x = torch.ops.tensor_cast._internal_order_barrier(x, received_scales)
+        x = self.ep_group.all_to_all(x, split_sizes[1], split_sizes[0])
+        xs = self.rearrange_token_by_expert(x, split_sizes[1], split_sizes[3])
+        xscales = self.rearrange_token_by_expert(received_scales, split_sizes[1], split_sizes[3])
+        up_weights = [
+            torch.cat((gate.qweight, up.qweight), dim=0).t() for gate, up, _ in self._quantized_dispatch_experts
+        ]
+        up_scales = [
+            torch.cat(
+                (
+                    gate.weight_scale.reshape(-1).expand(gate.out_features),
+                    up.weight_scale.reshape(-1).expand(up.out_features),
+                )
+            )
+            for gate, up, _ in self._quantized_dispatch_experts
+        ]
+        count = len(xs)
+        missing = [None] * count
+        y, yscale = torch.ops.tensor_cast.grouped_matmul_quant_swiglu.quantized(
+            xs,
+            up_weights,
+            up_scales,
+            missing,
+            xscales,
+            missing,
+            missing,
+            hidden_states.dtype,
+            self._dispatch_swiglu_limit,
+        )
+        sizes = [value.shape[0] for value in xs]
+        output = torch.ops.tensor_cast.grouped_matmul_quant.packed(
+            list(y.split(sizes)),
+            [down.qweight.t() for _, _, down in self._quantized_dispatch_experts],
+            [down.weight_scale for _, _, down in self._quantized_dispatch_experts],
+            missing,
+            list(yscale.split(sizes)),
+            missing,
+            missing,
+            hidden_states.dtype,
+        )
+        outputs = list(output.split(sizes))
+        ordered = self.rearrange_token_by_device(outputs, split_sizes[3])
+        combined = self.ep_group.all_to_all(ordered, split_sizes[0], split_sizes[1])
+        result = torch.ops.tensor_cast.unpermute_tokens(combined, expert_indices, probs=expert_weights)
+        result = result.reshape(hidden_states.shape)
+        if self.shared_experts and not skip_shared_experts:
+            result = result + self._run_shared_experts(hidden_states)
+        return result

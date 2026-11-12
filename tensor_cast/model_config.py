@@ -473,6 +473,10 @@ class MoEConfig:
     """When True and enable_shared_expert_tp=True, route() is called after
     _dp_transform_enter() instead of before. Required for models where DP≠EP
     to avoid routing on tokens that will be discarded by DP slicing."""
+    dispatch_with_quant: bool = False
+    """Ascend V4 W8A8 EP sends per-token scales and INT8 activations separately."""
+    swiglu_limit: Optional[float] = None
+    """Checkpoint clamp scalar for the fused expert activation, when specified."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -507,6 +511,8 @@ class MlaConfig:
     field_names: MlaFieldNames = MlaFieldNames()
     enable_dsa_cp: bool = False
     """Keep DSA q_b_proj/kv_b_proj and o_proj replicated for MLA context parallelism."""
+    use_paged_kv_cache: bool = False
+    """Use the V4 paged-cache and INT8 indexer operator contract."""
 
 
 @dataclasses.dataclass

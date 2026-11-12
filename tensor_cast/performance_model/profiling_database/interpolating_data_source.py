@@ -29,13 +29,27 @@ import math
 import weakref
 from dataclasses import replace
 from itertools import combinations
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
 
 from ..op_invoke_info import is_hif8_op_from_info
-from .data_source import DataSourcePerformanceModel, QueryResult, QuerySource, ShapeMatchInfo
+from .backend_projector import (
+    V4_CACHE_CONTRACT,
+    _V4_CONTRACT,
+    _v4_row_workload,
+    _v4_shapes,
+    V4_GROUPED_CONTRACT,
+    project_v4_cache_leaf,
+    v4_grouped_row_workload,
+)
+from .data_source import (
+    DataSourcePerformanceModel,
+    QueryResult,
+    QuerySource,
+    ShapeMatchInfo,
+)
 from .interpolation_index import (
     CandidateGroup,
     CandidateIndex,
@@ -46,29 +60,39 @@ from .interpolation_index import (
 )
 from .profiling_data_source import (
     _AVG_SEQ_LEN_TOLERANCE,
-    _compute_scale_axes as _base_compute_scale_axes,
-    _compute_scale_input_format,
-    _compute_scale_mode as _base_compute_scale_mode,
-    _compute_scale_profiling_dtype as _base_compute_scale_profiling_dtype,
     _DTYPE_COMPAT,
     _DTYPE_RELAXED_KERNELS,
-    _is_block_padded,
     _MATMUL_KERNELS,
+    _SWIGLU_KERNELS,
+    COMPOSITE_DECOMPOSERS,
+    DTYPE_MAP,
+    ProfilingDataSource,
+    SubKernelSpec,
+    _aligned_input_metadata,
+    _compute_scale_input_format,
+    _is_block_padded,
     _normalize_fia_q_shape,
     _normalize_func_name,
     _parse_shape_str,
     _parse_str_list,
     _project_dispatch_ffn_combine_inputs,
     _resolve_batch_phase,
-    _scalar_aware_numel as _base_scalar_aware_numel,
     _strip_batch_dim,
-    _SWIGLU_KERNELS,
     _uses_glm5_sampling_bmm_mul,
-    COMPOSITE_DECOMPOSERS,
-    DTYPE_MAP,
+    _v4_grouped_workload,
     fractal_nz_to_nd,
-    ProfilingDataSource,
-    SubKernelSpec,
+)
+from .profiling_data_source import (
+    _compute_scale_axes as _base_compute_scale_axes,
+)
+from .profiling_data_source import (
+    _compute_scale_mode as _base_compute_scale_mode,
+)
+from .profiling_data_source import (
+    _compute_scale_profiling_dtype as _base_compute_scale_profiling_dtype,
+)
+from .profiling_data_source import (
+    _scalar_aware_numel as _base_scalar_aware_numel,
 )
 
 if TYPE_CHECKING:
@@ -249,6 +273,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         self._lightning_indexer_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
         self._sparse_attention_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
         self._scatter_nd_update_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
+        self._v4_physical_index_cache: Dict[tuple[Any, ...], CandidateIndex] = {}
         self._fia_row_workload_cache: Dict[tuple[str, str, int], Optional[dict[str, Any]]] = {}
         self._dataframe_fingerprint_cache: Dict[int, tuple[weakref.ReferenceType, str]] = {}
         self._compute_index_diagnostics: Dict[Any, dict[str, Any]] = {}
@@ -301,7 +326,9 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 )
             if not self._last_miss_reason:
                 self._record_miss(
-                    "composite_decompose_failed",
+                    "composite_sub_kernel_miss"
+                    if self.base.last_miss_reason.startswith("sub_kernel_miss:")
+                    else "composite_decompose_failed",
                     base_miss_reason=self.base.last_miss_reason,
                     fallback_from="composite",
                 )
@@ -371,9 +398,25 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return self._interpolate_moe_fused(op_invoke_info, mapping, fallback_from=fallback_from)
         if mapping.get("query_mode") == "attention_special":
             return self._interpolate_attention(op_invoke_info, mapping, fallback_from=fallback_from)
+        if mapping.get("query_mode") == "v4_physical":
+            return self._interpolate_v4_physical(op_invoke_info, mapping, fallback_from=fallback_from)
+        if mapping.get("query_mode") == "v4_grouped_moe":
+            return self._interpolate_v4_grouped_moe(op_invoke_info, mapping, fallback_from=fallback_from)
+        if mapping.get("query_mode") == "v4_cache":
+            if (
+                mapping.get("kernel_type") == "ScatterNdUpdateV2"
+                and func_str == "tensor_cast.scatter_nd_update_mla.default"
+            ):
+                return self._interpolate_v4_scatter(op_invoke_info, mapping, fallback_from=fallback_from)
+            # Unsupported phases/layouts must retain their semantic guard.
+            # Exact physical anchors are handled by the base shared projector.
+            self._record_miss(self.base.last_miss_reason or "v4_cache_contract_or_shape_mismatch")
+            return None
         if mapping.get("query_mode") == "attention_lightning_indexer":
             self._record_miss(
-                "runtime_attention_leaf_required",
+                self.base.last_miss_reason
+                if self.base.last_miss_reason.startswith("v4_cache_")
+                else "runtime_attention_leaf_required",
                 kernel_type=mapping.get("kernel_type"),
                 query_mode="attention_lightning_indexer",
             )
@@ -397,6 +440,78 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             )
             return None
         return self._interpolate_compute(op_invoke_info, mapping, fallback_from=fallback_from)
+
+    def _interpolate_candidate_groups(
+        self, target, groups, axis_groups, *, fallback_from, extra_details, include_latency_column=False
+    ):
+        """Apply the common interpolation policy after backend shape normalization."""
+        attempts = []
+        override = self._kernel_overrides.get(target.kernel_type, {})
+        for candidate_group in groups:
+            for latency_column, group in self._latency_column_pure_candidate_group_attempts(candidate_group):
+                details = dict(extra_details)
+                if include_latency_column:
+                    details["latency_column_group"] = latency_column
+                result = group.interpolate(
+                    target.axes,
+                    axis_groups,
+                    fallback_from=fallback_from,
+                    max_interpolation_dim=override.get("max_interpolation_dim"),
+                    extra_details=details,
+                )
+                if result is not None:
+                    return self._query_result_from_interpolation(target, result), attempts
+                attempts.append(
+                    {"latency_column_group": latency_column, "diagnostics": group.last_diagnostics}
+                    if include_latency_column
+                    else group.last_diagnostics
+                )
+        return None, attempts
+
+    def _interpolate_v4_grouped_moe(self, op_invoke_info, mapping, *, fallback_from):
+        try:
+            workload = _v4_grouped_workload(op_invoke_info, mapping)
+        except (ValueError, TypeError, AttributeError) as error:
+            self._record_miss(str(error), query_mode="v4_grouped_moe")
+            return None
+        kernel = mapping["kernel_type"]
+        index = self._get_physical_index(
+            kernel,
+            v4_grouped_row_workload,
+            self._grouped_interpolation_coordinates,
+            "v4_grouped_physical_signature_invalid",
+        )
+        if index is None:
+            self._record_miss("compute_csv_not_found", kernel_type=kernel)
+            return None
+        axes, regime_key = self._grouped_interpolation_coordinates(kernel, workload)
+        target = InterpolationTarget(
+            func_name=_normalize_func_name(op_invoke_info.func),
+            kernel_type=kernel,
+            axes=axes,
+            regime_key=regime_key,
+            tc_shapes=[tuple(shape) for shape, _ in self.base._extract_tensor_inputs(op_invoke_info)],
+            query_mode="v4_grouped_moe",
+        )
+        groups = index.candidate_groups_matching(target.regime_key, required_target_fields=set(dict(regime_key)))
+        result, attempts = self._interpolate_candidate_groups(
+            target,
+            groups,
+            [("tokens",)],
+            fallback_from=fallback_from,
+            extra_details={"physical_projection": V4_GROUPED_CONTRACT, "interpolation_path": "v4_grouped_moe"},
+        )
+        if result is not None:
+            return result
+        self._record_miss(
+            "v4_grouped_regime_unmatched"
+            if not groups
+            else self._candidate_failure_reason("v4_grouped_interpolation_failed", attempts[-1] if attempts else {}),
+            kernel_type=kernel,
+            packed_workload=workload,
+            attempts=attempts,
+        )
+        return None
 
     # ---- Multidimensional index helpers ----
 
@@ -1388,6 +1503,103 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             policy_kernel_type=policy_kernel_type,
         )
 
+    def _v4_interpolation_coordinates(self, _kernel, workload):
+        """Use the existing runtime-attention axes after physical projection."""
+        runtime = self._attention_runtime_workload(
+            q_tokens=workload["tokens"],
+            query_lengths=workload["query_lengths"],
+            kv_lengths=workload["kv_lengths"],
+        )
+        if runtime is None:
+            raise ValueError("v4_request_lengths_invalid")
+        fields = {key: value for key, value in workload.items() if key not in {"tokens", "query_lengths", "kv_lengths"}}
+        fields["phase"] = runtime["phase"]
+        if workload.get("compress_ratio") == 128:
+            # This top-k is derived from KV length, which is an interpolation axis.
+            fields.pop("compress_topk", None)
+        return self._runtime_attention_axes(runtime, include_sparse_fields=True), make_regime_key(fields)
+
+    @staticmethod
+    def _grouped_interpolation_coordinates(kernel, workload):
+        fields = {key: value for key, value in workload.items() if key != "tokens"}
+        fields.update(kernel_type=kernel, contract=V4_GROUPED_CONTRACT)
+        return {"tokens": float(workload["tokens"])}, make_regime_key(fields)
+
+    def _get_physical_index(self, kernel_type, decoder, coordinates, invalid_reason):
+        df = self.base._load_csv(kernel_type)
+        if df is None:
+            return None
+        cache_key = (kernel_type, decoder, self._dataframe_fingerprint(df), self._policy_hash)
+        if cache_key in self._v4_physical_index_cache:
+            return self._v4_physical_index_cache[cache_key]
+        latency_col = self.base._latency_col(df)
+
+        def candidate_builder(row, row_index):
+            try:
+                workload = decoder(kernel_type, row)
+                axes, regime_key = coordinates(kernel_type, workload)
+            except (ValueError, TypeError, KeyError, IndexError):
+                return None, invalid_reason
+            latency, meta = self._candidate_latency(row, kernel_type, latency_col)
+            if latency is None:
+                return None, "invalid_latency"
+            return (
+                CandidatePoint(
+                    kernel_type=kernel_type,
+                    axes=axes,
+                    latency_us=latency,
+                    regime_key=regime_key,
+                    row_index=row_index,
+                    row_meta=meta,
+                    input_shapes=list(_v4_shapes(row["Input Shapes"])),
+                ),
+                None,
+            )
+
+        index, _ = self._build_candidate_index(df, candidate_builder)
+        self._v4_physical_index_cache[cache_key] = index
+        return index
+
+    def _interpolate_v4_physical(self, op_invoke_info, mapping, *, fallback_from):
+        kernel = mapping["kernel_type"]
+        try:
+            workload = self.base._v4_workload(op_invoke_info, mapping)
+            axes, regime_key = self._v4_interpolation_coordinates(kernel, workload)
+        except (ValueError, TypeError, KeyError) as error:
+            self._record_miss(str(error), kernel_type=kernel)
+            return None
+        index = self._get_physical_index(
+            kernel, _v4_row_workload, self._v4_interpolation_coordinates, "v4_physical_signature_invalid"
+        )
+        if index is None:
+            self._record_miss("compute_csv_not_found", kernel_type=kernel)
+            return None
+        target = InterpolationTarget(
+            func_name=_normalize_func_name(op_invoke_info.func),
+            kernel_type=kernel,
+            axes=axes,
+            regime_key=regime_key,
+            tc_shapes=[tuple(shape) for shape, _ in self.base._extract_tensor_inputs(op_invoke_info)],
+            query_mode="v4_physical",
+        )
+        groups = index.candidate_groups_matching(target.regime_key)
+        result, attempts = self._interpolate_candidate_groups(
+            target,
+            groups,
+            _SPARSE_ATTENTION_AXIS_GROUPS,
+            fallback_from=fallback_from,
+            extra_details={"interpolation_path": "v4_physical", "physical_projection": _V4_CONTRACT},
+        )
+        if result is not None:
+            return result
+        reason = (
+            "regime_key_unmatched"
+            if not groups
+            else self._candidate_failure_reason("candidate_group_failed", attempts[-1] if attempts else {})
+        )
+        self._record_miss(reason, kernel_type=kernel, attempts=attempts)
+        return None
+
     def _candidate_from_generic_compute_row_with_reason(
         self,
         row: Any,
@@ -1397,9 +1609,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         tc_input_count: Optional[int],
         policy_kernel_type: Optional[str] = None,
     ) -> tuple[Optional[CandidatePoint], Optional[str]]:
-        csv_shapes = _parse_shape_str(str(row.get("Input Shapes", "")), preserve_empty_slots=False)
-        csv_dtypes = _parse_str_list(str(row.get("Input Data Types", "")))
-        csv_formats = _parse_str_list(str(row.get("Input Formats", "")))
+        csv_shapes, csv_dtypes, csv_formats = _aligned_input_metadata(row)
         if tc_input_count is not None:
             csv_shapes = csv_shapes[:tc_input_count]
             csv_dtypes = csv_dtypes[:tc_input_count]
@@ -3313,6 +3523,9 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         *,
         fallback_from: str = "exact_miss",
     ) -> Optional[QueryResult]:
+        layout = op_invoke_info.args[5] if len(op_invoke_info.args) > 5 else op_invoke_info.kwargs.get("cache_layout")
+        if layout == "PA_BSND":
+            return self._interpolate_v4_scatter(op_invoke_info, mapping, fallback_from=fallback_from)
         kernel_types = [mapping.get("kernel_type")]
         kernel_types.extend(mapping.get("alternate_kernel_types") or [])
         kernel_types = [str(kernel_type) for kernel_type in kernel_types if kernel_type]
@@ -3336,34 +3549,24 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                     }
                 )
                 continue
-            override = self._kernel_overrides.get(kernel_type, {})
-            for candidate_group in candidate_groups:
-                for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
-                    candidate_group
-                ):
-                    result = candidate_subset.interpolate(
-                        target.axes,
-                        _SCATTER_ND_UPDATE_AXIS_GROUPS,
-                        max_interpolation_dim=override.get("max_interpolation_dim"),
-                        fallback_from=fallback_from,
-                        extra_details={
-                            "kernel_type": kernel_type,
-                            "query_mode": "scatter_nd_update_mla",
-                            "interpolation_path": "scatter_nd_update_mla_1d",
-                            "latency_column_group": latency_column_group,
-                            "rejected_reasons": rejected_reasons,
-                        },
-                    )
-                    if result is not None:
-                        return self._query_result_from_interpolation(target, result)
-                    attempts.append(
-                        {
-                            "kernel_type": kernel_type,
-                            "status": "candidate_group_failed",
-                            "latency_column_group": latency_column_group,
-                            "diagnostics": candidate_subset.last_diagnostics,
-                        }
-                    )
+            result, diagnostics = self._interpolate_candidate_groups(
+                target,
+                candidate_groups,
+                _SCATTER_ND_UPDATE_AXIS_GROUPS,
+                fallback_from=fallback_from,
+                include_latency_column=True,
+                extra_details={
+                    "kernel_type": kernel_type,
+                    "query_mode": "scatter_nd_update_mla",
+                    "interpolation_path": "scatter_nd_update_mla_1d",
+                    "rejected_reasons": rejected_reasons,
+                },
+            )
+            if result is not None:
+                return result
+            attempts.extend(
+                {"kernel_type": kernel_type, "status": "candidate_group_failed", **item} for item in diagnostics
+            )
 
         self._record_miss(
             self._candidate_failure_reason(
@@ -3372,6 +3575,90 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             ),
             query_mode="scatter_nd_update_mla",
             attempted_kernel_types=kernel_types,
+            attempts=attempts,
+        )
+        return None
+
+    def _interpolate_v4_scatter(self, op_invoke_info, mapping, *, fallback_from):
+        """Project physical updates, then use the existing Scatter interpolation rules.
+
+        Exact lookup and this path share the V4 projector. Interpolate update
+        rows within one captured pool shape, index layout, dtype and update
+        format. The simulated pool may differ from that captured allocation.
+        """
+        demand = self.base._v4_cache_query_demand(op_invoke_info, mapping)
+        if demand is None or demand.kernel_type != "ScatterNdUpdateV2":
+            self._record_miss(self.base.last_miss_reason or "v4_scatter_contract_required")
+            return None
+        kernel = demand.kernel_type
+        df = self.base._load_csv(kernel)
+        if df is None:
+            self._record_miss("compute_csv_not_found", kernel_type=kernel)
+            return None
+        cache_key = ("v4_scatter", demand.signature, self._dataframe_fingerprint(df), self._policy_hash)
+        if cache_key not in self._scatter_nd_update_index_cache:
+            latency_col = self.base._latency_col(df)
+
+            def candidate(row, row_index):
+                projected = project_v4_cache_leaf(demand, row)
+                if projected is None:
+                    return None, "v4_scatter_physical_contract_mismatch"
+                shapes = _v4_shapes(row.get("Input Shapes", ""))
+                if len(shapes[1]) != 2:
+                    return None, "v4_scatter_physical_shape_invalid"
+                tokens = shapes[1][0]
+                width = demand.input_shapes[0][-1]
+                update = (tokens, width) if len(shapes[2]) == 2 else (tokens, 1, width)
+                if shapes[1] != (tokens, 2) or shapes[2] != update or tokens <= 0 or tokens > math.prod(shapes[0][:2]):
+                    return None, "v4_scatter_physical_shape_invalid"
+                latency, metadata = self._candidate_latency(row, kernel, latency_col)
+                if latency is None:
+                    return None, str(metadata["latency_rejected_reason"])
+                formats = tuple(_parse_str_list(str(row.get("Input Formats", ""))))
+                signature = (shapes[0], shapes[1][1:], update[1:], projected.input_dtypes, formats)
+                return CandidatePoint(
+                    kernel_type=kernel,
+                    axes={"tokens": float(tokens)},
+                    latency_us=latency,
+                    regime_key=make_regime_key({"physical_signature": signature}),
+                    input_shapes=list(shapes),
+                    input_dtypes=list(projected.input_dtypes),
+                    input_formats=list(formats),
+                    row_index=row_index,
+                    row_meta=metadata,
+                ), None
+
+            self._scatter_nd_update_index_cache[cache_key] = self._build_candidate_index(df, candidate)
+        index, rejected = self._scatter_nd_update_index_cache[cache_key]
+        attempts = []
+        for group in index.candidate_groups_matching((), allow_extra_fields={"physical_signature"}):
+            target = InterpolationTarget(
+                func_name=demand.op_name,
+                kernel_type=kernel,
+                axes={"tokens": float(math.prod(demand.input_shapes[0][:-1]))},
+                regime_key=group.regime_key,
+                tc_shapes=list(demand.input_shapes),
+                query_mode="v4_cache",
+            )
+            result, diagnostics = self._interpolate_candidate_groups(
+                target,
+                [group],
+                _SCATTER_ND_UPDATE_AXIS_GROUPS,
+                fallback_from=fallback_from,
+                extra_details={
+                    "physical_projection": V4_CACHE_CONTRACT,
+                    "interpolation_path": "v4_scatter_physical_1d",
+                },
+            )
+            if result is not None:
+                return result
+            attempts.extend(diagnostics)
+        self._record_miss(
+            self._candidate_failure_reason("v4_scatter_interpolation_failed", attempts[-1] if attempts else {}),
+            kernel_type=kernel,
+            physical_projection=V4_CACHE_CONTRACT,
+            usable_points=len(index.points),
+            rejected_reasons=rejected,
             attempts=attempts,
         )
         return None

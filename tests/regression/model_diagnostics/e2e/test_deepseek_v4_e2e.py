@@ -65,6 +65,7 @@ def test_deepseek_v4_offline_capture_and_compare(phase: ExecutionPhase, enable_m
     result = application.run_against_artifact(request, artifact)
 
     assert not any("mlapo" in call.operator_name for call in artifact.operator_calls)
+    assert any(call.operator_name == "tensor_cast._internal_order_barrier.default" for call in artifact.operator_calls)
     assert artifact.run_context.model_config["model_type"] == "deepseek_v4"
     assert result.spec_id == "deepseek_v4_v1"
     assert_diagnostics_passed(result)
@@ -98,6 +99,7 @@ def test_deepseek_v4_mtp_capture_and_compare() -> None:
     result = application.run_against_artifact(request, artifact)
 
     assert artifact.run_context.model_config["num_mtp_tokens"] == 1
+    assert any(call.operator_name == "tensor_cast._internal_order_barrier.default" for call in artifact.operator_calls)
     assert (
         sum(call.operator_name == "tensor_cast.shift_and_update_input_ids.default" for call in artifact.operator_calls)
         == 1

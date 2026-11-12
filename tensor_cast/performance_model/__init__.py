@@ -82,6 +82,16 @@ def _load_custom_op():
         return False
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.unpermute_tokens.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    properties = op_invoke_info.get_memory_access_properties()
+    if get_named_args(op_invoke_info).get("probs") is not None:
+        # npu_moe_token_unpermute multiplies route probabilities and reduces top-k
+        # inside the kernel; no expanded BF16/FP32 intermediate is written to HBM.
+        properties.compute_ops[torch.float32] = OpInvokeInfo.ComputeOps(gp_ops=2 * op_invoke_info.args[0].numel())
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.aten.bmm.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     assert len(op_invoke_info.args) == 2
@@ -2225,6 +2235,7 @@ def _(
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_quant.packed)
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_quant.default)
 def _(
     op_invoke_info: OpInvokeInfo,
@@ -2592,6 +2603,34 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
             epilogue_dtype=_swiglu_epilogue_dtype(op_invoke_info, 7),
         ),
     )
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_quant_swiglu.quantized)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    # Native W8A8 GMM1 produces INT8 + FP32 scales. Intermediate BF16
+    # activation remains inside the kernel and has no separate HBM pass.
+    properties = _swiglu_fusion_properties_helper(
+        op_invoke_info,
+        op_invoke_info.args[0],
+        op_invoke_info.args[1],
+        _SwiGLUFusionConfig(
+            bias=op_invoke_info.args[6],
+            matmul_helper=_grouped_static_quant_matmul_properties_helper,
+            is_int4_weight=False,
+            w_offset=op_invoke_info.args[3],
+            epilogue_dtype=_swiglu_epilogue_dtype(op_invoke_info, 7),
+        ),
+    )
+    payload = op_invoke_info.out[0]
+    limit = op_invoke_info.args[8] if len(op_invoke_info.args) > 8 else op_invoke_info.kwargs.get("swiglu_limit", 0.0)
+    # Per-token max reduction, scale, round, clamp/cast; gate/up clamp adds
+    # four comparisons per output activation when enabled by V4 config.
+    _accumulate_compute_ops(
+        properties,
+        _swiglu_epilogue_dtype(op_invoke_info, 7),
+        gp_ops=payload.numel() * (5 + (4 if limit > 0 else 0)),
+    )
+    return properties
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default)

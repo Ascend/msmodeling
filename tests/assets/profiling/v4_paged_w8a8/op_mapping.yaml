@@ -1,0 +1,43 @@
+# Paged-cache and packed W8A8 operator contracts; no measured durations.
+operator_mappings:
+  tensor_cast.compressor.default:
+    kernel_type: Compressor
+    query_mode: v4_physical
+    physical_projection:
+      contract: v4_requests_v2
+  tensor_cast.sparse_attn_sharedkv.default:
+    kernel_type: SparseAttnSharedkv
+    query_mode: v4_physical
+    physical_projection:
+      contract: v4_requests_v2
+  tensor_cast.hc_pre_v3.default:
+    kernel_type: HcPre
+    composite: true
+    decomposer: true
+  tensor_cast.hc_post.default:
+    kernel_type: HcPost
+    tc_input_count: 4
+  tensor_cast.scatter_nd_update_mla.default:
+    kernel_type: ScatterNdUpdateV2
+    query_mode: scatter_nd_update_mla
+  tensor_cast.quant_lightning_indexer.default:
+    kernel_type: VllmQuantLightningIndexer
+    query_mode: attention_lightning_indexer
+  tensor_cast.grouped_matmul_quant.packed:
+    kernel_type: GroupedMatmul
+    query_mode: v4_grouped_moe
+    physical_projection:
+      contract: ascend_v4_grouped_v1
+  tensor_cast.grouped_matmul_quant_swiglu.quantized:
+    kernel_type: GroupedMatmulSwigluQuant
+    query_mode: v4_grouped_moe
+    physical_projection:
+      contract: ascend_v4_grouped_v1
+interpolation_policy:
+  kernel_overrides:
+    HcPost:
+      generic_compute:
+        co_varying_input_indices:
+        - 1
+        - 2
+        - 3

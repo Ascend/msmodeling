@@ -32,6 +32,8 @@ def _(
     slot_mapping: torch.Tensor,
     window_size: Optional[int] = None,
     seq_lens: Optional[torch.Tensor] = None,
+    cache_layout: str = "BND",
+    boundary_rows: int = 0,
 ) -> torch.Tensor:
     """Semantic op for writing V4 MLA window KV into cache.
 
@@ -48,6 +50,10 @@ def _(
     producer/consumer data edge for the entire `wkv -> kv_norm -> RoPE -> cat
     -> scatter -> sparse_attn` chain rather than relying on side-effect
     ordering alone.
+
+    ``boundary_rows`` declares invalid/sentinel rows retained by the Ascend
+    compressor scratch ABI. They incur physical index processing but do not
+    increase the logical active-cache capacity required by the request.
     """
     return torch.empty_like(kv_cache)
 
@@ -64,10 +70,11 @@ def _(
     query_lens: Optional[torch.Tensor] = None,
     kv_scale: Optional[torch.Tensor] = None,
     kv_format: Optional[str] = None,
+    cache_layout: str = "BND",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Semantic op for V4 Compressor (Flash/Pro; mirrors `Compressor.forward`).
 
-    Writes the coarse KV stream into the enclosing `kv_cache` AND returns:
+    The reference path writes the coarse KV stream into `kv_cache` and returns:
         - `compressed_kv` (shape `[B, seq_len // ratio, storage_width]`) so the
           prefill caller can `torch.cat([kv, kv_compress], dim=1)` exactly like
           `model.py:524-526`.
@@ -88,7 +95,13 @@ def _(
     `rotate` matches reference `Compressor.rotate`: True for indexer compressor
     (Hadamard + fp4 over full d), False for main KV compressor (block act_quant
     over nope d-rd only). See model.py:368-372.
+
+    ``cache_layout="PA_BSND"`` instead expresses the Ascend Compressor core:
+    BF16 scratch rows plus a state dependency, with external rotation,
+    quantization and paged K/scale writes emitted separately by its caller.
     """
+    if cache_layout not in ("BND", "PA_BSND"):
+        raise ValueError(f"Unsupported V4 compressor cache layout: {cache_layout}")
     if kv_format not in (None, "hif8"):
         raise ValueError(f"Unsupported V4 KV format: {kv_format}")
     if kv_format == "hif8":
@@ -115,10 +128,31 @@ def _(
     else:
         compressed_seq = seq_len // compress_ratio if seq_len >= compress_ratio else 0
 
+    if cache_layout == "PA_BSND":
+        # CANN Compressor(cache_mode=1) publishes a BF16 scratch stream; its
+        # paged state is distinct from the K/scale caches written by the caller.
+        # Full Prefill retains the extra boundary row in the physical ABI.
+        request_count = int(query_lens.numel()) if query_lens is not None and batch == 1 else 1
+        compressed_seq = seq_len // compress_ratio + request_count
+        if seq_len == request_count:
+            compressed_seq = request_count
+        if query_lens is not None and query_lens.device.type == "cpu" and not is_fake(query_lens):
+            query_values = query_lens.tolist()
+            if batch == 1:
+                compressed_seq = sum(int(length) // compress_ratio + 1 for length in query_values)
+        compressed_kv = torch.empty(batch, compressed_seq, head_dim, dtype=torch.bfloat16, device=hidden_states.device)
+        return compressed_kv, torch.empty_like(kv_cache)
+
     compressed_kv = torch.empty(
         batch, compressed_seq, kv_cache.shape[-1], dtype=kv_cache.dtype, device=hidden_states.device
     )
     return compressed_kv, torch.empty_like(kv_cache)
+
+
+@register_tensor_cast_op("v4_indexer_query_quant")
+def _(q: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Ascend query Hadamard rotation and per-head INT8 quantization, before QLI."""
+    return torch.empty_like(q, dtype=torch.int8), torch.empty(q.shape[:-1], dtype=torch.float16, device=q.device)
 
 
 @register_tensor_cast_op("quant_lightning_indexer")
@@ -130,6 +164,8 @@ def _(
     tp_world_size: int = 1,
     seq_lens: Optional[torch.Tensor] = None,
     query_lens: Optional[torch.Tensor] = None,
+    cache_layout: str = "BND",
+    query_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Semantic op for V4 ratio=4 learned sparse indexer score/topk core (Flash/Pro).
 
@@ -142,10 +178,9 @@ def _(
 
     The reference (deepseek-ai/DeepSeek-V4-Flash/inference/model.py:402-433) also runs
     `rotate_activation(q)` and `fp4_act_quant(q, fp4_block_size, True)` between
-    the q-RoPE and the compressor write. tensor_cast has no standalone semantic
-    op for either; the wrapper does not surface them in the trace, and instead
-    their FLOPs/bytes are charged inside this op's cost model so that the
-    modeled latency matches the reference's actual runtime.
+    the q-RoPE and the compressor write. The reference path absorbs these in
+    this op. Ascend instead emits `v4_indexer_query_quant` and passes INT8 Q
+    with FP16 scales, leaving this op responsible only for score/top-k.
 
     This semantic op models the remaining learned sparse-indexer core:
         rotate_activation(q) + fp4_act_quant(q)         # absorbed cost-only
@@ -173,6 +208,10 @@ def _(
     compressed length as `max(seq_lens) // 4`.
     """
     batch, seq = q_states.shape[:2]
+    if q_states.dtype == torch.int8:
+        # Ascend infers [T,1,sparse_count] even when fewer candidates are
+        # valid; invalid entries are padded. Reference top-k clamps instead.
+        return torch.empty(batch, seq, topk_limit, dtype=torch.int32, device=q_states.device)
     active_seq_len = seq
     if (
         seq_lens is not None
@@ -198,6 +237,12 @@ def _(
     rope_head_dim: int = 0,
     kv_scale: Optional[torch.Tensor] = None,
     kv_format: Optional[str] = None,
+    compress_ratio: int = -1,
+    window_size: int = 0,
+    compress_topk: int = 0,
+    seq_lens: Optional[torch.Tensor] = None,
+    query_lens: Optional[torch.Tensor] = None,
+    cache_layout: str = "BND",
 ) -> torch.Tensor:
     """Semantic op for V4 sparse attention with shared KV.
 
@@ -208,7 +253,13 @@ def _(
 
     ``kv_format="hif8"`` identifies the logical format independently of the
     uint8 carrier also used by mixed FP8 rows. ``kv_scale`` is then required.
+
+    Compression/window and request lengths retain the physical workload for
+    profiling lookup. Defaults preserve existing callers without authorizing
+    a match when the request metadata is missing.
     """
+    if cache_layout not in ("BND", "PA_BSND"):
+        raise ValueError(f"Unsupported V4 sparse attention cache layout: {cache_layout}")
     if kv_format not in (None, "hif8"):
         raise ValueError(f"Unsupported V4 KV format: {kv_format}")
     if kv_format == "hif8":

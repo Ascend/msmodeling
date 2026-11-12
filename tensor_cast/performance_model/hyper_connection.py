@@ -19,7 +19,7 @@
 import torch
 
 from . import _accumulate_compute_ops, _rmsnorm_ops
-from .op_invoke_info import OpInvokeInfo
+from .op_invoke_info import OpInvokeInfo, get_named_args
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.hc_pre_inv_rms.default)
@@ -110,9 +110,11 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.hc_pre_v3.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
-    x, hc_fn, _, _, _, hc_mult, sinkhorn_iters, _, hc_eps, *mode_args = op_invoke_info.args
-    mode = mode_args[0] if mode_args else op_invoke_info.kwargs.get("pre_mix_mode", "incoming")
-    hc_mult = int(hc_mult)
+    args = get_named_args(op_invoke_info)
+    x, hc_fn = args["hidden_states"], args["hc_fn"]
+    hc_mult = int(args["hc_mult"])
+    sinkhorn_iters, hc_eps = int(args["sinkhorn_iters"]), float(args["hc_eps"])
+    mode = args.get("pre_mix_mode", "incoming")
     hidden_size = int(x.shape[-1])
     num_rows = x.numel() // (hc_mult * hidden_size)
     mix_width = int(hc_fn.shape[0])
@@ -121,8 +123,7 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
         exclude_output_ids={3} if mode == "current" else set(),
     )
 
-    # One fused invocation reads its inputs and writes its external outputs. The
-    # intermediate FP32 projection and Sinkhorn tensors stay inside the op.
+    # The reference fused path has no declared external intermediate traffic.
     mma_ops = 2 * num_rows * hc_mult * hidden_size * mix_width
     rms_ops = _rmsnorm_ops(num_rows, hc_mult * hidden_size)
     setup_ops = num_rows * (3 * hc_mult + 2 * hc_mult * hc_mult)

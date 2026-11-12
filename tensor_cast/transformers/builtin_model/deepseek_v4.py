@@ -854,7 +854,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.config.rms_norm_eps,
             ),
         )
-        hidden_states = self.mlp(hidden_states, input_ids=input_ids)
+        if self.layer_idx < self.config.first_k_dense_replace:
+            hidden_states = self.mlp(hidden_states)
+        else:
+            hidden_states = self.mlp(hidden_states, input_ids=input_ids)
         hidden_states = self._emit_hc_post(hidden_states, residual, hc_post_ffn, hc_comb_ffn, self.hc_mult)
         return hidden_states
 

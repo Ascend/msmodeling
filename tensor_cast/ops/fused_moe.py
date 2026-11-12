@@ -49,6 +49,7 @@ def _(
 def _(
     x: torch.Tensor,
     topk_indices: torch.Tensor,
+    probs: Optional[torch.Tensor] = None,
     *,
     is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
@@ -60,8 +61,13 @@ def _(
         topk_indices: (bsz, seq_len, top_k), the top-k experts selected by each token
 
     Returns:
-        unpermuted_x: (bsz, seq_len, top_k, hidden_size)
+        unpermuted_x: (bsz, seq_len, top_k, hidden_size), or weighted
+            (bsz, seq_len, hidden_size) when probs is supplied, preserving x.dtype.
     """
+    if probs is not None:
+        if probs.shape != topk_indices.shape or x.shape[0] != topk_indices.numel():
+            raise ValueError("Weighted unpermute requires one probability per routed token")
+        return x.new_empty((*topk_indices.shape[:-1], x.shape[-1]))
     return torch.empty_like(x).view(*topk_indices.shape, x.shape[-1])
 
 

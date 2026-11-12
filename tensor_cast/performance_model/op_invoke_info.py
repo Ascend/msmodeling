@@ -20,6 +20,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import torch
+from torch._subclasses.fake_tensor import is_fake
 from torch.utils._cxx_pytree import tree_map
 
 from .. import ops  # noqa: F401
@@ -204,6 +205,17 @@ class OpInvokeInfo:
             for k, v in sorted(self.kwargs.items()):
                 key_components.append(k)
                 add_tensor_info(v, key_components)
+
+        if str(self.func).removeprefix("torch.ops.") in {
+            "tensor_cast.compressor.default",
+            "tensor_cast.quant_lightning_indexer.default",
+            "tensor_cast.sparse_attn_sharedkv.default",
+        }:
+            named = get_named_args(self)
+            for name in ("seq_lens", "query_lens"):
+                value = named.get(name)
+                if isinstance(value, torch.Tensor) and value.device.type == "cpu" and not is_fake(value):
+                    key_components.extend((name, str(value.reshape(-1).tolist())))
 
         # Create hash
         key_string = "|".join(key_components)

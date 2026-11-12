@@ -129,6 +129,28 @@ class TestHcPreModes(unittest.TestCase):
                 actual = block._hc_pre(self.x, self.fn, self.scale, self.base, self.incoming)
                 self.assert_contract(actual, "incoming")
 
+    def test_v4_hc_pre_contract_is_independent_of_paged_cache(self):
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        block = object.__new__(DeepseekV4DecoderLayer)
+        torch.nn.Module.__init__(block)
+        block.hc_mult, block.hc_sinkhorn_iters, block.hc_eps = 4, 20, 1e-6
+        block.config = SimpleNamespace(rms_norm_eps=1e-6)
+        block.self_attn = SimpleNamespace(use_paged_kv_cache=True)
+        for paged, dtype in (
+            (True, torch.bfloat16),
+            (False, torch.bfloat16),
+            (True, torch.float32),
+        ):
+            with self.subTest(paged=paged, dtype=str(dtype)):
+                block.self_attn.use_paged_kv_cache = paged
+                graph = make_fx(lambda x, fn, scale, base: block._emit_hc_pre(x, fn, scale, base))(
+                    self.x.to(dtype), self.fn, self.scale, self.base
+                )
+                call = next(n for n in graph.graph.nodes if n.target == torch.ops.tensor_cast.hc_pre_v3.default)
+                self.assertEqual(len(call.args), 10)
+                self.assertEqual(call.args[9], "current")
+
 
 if __name__ == "__main__":
     unittest.main()

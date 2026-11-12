@@ -41,6 +41,7 @@ def _(
     return torch.empty((M, N), dtype=x[0].dtype, device="meta")
 
 
+@register_tensor_cast_op("grouped_matmul_quant.packed")
 @register_tensor_cast_op("grouped_matmul_quant")
 @register_tensor_cast_op("grouped_matmul_quant_int4")
 def _(
@@ -178,6 +179,35 @@ def _(
     if out_dtype is None:
         out_dtype = x[0].dtype if x else torch.float32
     return _grouped_matmul_swiglu_out(x, w, out_dtype, packed_4bit_weight=True)
+
+
+@register_tensor_cast_op("grouped_matmul_quant_swiglu.quantized")
+def _(
+    x: List[torch.Tensor],
+    w: List[torch.Tensor],
+    w_scale: List[torch.Tensor],
+    w_offset: List[Optional[torch.Tensor]],
+    x_scale: List[torch.Tensor],
+    x_offset: List[Optional[torch.Tensor]],
+    bias: List[Optional[torch.Tensor]],
+    out_dtype: Optional[torch.dtype],
+    swiglu_limit: float = 0.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Ascend W8A8 GMM1 + SwiGLU + per-token requantization.
+
+    The physical kernel returns INT8 activations and FP32 scales for GMM2;
+    there is no intervening BF16 tensor or standalone DynamicQuant kernel.
+    ``out_dtype`` describes the floating-point activation epilogue.
+    """
+    count = len(x)
+    if not count or any(len(values) != count for values in (w, w_scale, w_offset, x_scale, x_offset, bias)):
+        raise ValueError("W8A8 GMM+SwiGLU+Quant requires equally sized nonempty expert lists")
+    if any(t.dtype != torch.int8 for t in (*x, *w)):
+        raise ValueError("W8A8 GMM+SwiGLU+Quant requires INT8 payloads and weights")
+    if out_dtype not in (torch.bfloat16, torch.float16) or swiglu_limit < 0:
+        raise ValueError("W8A8 GMM+SwiGLU+Quant requires a floating epilogue and non-negative clamp")
+    result = _grouped_matmul_swiglu_out(x, w, torch.int8, packed_4bit_weight=False)
+    return result, torch.empty((result.shape[0],), dtype=torch.float32, device=result.device)
 
 
 @register_tensor_cast_op("grouped_matmul_fp8_swiglu")

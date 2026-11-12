@@ -15,6 +15,7 @@
 # -------------------------------------------------------------------------
 
 import shutil
+import csv
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -92,6 +93,312 @@ def _make_op_info(func_name, args, out=None):
 
 def _write_text(path, content):
     path.write_text(content.strip(), encoding="utf-8")
+
+
+def _v4_grouped_test_database(tmp_path, kernel, rows=(16, 32)):
+    from tensor_cast.performance_model.profiling_database.backend_projector import (
+        v4_grouped_row_workload,
+    )
+
+    directory = tmp_path / kernel
+    directory.mkdir()
+    # Reduced captured ABIs: independent of LFS files and deployment mappings.
+    if kernel == "GroupedMatmulSwigluQuant":
+        inputs = "32,4096;32,128,256,16,32;32,4096;32;32"
+        types = "INT8;INT8;DT_FLOAT;DT_FLOAT;INT64"
+        outputs, output_types = "32,2048;32", "INT8;DT_FLOAT"
+    else:
+        inputs = "32,2048;32,2048,4096;;32,4096;;;;32;32"
+        types = "INT8;INT8;DT_INT32;DT_BF16;DT_FLOAT;FLOAT16;FLOAT16;INT64;DT_FLOAT"
+        outputs, output_types = "32,4096", "DT_BF16"
+    seed = {
+        "Input Shapes": inputs,
+        "Input Data Types": types,
+        "Input Formats": ";".join(["ND", "FRACTAL_NZ"] + ["ND"] * (len(inputs.split(";")) - 2)),
+        "Output Shapes": outputs,
+        "Output Data Types": output_types,
+        "Output Formats": ";".join(["ND"] * len(outputs.split(";"))),
+        "Profiling Average Duration(us)": "0",
+    }
+    if kernel == "GroupedMatmulSwigluQuant":
+        seed["Runtime swiglu_limit"] = "0.0"
+    seed["Average Duration(us)"] = "0"
+    op_name = (
+        "grouped_matmul_quant_swiglu.quantized"
+        if kernel == "GroupedMatmulSwigluQuant"
+        else "grouped_matmul_quant.packed"
+    )
+    mapping = f'''version: "test"
+operator_mappings:
+  "tensor_cast.{op_name}":
+    kernel_type: {kernel}
+    query_mode: v4_grouped_moe
+    physical_projection:
+      contract: ascend_v4_grouped_v1
+'''
+    _write_text(directory / "op_mapping.yaml", mapping)
+    original = v4_grouped_row_workload(kernel, seed)
+    with (directory / f"{kernel}.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(seed))
+        writer.writeheader()
+        for m in rows:
+            row = dict(seed)
+            inputs = (
+                ((m, 4096), (32, 128, 256, 16, 32), (32, 4096), (m,), (32,))
+                if kernel == "GroupedMatmulSwigluQuant"
+                else ((m, 2048), (32, 2048, 4096), (), (32, 4096), (), (), (), (32,), (m,))
+            )
+            outputs = ((m, 2048), (m,)) if kernel == "GroupedMatmulSwigluQuant" else ((m, 4096),)
+            row["Input Shapes"] = ";".join(",".join(map(str, shape)) for shape in inputs)
+            row["Output Shapes"] = ";".join(",".join(map(str, shape)) for shape in outputs)
+            row["Average Duration(us)"] = str(m * 2)
+            row["Profiling Average Duration(us)"] = str(m * 2)
+            writer.writerow(row)
+    return directory, seed, original
+
+
+def _v4_grouped_test_op(kernel, tokens, e=32):
+    from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+
+    up = kernel == "GroupedMatmulSwigluQuant"
+    k = 4096 if up else 2048
+    n = 4096
+    sizes = [tokens // e + (i < tokens % e) for i in range(e)]
+    x = [torch.empty((m, k), dtype=torch.int8, device="meta") for m in sizes]
+    w = [torch.empty((k, n), dtype=torch.int8, device="meta") for _ in sizes]
+    ws = [torch.empty((), dtype=torch.float32, device="meta") for _ in sizes]
+    xs = [torch.empty((m,), dtype=torch.float32, device="meta") for m in sizes]
+    func = (
+        torch.ops.tensor_cast.grouped_matmul_quant_swiglu.quantized
+        if up
+        else torch.ops.tensor_cast.grouped_matmul_quant.packed
+    )
+    args = (x, w, ws, [None] * e, xs, [None] * e, [None] * e, torch.bfloat16)
+    return OpInvokeInfo(func, args, {}, func(*args))
+
+
+@pytest.mark.parametrize("kernel", ["GroupedMatmul", "GroupedMatmulSwigluQuant"])
+def test_v4_grouped_exact_and_packed_token_interpolation(tmp_path, kernel):
+    directory, _, _ = _v4_grouped_test_database(tmp_path, kernel)
+    source = InterpolatingDataSource(ProfilingDataSource(directory))
+    exact = source.lookup(_v4_grouped_test_op(kernel, 16))
+    assert exact.source == QuerySource.MEASURED
+    assert exact.latency_us == 32
+    between = source.lookup(_v4_grouped_test_op(kernel, 24))
+    assert between.source == QuerySource.INTERPOLATED
+    assert between.latency_us == pytest.approx(48)
+    assert between.details["physical_projection"] == "ascend_v4_grouped_v1"
+    assert source.lookup(_v4_grouped_test_op(kernel, 8)) is None
+    assert source.lookup(_v4_grouped_test_op(kernel, 24, e=16)) is None
+
+
+def test_v4_grouped_up_requires_clamp_metadata(tmp_path):
+    directory, _, _ = _v4_grouped_test_database(tmp_path, "GroupedMatmulSwigluQuant")
+    path = directory / "GroupedMatmulSwigluQuant.csv"
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        row.pop("Runtime swiglu_limit")
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    source = InterpolatingDataSource(ProfilingDataSource(directory))
+    assert source.lookup(_v4_grouped_test_op("GroupedMatmulSwigluQuant", 16)) is None
+    assert source.lookup(_v4_grouped_test_op("GroupedMatmulSwigluQuant", 24)) is None
+
+
+@pytest.mark.parametrize("shape", [(1, 16, 64, 128), (1, 5, 128)])
+def test_v4_indexer_prepare_uses_exact_physical_stage_boundaries(tmp_path, shape):
+    from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+
+    _write_text(
+        tmp_path / "op_mapping.yaml",
+        '''version: "test"
+operator_mappings:
+  "tensor_cast.v4_indexer_query_quant.default":
+    kernel_type: MatMulV2
+    composite: true
+    decomposer: true
+''',
+    )
+    func = torch.ops.tensor_cast.v4_indexer_query_quant.default
+    q = torch.empty(shape, device="meta", dtype=torch.bfloat16)
+    op = OpInvokeInfo(func, (q,), {}, func(q))
+    specs = COMPOSITE_DECOMPOSERS[str(func)](op, {})
+    assert [spec.kernel_type for spec in specs] == ["MatMulV2", "Muls", "DynamicQuant", "Cast"]
+    assert all(spec.query_mode == "physical" for spec in specs)
+    assert specs[2].input_shapes == [shape[1:]]
+    assert specs[3].input_shapes == ([(16, 64)] if len(shape) == 4 else [(5, 1)])
+    for spec in specs:
+
+        def shape_text(shapes):
+            return ";".join(",".join(map(str, item)) for item in shapes)
+
+        row = {
+            "Input Shapes": shape_text(spec.input_shapes),
+            "Input Data Types": ";".join(spec.input_dtypes),
+            "Input Formats": ";".join(["ND"] * len(spec.input_shapes)),
+            "Output Shapes": shape_text(spec.runtime_params["physical_output_shapes"]),
+            "Output Data Types": ";".join(spec.runtime_params["physical_output_dtypes"]),
+            "Output Formats": ";".join(["ND"] * len(spec.runtime_params["physical_output_shapes"])),
+            "Duration(us)": "10",
+        }
+        with (tmp_path / f"{spec.kernel_type}.csv").open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(row))
+            writer.writeheader()
+            writer.writerow(row)
+    source = InterpolatingDataSource(ProfilingDataSource(tmp_path))
+    hit = source.lookup(op)
+    assert hit is not None and hit.source == QuerySource.MEASURED
+    assert hit.latency_us == 40
+    cast = tmp_path / "Cast.csv"
+    cast.write_text(cast.read_text().replace("FLOAT16", "DT_BF16"))
+    partial = InterpolatingDataSource(ProfilingDataSource(tmp_path)).lookup(op)
+    # PARTIAL is diagnostic only; EmpiricalPerformanceModel selects the full
+    # analytic op whenever any stage has no valid physical sample.
+    assert partial is None or partial.source == QuerySource.PARTIAL
+
+
+@pytest.mark.parametrize("kernel", ["HcPre", "HcPost"])
+def test_hc_token_interpolation_preserves_all_correlated_inputs(tmp_path, kernel):
+    from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+
+    name = "hc_pre_v3" if kernel == "HcPre" else "hc_post"
+    composite = "    composite: true\n    decomposer: true\n" if kernel == "HcPre" else ""
+    _write_text(
+        tmp_path / "op_mapping.yaml",
+        f'''version: "test"
+interpolation_policy:
+  kernel_overrides:
+    HcPost:
+      generic_compute:
+        co_varying_input_indices: [1, 2, 3]
+operator_mappings:
+  "tensor_cast.{name}.default":
+    kernel_type: {kernel}
+{composite}''',
+    )
+    rows = []
+    for tokens in (16, 32):
+        if kernel == "HcPre":
+            shapes = f"{tokens},4,4096;24,16384;3;24"
+            output = f"{tokens},4096;{tokens},4;{tokens},4,4"
+            types, output_types = "DT_BF16;FLOAT;FLOAT;FLOAT", "DT_BF16;FLOAT;FLOAT"
+        else:
+            shapes = f"1,{tokens},4096;1,{tokens},4,4096;1,{tokens},4;1,{tokens},4,4"
+            output = f"1,{tokens},4,4096"
+            types, output_types = "DT_BF16;DT_BF16;FLOAT;FLOAT", "DT_BF16"
+        rows.append(
+            {
+                "Input Shapes": shapes,
+                "Input Data Types": types,
+                "Input Formats": "ND;ND;ND;ND",
+                "Output Shapes": output,
+                "Output Data Types": output_types,
+                "Output Formats": ";".join(["ND"] * len(output.split(";"))),
+                "Duration(us)": str(tokens * 10),
+            }
+        )
+    with (tmp_path / f"{kernel}.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    if kernel == "HcPre":
+        args = (
+            torch.empty((1, 24, 4, 4096), dtype=torch.bfloat16, device="meta"),
+            torch.empty((24, 16384), device="meta"),
+            torch.empty((3,), device="meta"),
+            torch.empty((24,), device="meta"),
+            None,
+            4,
+            20,
+            1e-6,
+            1e-6,
+            "current",
+        )
+    else:
+        args = (
+            torch.empty((24, 4096), dtype=torch.bfloat16, device="meta"),
+            torch.empty((1, 24, 4, 4096), dtype=torch.bfloat16, device="meta"),
+            torch.empty((1, 24, 4), device="meta"),
+            torch.empty((1, 24, 4, 4), device="meta"),
+            4,
+        )
+    func = getattr(torch.ops.tensor_cast, name).default
+    op = OpInvokeInfo(func, args, {}, func(*args))
+    result = InterpolatingDataSource(ProfilingDataSource(tmp_path)).lookup(op)
+    assert result is not None and result.source == QuerySource.INTERPOLATED
+    assert result.latency_us == pytest.approx(240)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("batch_shape", [(2304,), (1, 2304), (2, 1152)])
+@pytest.mark.parametrize("keyword_call", [False, True])
+def test_hc_pre_exact_lookup_uses_fused_physical_abi(tmp_path, wrapped, batch_shape, keyword_call):
+    data_dir = tmp_path / "hc_pre_exact_lookup"
+    data_dir.mkdir()
+    _write_text(
+        data_dir / "op_mapping.yaml",
+        """
+version: "test"
+operator_mappings:
+  "tensor_cast.hc_pre_v3.default":
+    kernel_type: HcPre
+    composite: true
+    decomposer: true
+""",
+    )
+    _write_text(
+        data_dir / "HcPre.csv",
+        """
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
+"2304,4,4096;24,16384;3;24","DT_BF16;FLOAT;FLOAT;FLOAT","ND;ND;ND;ND","2304,4096;2304,4;2304,4,4","DT_BF16;FLOAT;FLOAT","ND;ND;ND",438.0
+""",
+    )
+    source = ProfilingDataSource(data_dir)
+    from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+
+    func = torch.ops.tensor_cast.hc_pre_v3.default
+    args = (
+        torch.empty((*batch_shape, 4, 4096), device="meta", dtype=torch.bfloat16),
+        torch.empty((24, 16384), device="meta", dtype=torch.float32),
+        torch.empty((3,), device="meta", dtype=torch.float32),
+        torch.empty((24,), device="meta", dtype=torch.float32),
+        None,
+        4,
+        20,
+        1e-6,
+        1e-6,
+        "current",
+    )
+    kwargs = dict(zip((arg.name for arg in func._schema.arguments), args)) if keyword_call else {}
+    call_args = () if keyword_call else args
+    op = OpInvokeInfo(func, call_args, kwargs, func(*call_args, **kwargs))
+    if wrapped:
+        source = InterpolatingDataSource(source)
+
+    result = source.lookup(op)
+
+    assert result is not None
+    assert result.source == QuerySource.MEASURED
+    assert result.latency_us == pytest.approx(438.0)
+    assert result.details["kernel_type"] == "HcPre"
+
+    # Equal tensor dimensions do not make other modes/scalars equivalent to
+    # the measured current-mode HcPre v2 call. The wrapper must not bypass it.
+    for key, value in (
+        ("pre_mix_mode", "incoming"),
+        ("sinkhorn_iters", 1),
+        ("norm_eps", 1e-5),
+        ("hc_eps", 0.0),
+    ):
+        rejected = dict(zip((arg.name for arg in func._schema.arguments), args))
+        rejected[key] = value
+        if key == "pre_mix_mode":
+            rejected["pre_mix"] = torch.empty((*batch_shape, 4), device="meta", dtype=torch.float32)
+        rejected_op = OpInvokeInfo(func, (), rejected, func(**rejected))
+        assert source.lookup(rejected_op) is None
 
 
 def test_elementwise_axes_use_total_input_output_numel():
@@ -2305,6 +2612,156 @@ operator_mappings:
     assert result is not None
     assert result.source == QuerySource.MEASURED
     assert result.latency_us == pytest.approx(99.0)
+
+
+def _v4_scatter_row(tokens, dtype="DT_BF16", width=512, *, pages=16, update_rank=3):
+    cache = f"{pages},128,1,{width}"
+    return {
+        "Input Shapes": f"{cache};{tokens},2;{tokens},1,{width}"
+        if update_rank == 3
+        else f"{cache};{tokens},2;{tokens},{width}",
+        "Input Data Types": f"{dtype};INT32;{dtype}",
+        "Input Formats": "NCHW;ND;NCL" if update_rank == 3 else "NCHW;ND;ND",
+        "Output Shapes": cache,
+        "Output Data Types": dtype,
+        "Output Formats": "NCHW",
+        "Average Duration(us)": str(tokens / 10),
+        "Profiling Average Duration(us)": "0",
+    }
+
+
+def _v4_scatter_fixture(tmp_path, rows, dtype=torch.bfloat16, width=512, *, tokens=150, boundary=0):
+    _write_text(
+        tmp_path / "op_mapping.yaml",
+        'version: "test"\noperator_mappings:\n  "tensor_cast.scatter_nd_update_mla.default":\n'
+        '    kernel_type: ScatterNdUpdateV2\n    query_mode: scatter_nd_update_mla\n',
+    )
+    with (tmp_path / "ScatterNdUpdateV2.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    update = torch.empty((1, tokens, width), dtype=dtype, device="meta")
+    cache = torch.empty((max(1, (tokens - boundary + 127) // 128), 128, width), dtype=dtype, device="meta")
+    indices = torch.empty(tokens, dtype=torch.int64, device="meta")
+    info = _make_op_info("tensor_cast.scatter_nd_update_mla.default", [update, cache, indices], cache)
+    info.func = torch.ops.tensor_cast.scatter_nd_update_mla.default
+    info.kwargs = {"cache_layout": "PA_BSND", "boundary_rows": boundary}
+    return InterpolatingDataSource(ProfilingDataSource(tmp_path)), info
+
+
+@pytest.mark.parametrize(
+    "dtype,label,width,rank",
+    [
+        (torch.bfloat16, "DT_BF16", 512, 3),
+        (torch.bfloat16, "DT_BF16", 512, 2),
+        (torch.int8, "INT8", 128, 2),
+        (torch.float16, "FLOAT16", 1, 3),
+    ],
+)
+def test_v4_scatter_interpolates_physical_layout(tmp_path, dtype, label, width, rank):
+    rows = [_v4_scatter_row(n, label, width, update_rank=rank) for n in (100, 200)]
+    ds, info = _v4_scatter_fixture(tmp_path, rows, dtype, width)
+    result = ds.lookup(info)
+    assert result.source == QuerySource.INTERPOLATED
+    assert result.latency_us == pytest.approx(15)
+    assert result.details["physical_projection"] == "ascend_v4_cache_v1"
+    assert result.details["interpolation_path"] == "v4_scatter_physical_1d"
+    assert ds.lookup(info).latency_us == result.latency_us  # cached physical index
+
+
+def test_v4_scatter_preserves_exact_before_interpolation(tmp_path):
+    rows = [_v4_scatter_row(n) for n in (100, 150, 200)]
+    ds, info = _v4_scatter_fixture(tmp_path, rows)
+    result = ds.lookup(info)
+    assert result.source == QuerySource.MEASURED
+    assert result.latency_us == pytest.approx(15)
+    assert result.shape_match_info.shape_match_rule == "v4_cache_physical"
+
+
+def test_v4_scatter_explicit_contract_uses_physical_interpolation(tmp_path):
+    ds, info = _v4_scatter_fixture(tmp_path, [_v4_scatter_row(n) for n in (100, 200)])
+    mapping = ds.base._op_mapping["operator_mappings"]["tensor_cast.scatter_nd_update_mla.default"]
+    mapping.update(query_mode="v4_cache", physical_projection={"contract": "ascend_v4_cache_v1"})
+    assert ds.lookup(info).latency_us == pytest.approx(15)
+    mapping["physical_projection"]["contract"] = "unverified"
+    assert ds.lookup(info) is None
+
+
+def test_v4_scatter_compressed_boundary_row_uses_shared_contract(tmp_path):
+    rows = [_v4_scatter_row(n) for n in (1024, 1026)]
+    ds, info = _v4_scatter_fixture(tmp_path, rows, tokens=1025, boundary=1)
+    assert info.args[1].shape[0] == 8
+    assert ds.lookup(info).latency_us == pytest.approx(102.5)
+    info.kwargs["boundary_rows"] = 0
+    assert ds.lookup(info) is None  # 8 pages hold 1024 active rows, not 1025
+
+
+def test_v4_scatter_does_not_require_simulated_pool_capacity_match(tmp_path):
+    rows = [_v4_scatter_row(n, pages=16) for n in (100, 200)]
+    ds, info = _v4_scatter_fixture(tmp_path, rows)
+    assert info.args[1].shape[0] == 2
+    assert ds.lookup(info).latency_us == pytest.approx(15)
+
+
+def test_v4_scatter_interpolation_keeps_pool_curves_separate(tmp_path):
+    rows = [_v4_scatter_row(n, pages=16) for n in (100, 200)]
+    other_pool = _v4_scatter_row(180, pages=32)
+    other_pool["Average Duration(us)"] = "180"
+    rows.append(other_pool)
+    ds, info = _v4_scatter_fixture(tmp_path, rows)
+    assert ds.lookup(info).latency_us == pytest.approx(15)
+
+
+@pytest.mark.parametrize("change", ["pool", "format", "dtype", "latency_source"])
+def test_v4_scatter_does_not_mix_physical_groups(tmp_path, change):
+    rows = [_v4_scatter_row(n) for n in (100, 200)]
+    if change == "pool":
+        rows[1] = _v4_scatter_row(200, pages=32)
+    elif change == "format":
+        rows[1] = _v4_scatter_row(200, update_rank=2)
+    elif change == "dtype":
+        rows[1] = _v4_scatter_row(200, dtype="FLOAT16")
+    else:
+        rows[1]["Average Duration(us)"] = "0"
+        rows[1]["Profiling Average Duration(us)"] = "20"
+    ds, info = _v4_scatter_fixture(tmp_path, rows)
+    assert ds.lookup(info) is None
+
+
+@pytest.mark.parametrize("change", ["index", "update", "output", "format", "capacity", "zero", "nan", "negative"])
+def test_v4_scatter_rejects_invalid_physical_rows(tmp_path, change):
+    rows = [_v4_scatter_row(n) for n in (100, 200)]
+    for n, row in zip((100, 200), rows):
+        if change == "index":
+            row["Input Shapes"] = row["Input Shapes"].replace(f";{n},2;", f";{n},1;")
+        elif change == "update":
+            row["Input Shapes"] = row["Input Shapes"].replace(f";{n},1,512", f";{n},2,512")
+        elif change == "output":
+            row["Output Data Types"] = "FLOAT16"
+        elif change == "format":
+            row["Input Formats"] = "ND;ND;ND"
+        elif change == "capacity":
+            row["Input Shapes"] = row["Input Shapes"].replace("16,128,1,512", "1,128,1,512")
+            row["Output Shapes"] = "1,128,1,512"
+        else:
+            row["Average Duration(us)"] = {"zero": "0", "nan": "nan", "negative": "-1"}[change]
+    ds, info = _v4_scatter_fixture(tmp_path, rows)
+    assert ds.lookup(info) is None
+
+
+def test_v4_scatter_does_not_bypass_layout_or_extrapolate(tmp_path):
+    rows = [_v4_scatter_row(n) for n in (100, 200)]
+    ds, info = _v4_scatter_fixture(tmp_path, rows, tokens=300)
+    assert ds.lookup(info) is None
+    info.args = (
+        torch.empty(1, 150, 512, dtype=torch.bfloat16, device="meta"),
+        info.args[1],
+        torch.empty(150, dtype=torch.int64, device="meta"),
+    )
+    info.kwargs["cache_layout"] = "BND"
+    assert ds.lookup(info) is None
+    info.kwargs["cache_layout"] = "PA_BSND"
+    assert ds.lookup(info).latency_us == pytest.approx(15)
 
 
 def test_scatter_nd_update_mla_interpolates_reordered_cache_update(tmp_path):

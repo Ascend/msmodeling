@@ -820,6 +820,57 @@ def test_grouped_matmul_meta_ops_preserve_shapes_and_dtype():
     assert torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default([], [], [], [], [], None).shape == (0, 0)
 
 
+def test_grouped_quant_swiglu_overloads_preserve_output_contracts():
+    x = [torch.empty((2, 4), dtype=torch.int8, device="meta"), torch.empty((1, 4), dtype=torch.int8, device="meta")]
+    w = [torch.empty((4, 12), dtype=torch.int8, device="meta") for _ in x]
+    w_scale = [torch.empty((12,), device="meta") for _ in x]
+    x_scale = [torch.empty((value.shape[0],), device="meta") for value in x]
+    missing = [None] * len(x)
+    args = (x, w, w_scale, missing, x_scale, missing, missing, torch.bfloat16)
+    op = torch.ops.tensor_cast.grouped_matmul_quant_swiglu
+
+    floating = op.default(*args)
+    assert isinstance(floating, torch.Tensor)
+    assert floating.shape == (3, 6)
+    assert floating.dtype == torch.bfloat16
+
+    payload, scale = op.quantized(*args, swiglu_limit=7.0)
+    assert payload.shape == floating.shape
+    assert payload.dtype == torch.int8
+    assert scale.shape == (3,)
+    assert scale.dtype == torch.float32
+
+
+@pytest.mark.parametrize("limit", [0.0, 7.0])
+@pytest.mark.parametrize("keyword_limit", [False, True])
+def test_grouped_quant_swiglu_properties_include_native_quantization(limit, keyword_limit):
+    x = [torch.empty((2, 4), dtype=torch.int8, device="meta"), torch.empty((1, 4), dtype=torch.int8, device="meta")]
+    w = [torch.empty((4, 12), dtype=torch.int8, device="meta") for _ in x]
+    w_scale = [torch.empty((12,), device="meta") for _ in x]
+    x_scale = [torch.empty((value.shape[0],), device="meta") for value in x]
+    missing = [None] * len(x)
+    args = (x, w, w_scale, missing, x_scale, missing, missing, torch.bfloat16)
+    op = torch.ops.tensor_cast.grouped_matmul_quant_swiglu
+    base = OpInvokeInfo(op.default, args, {}, op.default(*args)).get_perf_properties()
+    quant_args = args if keyword_limit else (*args, limit)
+    kwargs = {"swiglu_limit": limit} if keyword_limit else {}
+    output = op.quantized(*quant_args, **kwargs)
+
+    props = OpInvokeInfo(op.quantized, quant_args, kwargs, output).get_perf_properties()
+
+    # Both experts perform 3 * 4 * 12 multiply-adds on INT8 inputs.
+    assert props.compute_ops[torch.int8].mma_ops == 2 * 3 * 4 * 12
+    assert props.compute_ops[torch.int8].mma_ops == base.compute_ops[torch.int8].mma_ops
+    # Each of the 18 SwiGLU outputs adds five quantization operations;
+    # enabled gate/up clipping adds four comparisons per output.
+    assert props.compute_ops[torch.bfloat16].gp_ops - base.compute_ops[torch.bfloat16].gp_ops == 18 * (
+        9 if limit > 0 else 5
+    )
+    assert props.memory_read_bytes == base.memory_read_bytes
+    # Only the INT8 payload and three FP32 row scales leave the fused kernel.
+    assert props.memory_write_bytes == 18 + 3 * 4
+
+
 def test_grouped_matmul_swiglu_meta_ops_halve_gate_up_features():
     x = [torch.empty((2, 4), device="meta"), torch.empty((1, 4), device="meta")]
     w = [torch.empty((4, 12), device="meta"), torch.empty((4, 12), device="meta")]

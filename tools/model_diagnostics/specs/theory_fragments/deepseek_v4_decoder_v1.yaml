@@ -53,6 +53,8 @@ stages:
         - square
         - sub
         - scatter_nd_update_mla
+        # Scheduling dependency only; it preserves tensor values and shape.
+        - _internal_order_barrier
         - clamp
         - where
         - cat
@@ -88,6 +90,7 @@ stages:
         - mm
         - cat
         - scatter_nd_update_mla
+        - _internal_order_barrier
 
   - id: attention_preproj_ratio4
     modules:
@@ -118,6 +121,7 @@ stages:
         - square
         - sub
         - scatter_nd_update_mla
+        - _internal_order_barrier
         - clamp
         - where
         - cat

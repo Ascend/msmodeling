@@ -985,3 +985,81 @@ def test_raw_logits_false_non_shared_ep_regression():
     assert output.shape == (1, seq_len, 16)
     # False path: _dp_transform_enter runs first, gate sees sliced token count.
     assert gate.seen_shape == ((seq_len + tp_size - 1) // tp_size, 16)
+
+
+def _w8a8_dispatch_fixture(enabled=True, ep_size=2, per_token=True):
+    from tensor_cast.layers.quant_linear import TensorCastQuantLinear
+    from tensor_cast.model_config import LinearQuantConfig, LinearQuantType, QuantGranularity, QuantScheme
+    from tensor_cast.parallel_group import ParallelGroup
+
+    class Expert(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.swiglu_limit = 7.0
+            for name, k, n in (("gate_proj", 16, 8), ("up_proj", 16, 8), ("down_proj", 8, 16)):
+                linear = torch.nn.Linear(k, n, bias=False, device="meta", dtype=torch.bfloat16)
+                config = LinearQuantConfig(
+                    quant_type=LinearQuantType.W8A8,
+                    weight_scale=torch.ones(n, 1, device="meta", dtype=torch.float32),
+                    dynamic_quant_granularity=QuantGranularity.PER_SAMPLE if per_token else QuantGranularity.PER_TENSOR,
+                    dynamic_quant_scheme=QuantScheme.SYMMETRIC,
+                    out_dtype=torch.bfloat16,
+                )
+                setattr(self, name, TensorCastQuantLinear(linear, config))
+
+        def forward(self, x):
+            return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+
+    experts = torch.nn.ModuleList(Expert() for _ in range(4))
+    return FusedMoETensorCast(
+        MoEConfig(module_name="mlp", dispatch_with_quant=enabled),
+        experts,
+        None,
+        None,
+        2,
+        ep_group=ParallelGroup(0, [list(range(ep_size))], ep_size),
+    )
+
+
+@pytest.mark.parametrize("per_token", [False, True])
+def test_ascend_w8a8_dispatch_has_three_collectives_and_fused_requant(per_token):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    module = _w8a8_dispatch_fixture(per_token=per_token)
+    original_splits = module.get_split_sizes(16, 2)
+    x = torch.empty(8, 16, device="meta", dtype=torch.bfloat16)
+    indices = torch.empty(8, 2, device="meta", dtype=torch.int32)
+    weights = torch.empty(8, 2, device="meta", dtype=torch.float32)
+    graph = make_fx(module)(x, indices, weights)
+    collectives = [node for node in graph.graph.nodes if node.target == torch.ops.tensor_cast.all_to_all.default]
+    assert len(collectives) == 3
+    assert [node.args[0].meta["val"].dtype for node in collectives] == [torch.float32, torch.int8, torch.bfloat16]
+    assert [node.args[0].meta["val"].numel() for node in collectives[:2]] == [16, 16 * 16]
+    assert module.get_split_sizes(16, 2) == original_splits
+    assert len([node for node in graph.graph.nodes if node.target == torch.ops.tensor_cast.all_gather.default]) == 1
+    assert (
+        len(
+            [
+                node
+                for node in graph.graph.nodes
+                if node.target == torch.ops.tensor_cast.dynamic_quantize_symmetric.default
+            ]
+        )
+        == 1
+    )
+    up = next(
+        node for node in graph.graph.nodes if node.target == torch.ops.tensor_cast.grouped_matmul_quant_swiglu.quantized
+    )
+    assert up.meta["val"][0].dtype == torch.int8
+    assert up.meta["val"][1].dtype == torch.float32
+    assert any(node.target == torch.ops.tensor_cast.grouped_matmul_quant.packed for node in graph.graph.nodes)
+    assert up.meta["val"][1].numel() == up.meta["val"][0].shape[0]
+    assert up.args[8] == 7.0
+    output = next(node for node in graph.graph.nodes if node.op == "output")
+    assert output.args[0].meta["val"].shape == x.shape
+    assert output.args[0].meta["val"].dtype == x.dtype
+
+
+@pytest.mark.parametrize("enabled,ep_size", [(False, 2), (True, 1)])
+def test_quantized_ep_dispatch_is_opt_in_and_requires_expert_parallel(enabled, ep_size):
+    assert not _w8a8_dispatch_fixture(enabled, ep_size)._quantized_dispatch_experts

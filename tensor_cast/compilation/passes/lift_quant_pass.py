@@ -20,6 +20,7 @@ from typing import Any, Dict, Tuple
 
 import torch
 import torch.fx as fx
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from ... import ops  # noqa: F401
 from ..pass_base import TensorCastGraphModulePass
@@ -83,6 +84,14 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
             """Checks if a node produces multiple outputs, i.e. used by getitem."""
             return any(user.op == "call_function" and user.target == operator.getitem for user in node.users)
 
+        def preserves_last_dim(node: fx.Node) -> bool:
+            """Only move row quantization across views with the same row width."""
+            before = node.args[0].meta.get("val", node.args[0].meta.get("tensor_meta"))
+            after = node.meta.get("val", node.meta.get("tensor_meta"))
+            if before is None or after is None or not before.shape or not after.shape:
+                return False
+            return statically_known_true(before.shape[-1] == after.shape[-1])
+
         graph = gm.graph
 
         for quantize_op in self._QUANTIZE_OPS:
@@ -100,10 +109,21 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
                 current_input = original_quant_node.args[0]
                 swappable_ops_chain = []
 
-                # HIF8 per-token scales describe the original [M,K] rows.
-                # Deduplicate identical calls, but do not move the reduction
-                # across a reshape that can change token/channel boundaries.
+                # Axis-dependent scales must retain their reduction groups
+                # and output layout. A reshape can change both even when the
+                # quantized payload has the same number of elements.
+                reduction_dims = (
+                    original_quant_node.args[1]
+                    if len(original_quant_node.args) > 1
+                    else original_quant_node.kwargs.get("dims", ())
+                )
+                has_reduction = quantize_op in (
+                    torch.ops.tensor_cast.dynamic_quantize_symmetric.default,
+                    torch.ops.tensor_cast.dynamic_quantize_asymmetric.default,
+                ) and bool(reduction_dims)
                 while is_swappable(current_input) and "hif8" not in str(quantize_op):
+                    if has_reduction and (tuple(reduction_dims) != (-1,) or not preserves_last_dim(current_input)):
+                        break
                     # As a safety check, we only lift through an op if it has a single user.
                     # Lifting an op with multiple users would affect other paths in the graph.
                     if len(current_input.users) > 1:
@@ -200,7 +220,15 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
                                 user.replace_all_uses_with(final_node)
                             else:
                                 assert idx in new_getitem_nodes
-                                user.replace_all_uses_with(new_getitem_nodes[idx])
+                                scale_node = new_getitem_nodes[idx]
+                                if has_reduction and swappable_ops_chain:
+                                    # Keep scale/offset in the original view's row layout.
+                                    scale_shape = [*original_quant_node.args[0].args[1][:-1], 1]
+                                    with graph.inserting_after(scale_node):
+                                        scale_node = graph.call_function(
+                                            torch.ops.aten.reshape.default, (scale_node, scale_shape)
+                                        )
+                                user.replace_all_uses_with(scale_node)
                 else:
                     original_quant_node.replace_all_uses_with(final_node)
 
