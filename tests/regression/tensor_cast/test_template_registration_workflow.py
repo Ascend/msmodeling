@@ -125,7 +125,12 @@ def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixel
     )
     runtime = Runtime(
         event_list=[],
-        memory_tracker=SimpleNamespace(peak_mem_usage=lambda: 10 * 1024**3),
+        memory_tracker=SimpleNamespace(
+            # The supplied template graph accounts only for a representative
+            # layer, so its raw peak is lower than full resident weights.
+            peak_mem_usage=lambda: 1 * 1024**3,
+            peak_intermediate_bytes=lambda: 512 * 1024**2,
+        ),
         total_execution_time_s=lambda: {'analytic': 0.1},
         table_averages=lambda **_: [],
         get_breakdowns=lambda: {},
@@ -150,7 +155,16 @@ def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixel
     assert metrics.kv_cache_size_gb == 3 * 1024 / 1024**3
     assert metrics.kv_cache_per_token_gb == 28 / 1024**3
     assert metrics.model_weight_size_gb == (4 if has_pixels else 2)
-    assert metrics.device_memory_available_gb == 21
+    expected_activation_gb = 0.5
+    expected_peak_gb = max(
+        1.0,
+        metrics.model_weight_size_gb + metrics.kv_cache_size_gb + expected_activation_gb,
+    )
+    assert metrics.model_activation_size_gb == pytest.approx(expected_activation_gb)
+    assert metrics.peak_memory_usage_gb == pytest.approx(expected_peak_gb)
+    assert metrics.device_memory_available_gb == pytest.approx(
+        runner.total_device_memory_gb - expected_peak_gb - runner.user_input.reserved_memory_gb
+    )
     assert metrics.tps_per_model == {'analytic': 80}
     assert observer == [runtime]
 

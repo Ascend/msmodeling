@@ -908,23 +908,39 @@ class ModelRunner:
                         self.model_weight_size_gb -= bytes_of_tensor(value) / 1024**3
 
         if graph_provider is not None:
-            # Template tensors are reconstructed without model parameter identities.
-            # Keep the aggregate accounting for this path to avoid adding weights
-            # already represented in the supplied graph.
+            # Template tensors are reconstructed without model parameter identities,
+            # so the aggregate tracker peak contains only the weights represented by
+            # the expanded graph (which can be just one RegionMarker layer).  Do not
+            # infer activation by subtracting the full resident model weight from
+            # that partial peak: it can make the activation negative and clamp it to
+            # zero.  The tracker still sees the graph's intermediate lifetimes, so
+            # use its explicit activation account and rebuild the physical peak from
+            # the full model weight + resident cache + activation.  Keep any extra
+            # aggregate bytes beyond those accounts as an opaque resident remainder.
             raw_peak_memory_usage_gb = peak_memory_usage_gb
-            peak_memory_usage_gb, _ = self._check_peak_memory_usage_gb(peak_memory_usage_gb, kv_cache_size_gb, requests)
             resident_baseline_gb = self.model_weight_size_gb + kv_cache_size_gb
-            model_activation_size_gb = peak_memory_usage_gb - resident_baseline_gb
-            if model_activation_size_gb < 0:
-                logger.warning(
-                    "Negative template activation estimate (peak=%.6f GB, weight=%.6f GB, kv=%.6f GB). "
-                    "Clamping activation to 0 and adjusting peak for consistency.",
-                    peak_memory_usage_gb,
-                    self.model_weight_size_gb,
-                    kv_cache_size_gb,
+            intermediate_gb = runtime.memory_tracker.peak_intermediate_bytes() / 1024**3
+            template_non_kv_resident_gb = max(
+                0.0,
+                raw_peak_memory_usage_gb - resident_baseline_gb - intermediate_gb,
+            )
+            peak_memory_usage_gb = max(
+                raw_peak_memory_usage_gb,
+                resident_baseline_gb + intermediate_gb,
+            )
+            peak_memory_usage_gb, peak_calibrated = self._check_peak_memory_usage_gb(
+                peak_memory_usage_gb,
+                kv_cache_size_gb,
+                requests,
+                intermediate_gb,
+                non_kv_resident_gb=template_non_kv_resident_gb,
+            )
+            model_activation_size_gb = intermediate_gb
+            if peak_calibrated:
+                model_activation_size_gb = max(
+                    0.0,
+                    peak_memory_usage_gb - resident_baseline_gb - template_non_kv_resident_gb,
                 )
-                model_activation_size_gb = 0.0
-                peak_memory_usage_gb = resident_baseline_gb
             param_matched_size_gb = float("nan")
             derived_resident_size_gb = float("nan")
             non_kv_resident_size_gb = None
