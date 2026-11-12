@@ -287,6 +287,17 @@ class ModelProfile:
     # scatter from the image budget instead (Qwen3.5 VL) leave this off.
     requires_image_span_in_chunk: bool = False
 
+    # Optional module path for models whose token embedding is not named
+    # ``embed_tokens``.  When word-embedding TP is enabled, this path is added
+    # to the generic embedding sharding plan.
+    # Example: Bailing V3 uses ``model.word_embeddings``.
+    embedding_module_path: Optional[str] = None
+
+    # Additional multimodal module or parameter paths omitted together with the
+    # visual tower in language-model-only deployments. The construction hook
+    # identifies whether each path is registered as a module or parameter.
+    language_model_only_extra_paths: tuple[str, ...] = ()
+
     # Mapping for linear layers in the visual feature merger/projector.
     # Defines how visual features are projected to the language space.
     visual_merger_linear_mapping: Optional[Dict[str, Any]] = dataclasses.field(default_factory=dict)

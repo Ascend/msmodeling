@@ -241,6 +241,7 @@ for _model_type, _config, _model in (
             language_module_path="language_model" if _model_type == "step5_vl" else None,
             language_layers_path_str="language_model.layers" if _model_type == "step5_vl" else "layers",
             visual_module_path="vision_model" if _model_type == "step5_vl" else None,
+            language_model_only_extra_paths=("multi_modal_projector",) if _model_type == "step5_vl" else (),
             visual_layers_module_path="vision_model.layers" if _model_type == "step5_vl" else None,
             visual_layers_path_str="vision_model.layers" if _model_type == "step5_vl" else None,
         )

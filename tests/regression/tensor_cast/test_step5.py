@@ -30,6 +30,7 @@ from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
 from tensor_cast.performance_model.builtin_model.step5 import capped_causal_pairs
 from tensor_cast.performance_model.builtin_model.step5 import visible_region_sum
 from tensor_cast.transformers.builtin_model.step5 import Step5Config, Step5VLConfig, Step5ExpertMLP
+from tensor_cast.transformers.custom_model_registry import get_model_profile
 from tests.helpers.model_assets import vendored_model_config_path
 
 
@@ -84,6 +85,7 @@ def test_official_geometry_and_dense_boundaries():
     assert (text.n_routed_experts, text.num_experts_per_tok, text.num_key_value_heads) == (352, 8, 4)
     assert text.sparse_config["topk"] * text.sparse_config["region_block_size"] == 4096
     assert cfg.vision_config.num_hidden_layers == 47
+    assert get_model_profile("step5_vl").language_model_only_extra_paths == ("multi_modal_projector",)
 
 
 def test_config_round_trip_preserves_sparse_and_moe_structure():

@@ -180,6 +180,12 @@ def test_profile_is_v41_specific_and_does_not_fallback_to_v4() -> None:
     profile = get_model_profile("deepseek_v41")
     assert profile is not None
     assert profile.model_type == "deepseek_v41"
+    assert profile.language_model_only_extra_paths == (
+        "aligner",
+        "image_start",
+        "image_end",
+        "image_newline",
+    )
     assert profile.mla_module_name == "DeepseekV41SparseAttention"
     assert profile.mla_module_class_type.__name__ == "DeepseekV41SparseAttention"
     assert profile.visual_module_path == "vision"

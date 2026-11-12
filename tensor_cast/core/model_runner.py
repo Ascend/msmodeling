@@ -44,11 +44,11 @@ from ..performance_model.profiling_database import InterpolatingDataSource, Prof
 from ..performance_model.utils import bytes_of_tensor
 from ..pipeline_parallel import PipelineModel, PipelineProfile, PipelineRunResult, PipelineRunner
 from ..runtime import Runtime
-from ..transformers.custom_model_registry import get_visual
 from .input_generator import dcp_kv_token_capacity_factor
 from .input_generator import kv_cache_excluded_layer_indices
 from .input_generator import (
     generate_inputs_varlen,
+    get_multimodal_h2d_num_bytes,
     get_inputs_num_bytes,
     get_kv_cache_info,
     RequestInfo,
@@ -658,6 +658,14 @@ class ModelRunner:
             execution_time_s * self.user_input.world_size
         )
 
+    def _get_host_to_device_time_s(self, num_bytes: int) -> Optional[float]:
+        if num_bytes <= 0:
+            return 0.0
+        bandwidth = self.device_profile.host_bandwidth_bytes_ps * self.device_profile.host_transfer_efficiency
+        if bandwidth <= 0:
+            return None
+        return self.device_profile.host_latency_s + num_bytes / bandwidth
+
     def run_inference(
         self,
         requests: Optional[List[RequestInfo]] = None,
@@ -690,6 +698,8 @@ class ModelRunner:
             requests,
             block_size=self.user_input.block_size,
         )
+        multimodal_input_h2d_bytes = get_multimodal_h2d_num_bytes(input_kwargs)
+        multimodal_input_h2d_time_s = self._get_host_to_device_time_s(multimodal_input_h2d_bytes)
         run_start = time.perf_counter()
         if isinstance(self.model, PipelineModel):
             if getattr(self.user_input, "enable_decode_kv_offload", False) or getattr(
@@ -727,6 +737,8 @@ class ModelRunner:
                 pipeline_result,
                 batch_size=batch_size,
                 run_time_s=run_end - run_start,
+                multimodal_input_h2d_bytes=multimodal_input_h2d_bytes,
+                multimodal_input_h2d_time_s=multimodal_input_h2d_time_s,
                 profiling_source_times_s=profiling_source_times_s,
                 profiling_miss_reasons=profiling_miss_reasons,
             )
@@ -804,7 +816,6 @@ class ModelRunner:
                 for event in runtime.event_list
                 if perf_model_name in event.perf_results
             )
-
         # Calculate TPS for each model
         tps_per_model: Dict[str, float] = {}
         for model_name, exec_time in all_execution_time_s.items():
@@ -891,22 +902,6 @@ class ModelRunner:
         # per-token cost above stays the true physical cost; the capacity gain is
         # surfaced as a multiplier that warmup() applies to ``num_blocks``.
         kv_cache_token_capacity_factor = dcp_kv_token_capacity_factor(self.model)
-        if get_visual(self.model) and input_kwargs.get("pixel_values") is None:
-            # If there is no image input, the visual part does not participate
-            # in the calculation and needs to be removed
-            visual_weight_size_gb = self.model.get_weight_size_nested([get_visual(self.model)]) / 1024**3
-            self.model_weight_size_gb = self.model_weight_size_gb - visual_weight_size_gb
-            if self.model.model_config.hf_config.model_type == "deepseek_v41":
-                # V4.1 stores its Aligner and boundary embeddings beside the ViT.
-                unwrapped = self.model.unwrap()
-                aligner = getattr(unwrapped, "aligner", None)
-                if aligner is not None:
-                    self.model_weight_size_gb -= self.model.get_weight_size_nested([aligner]) / 1024**3
-                for name in ("image_start", "image_end", "image_newline"):
-                    value = getattr(unwrapped, name, None)
-                    if isinstance(value, torch.Tensor):
-                        self.model_weight_size_gb -= bytes_of_tensor(value) / 1024**3
-
         if graph_provider is not None:
             # Template tensors are reconstructed without model parameter identities,
             # so the aggregate tracker peak contains only the weights represented by
@@ -960,16 +955,6 @@ class ModelRunner:
             # unexecuted weights), so adding them again afterwards would double
             # count them.
             unexecuted_named_tensors = list(self.model.named_parameters()) + list(self.model.named_buffers())
-            if get_visual(self.model) and input_kwargs.get("pixel_values") is None:
-                # Symmetric with the weight-account exclusion above: text-only
-                # runs do not host the vision tower, so its params are not
-                # resident either.
-                visual = get_visual(self.model)
-                visual_tensor_ids = {id(t) for _, t in visual.named_parameters(remove_duplicate=False)}
-                visual_tensor_ids |= {id(t) for _, t in visual.named_buffers(remove_duplicate=False)}
-                unexecuted_named_tensors = [
-                    (name, tensor) for name, tensor in unexecuted_named_tensors if id(tensor) not in visual_tensor_ids
-                ]
             unexecuted_resident_size_gb = (
                 runtime.memory_tracker.unexecuted_param_bytes(unexecuted_named_tensors) / 1024**3
             )
@@ -990,13 +975,6 @@ class ModelRunner:
             from ..transformers.model import TransformerModel
 
             represented_extra_weight_bytes = TransformerModel.get_represented_extra_weight_size(self.model)
-            if get_visual(self.model) and input_kwargs.get("pixel_values") is None:
-                # Symmetric with the weight-account exclusion above: text-only
-                # runs do not host the vision tower, so its extrapolated weight is
-                # not resident either.
-                represented_extra_weight_bytes -= TransformerModel.get_represented_extra_weight_size(
-                    get_visual(self.model)
-                )
             represented_weight_size_gb = represented_extra_weight_bytes / 1024**3
             peak_memory_usage_gb += represented_weight_size_gb
             raw_peak_memory_usage_gb = peak_memory_usage_gb
@@ -1067,6 +1045,8 @@ class ModelRunner:
             engram_host_resident_per_rank_gb=self.engram_host_resident_per_rank_gb,
             host_to_device_bytes=host_to_device_bytes,
             host_to_device_time_s=host_to_device_time_s,
+            multimodal_input_h2d_bytes=multimodal_input_h2d_bytes,
+            multimodal_input_h2d_time_s=multimodal_input_h2d_time_s,
             peak_memory_usage_gb=peak_memory_usage_gb,
             raw_peak_memory_usage_gb=raw_peak_memory_usage_gb,
             non_kv_resident_size_gb=non_kv_resident_size_gb,
@@ -1103,6 +1083,8 @@ class ModelRunner:
         *,
         batch_size: int,
         run_time_s: float,
+        multimodal_input_h2d_bytes: int = 0,
+        multimodal_input_h2d_time_s: Optional[float] = None,
         profiling_source_times_s: Optional[Dict[str, float]] = None,
         profiling_miss_reasons: Optional[Dict[str, int]] = None,
     ) -> ModelRunnerMetrics:
@@ -1171,6 +1153,8 @@ class ModelRunner:
             model_weight_size_gb=model_weight_size_gb,
             engram_host_resident_size_gb=self.engram_host_resident_size_gb,
             engram_host_resident_per_rank_gb=self.engram_host_resident_per_rank_gb,
+            multimodal_input_h2d_bytes=multimodal_input_h2d_bytes,
+            multimodal_input_h2d_time_s=multimodal_input_h2d_time_s,
             peak_memory_usage_gb=peak_memory_usage_gb,
             kv_cache_size_gb=kv_cache_size_gb,
             kv_cache_per_token_gb=kv_cache_per_token_gb,
@@ -1291,6 +1275,8 @@ class ModelRunnerMetrics:
     engram_host_resident_per_rank_gb: float = 0.0
     host_to_device_bytes: int = 0
     host_to_device_time_s: float = 0.0
+    multimodal_input_h2d_bytes: int = 0
+    multimodal_input_h2d_time_s: Optional[float] = None
     kv_cache_token_capacity_factor: int = 1
     """Per-card KV token capacity multiplier from DCP (1 when DCP is off, and when the
     token shard buys no real per-card saving). warmup() multiplies ``num_blocks`` by
@@ -1373,6 +1359,12 @@ class ModelRunnerMetrics:
         if self.host_to_device_bytes > 0:
             print(f"  Host-to-device traffic: {self.host_to_device_bytes / 1024**2:.3f} MB")
             print(f"  Host-to-device time: {self.host_to_device_time_s * 1e3:.3f} ms")
+        if self.multimodal_input_h2d_bytes > 0:
+            print(f"  Multimodal input traffic: {self.multimodal_input_h2d_bytes:,d} B")
+            if self.multimodal_input_h2d_time_s is None:
+                print("  Multimodal input time: unavailable (host bandwidth not configured)")
+            else:
+                print(f"  Multimodal input time: {self.multimodal_input_h2d_time_s * 1e3:.3f} ms")
         print(f"  KV cache: {kv_input_gb:.3f} GB")
         if self.indexer_cache_size_gb > 0:
             print(f"    Main KV cache: {kv_input_gb - self.indexer_cache_size_gb:.3f} GB")

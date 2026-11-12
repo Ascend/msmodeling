@@ -834,7 +834,11 @@ def shard_model_by_tp(
                     "tp_group": tp_group,
                     "shard_mode": embedding_parallel,
                 }
-                tp_plan.update({"embed_tokens": (PARALLEL_EMBEDDING, params)})
+                embedding_paths = ["embed_tokens"]
+                model_profile = get_model_profile(self.hf_config.model_type)
+                if model_profile is not None and model_profile.embedding_module_path:
+                    embedding_paths.append(model_profile.embedding_module_path)
+                tp_plan.update({path: (PARALLEL_EMBEDDING, params) for path in embedding_paths})
 
             params = {
                 "tp_group": tp_group,

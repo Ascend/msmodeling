@@ -1336,6 +1336,7 @@ register_model_profile(
         moe_num_experts_key="n_routed_experts",
         language_layers_path_str="language_model.model.layers",
         visual_module_path="vision_tower",
+        language_model_only_extra_paths=("mm_projector",),
         language_module_path="language_model",
         visual_layers_module_path="vision_tower.encoder.blocks",
         visual_layers_path_str="vision_tower.encoder.blocks",

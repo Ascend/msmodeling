@@ -4069,6 +4069,7 @@ register_model_profile(
         mtp_block_module_name="KimiDecoderLayer",
         # Visual / language module paths (K3 VL structure)
         visual_module_path="vision_tower",
+        language_model_only_extra_paths=("mm_projector",),
         language_module_path="language_model",
         visual_layers_module_path="vision_tower.encoder.blocks",
         visual_layers_path_str="vision_tower.encoder.blocks",

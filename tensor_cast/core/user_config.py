@@ -178,6 +178,7 @@ class UserInputConfig:
     Mutually exclusive with ``enable_shared_expert_tp``.
     """
     vision_tp_size: int = 1
+    language_model_only: bool = False
     block_size: int = 128
     remote_source: str = RemoteSource.huggingface
     image_batch_size: Optional[int] = None
@@ -200,6 +201,7 @@ class UserInputConfig:
         self._normalize_model_source()
         self._validate_device()
         self._validate_vision_parallelism()
+        self._validate_language_model_only()
         self._normalize_performance_model()
         self._normalize_word_embedding_tp()
         self._validate_pipeline_parallelism()
@@ -298,6 +300,21 @@ class UserInputConfig:
             raise ValueError(
                 f"num_devices/world_size ({self.world_size}) must be divisible by vision_tp_size "
                 f"({self.vision_tp_size})"
+            )
+
+    def _validate_language_model_only(self):
+        if not self.language_model_only:
+            return
+        image_options = {
+            "image_batch_size": self.image_batch_size,
+            "image_height": self.image_height,
+            "image_width": self.image_width,
+            "vision_tp_size": self.vision_tp_size if self.vision_tp_size != 1 else None,
+        }
+        configured = [name for name, value in image_options.items() if value is not None]
+        if configured:
+            raise ValueError(
+                "language_model_only cannot be combined with multimodal image options: " + ", ".join(configured)
             )
 
     def _normalize_word_embedding_tp(self):

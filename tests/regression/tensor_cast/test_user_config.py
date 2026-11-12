@@ -108,6 +108,26 @@ class TestUserInputConfigWordEmbeddingTp:
             UserInputConfig(word_embedding_tp=123)
 
 
+class TestUserInputConfigLanguageModelOnly:
+    def test_language_model_only_defaults_to_disabled(self):
+        assert UserInputConfig().language_model_only is False
+
+    @pytest.mark.parametrize("field_name", ["image_batch_size", "image_height", "image_width"])
+    def test_language_model_only_rejects_image_options(self, field_name):
+        with pytest.raises(ValueError, match="language_model_only cannot be combined"):
+            UserInputConfig(language_model_only=True, **{field_name: 1})
+
+    def test_language_model_only_rejects_non_default_vision_tp_size(self):
+        with pytest.raises(ValueError, match="vision_tp_size"):
+            UserInputConfig(language_model_only=True, vision_tp_size=4, world_size=4)
+
+    def test_language_model_only_supports_pipeline_parallelism(self):
+        config = UserInputConfig(language_model_only=True, pp_size=2, world_size=2)
+
+        assert config.language_model_only is True
+        assert config.pp_size == 2
+
+
 class TestUserInputConfigSpeculativeExtras:
     def test_explicit_zero_markov_rank_is_preserved(self):
         user_config = UserInputConfig(speculative_method="dspark", dspark_markov_rank=0)

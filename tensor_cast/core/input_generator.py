@@ -2686,6 +2686,16 @@ def _generate_step5_image_inputs(
     }
 
 
+def get_multimodal_h2d_num_bytes(input_kwargs: Mapping[str, Any]) -> int:
+    """Return bytes for multimodal payloads that vLLM copies to the device."""
+    num_bytes = 0
+    for key in ("pixel_values", "image_embeds"):
+        value = input_kwargs.get(key)
+        if value is not None:
+            num_bytes += math.ceil(bytes_of_tensor(value))
+    return num_bytes
+
+
 def get_inputs_num_bytes(model, requests: list[RequestInfo], block_size: int) -> int:
     """
     Get the number of bytes of the input tensors.
@@ -2699,11 +2709,7 @@ def get_inputs_num_bytes(model, requests: list[RequestInfo], block_size: int) ->
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].query_lens)
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].block_table_tensor)
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].slot_mapping)
-    # P0-14: multimodal inputs are host-to-device transfers too.
-    pixel_values = input_kwargs.get("pixel_values")
-    if pixel_values is not None:
-        inputs_num_bytes += bytes_of_tensor(pixel_values)
-    image_grid_thw = input_kwargs.get("image_grid_thw")
-    if image_grid_thw is not None:
-        inputs_num_bytes += bytes_of_tensor(image_grid_thw)
+    # vLLM transfers multimodal payloads to the device, while keeping
+    # image_grid_thw on the host as encoder metadata.
+    inputs_num_bytes += get_multimodal_h2d_num_bytes(input_kwargs)
     return inputs_num_bytes

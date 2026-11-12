@@ -728,6 +728,7 @@ register_model_profile(
         mla_module_class_type=DeepseekV41SparseAttentionWrapper,
         moe_gate_router=route_deepseek_v41_gate,
         visual_module_path="vision",
+        language_model_only_extra_paths=("aligner", "image_start", "image_end", "image_newline"),
         visual_layers_module_path="vision.blocks",
         visual_layers_path_str="vision.blocks",
         language_layers_path_str="layers",

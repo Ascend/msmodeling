@@ -95,19 +95,20 @@ def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixel
         block_size=128,
     )
     runner.perf_models = []
-    runner.device_profile = object()
+    runner.device_profile = SimpleNamespace(
+        host_bandwidth_bytes_ps=1,
+        host_transfer_efficiency=1,
+        host_latency_s=0,
+    )
     runner.total_device_memory_gb = 32
     runner.model_weight_size_gb = 4
     runner.engram_host_resident_size_gb = 0
     runner.engram_host_resident_per_rank_gb = 0
-    visual = object()
     runner.model = SimpleNamespace(
         model_config=SimpleNamespace(
             parallel_config=SimpleNamespace(data_parallel_size=1), hf_config=SimpleNamespace(model_type='fixture')
-        ),
-        get_weight_size_nested=lambda _: 2 * 1024**3,
+        )
     )
-    monkeypatch.setattr(module, 'get_visual', lambda _: visual)
     monkeypatch.setattr(module, 'dcp_kv_token_capacity_factor', lambda _: 1)
     monkeypatch.setattr(module, 'kv_cache_excluded_layer_indices', lambda _: {2})
     monkeypatch.setattr(runner, '_ensure_compiled', lambda: pytest.fail('supplied graph must not compile'))
@@ -121,7 +122,7 @@ def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixel
         kv_cache_per_token=16,
         indexer_cache_per_token=4,
         compressed_kv_cache_per_token=8,
-        pixel_values=object() if has_pixels else None,
+        pixel_values=torch.empty(1, device='meta') if has_pixels else None,
     )
     runtime = Runtime(
         event_list=[],
@@ -154,7 +155,7 @@ def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixel
     assert provided == ['graph'] and runtime.op_invoke_infos == ['supplied-ops']
     assert metrics.kv_cache_size_gb == 3 * 1024 / 1024**3
     assert metrics.kv_cache_per_token_gb == 28 / 1024**3
-    assert metrics.model_weight_size_gb == (4 if has_pixels else 2)
+    assert metrics.model_weight_size_gb == 4
     expected_activation_gb = 0.5
     expected_peak_gb = max(
         1.0,
@@ -1290,7 +1291,7 @@ def test_deferred_model_preserves_compile_config_and_compiles_on_native_fallback
             return SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1))
 
     monkeypatch.setattr(model_builder, 'ConfigResolver', Resolver)
-    monkeypatch.setattr(model_builder, 'TransformerModel', lambda *_a: model)
+    monkeypatch.setattr(model_builder, 'TransformerModel', lambda *_a, **_kw: model)
     monkeypatch.setattr(model_builder, 'compile_model', lambda value, cfg: seen.append((value, cfg)) or value)
     assert model_builder.build_model(user, defer_compile=True) is model
     assert seen == []

@@ -510,7 +510,12 @@ def _fake_vl_model_with_kda_layer(mtp_layers=0, native_mtp_tail=True):
         # are BailingMoeV3MTPLayer appended to model.layers.
         native_mtp_type = type("BailingMoeV3MTPLayer", (torch.nn.Module,), {})
         layers.extend(native_mtp_type() for _ in range(mtp_layers))
-    decoder = torch.nn.Module()
+
+    class _Decoder(torch.nn.Module):
+        def forward(self, **kwargs):
+            return kwargs
+
+    decoder = _Decoder()
     decoder.layers = torch.nn.ModuleList(layers)
     decoder.num_nextn_predict_layers = mtp_layers
     unwrapped = torch.nn.Module()
@@ -538,18 +543,35 @@ def test_bailing_vl_model_patch_replaces_kda_and_injects_kwargs():
     assert decoder._use_sdpa is False
     replaced = decoder.layers[0].attention
     assert type(replaced).__name__ == "BailingV3KimiDeltaAttentionTensorCast"
-    assert wrapper._bailing_v3_tc_kwargs_patched is True
+    assert decoder._bailing_v3_tc_kwargs_patched is True
+    assert not hasattr(wrapper, "_bailing_v3_tc_kwargs_patched")
 
-    # Runtime metadata flows into the attention wrapper through forward.
-    metadata = object()
-    wrapper(attention_meta=metadata, kv_cache_by_layers={})
-    assert replaced._extra_forward_kwargs["attention_meta"] is metadata
+    # The decoder receives runtime kwargs from the full-VL model and survives
+    # PP narrowing, so one patch covers both execution paths.
+    decoder_metadata = object()
+    decoder_result = decoder(attention_meta=decoder_metadata, kv_cache_by_layers={}, return_dict=False)
+    assert replaced._extra_forward_kwargs["attention_meta"] is decoder_metadata
+    assert "return_dict" not in decoder_result
     # Idempotent: second patch is a no-op.
     _patch_bailing_v3_vl_model(model)
     assert decoder.layers[0].attention is replaced
 
     collected = _collect_bailing_v3_vl_attention_modules(model, wrapper)
     assert collected == (replaced,)
+
+
+def test_bailing_vl_model_patch_collects_attention_after_later_transformations():
+    from tensor_cast.transformers.builtin_model.bailing_v3_vl import _patch_bailing_v3_vl_model
+
+    model, _wrapper, decoder, _attention = _fake_vl_model_with_kda_layer()
+    _patch_bailing_v3_vl_model(model)
+
+    transformed_attention = torch.nn.Module()
+    decoder.layers[0].attention = transformed_attention
+    metadata = object()
+    decoder(attention_meta=metadata, kv_cache_by_layers={})
+
+    assert transformed_attention._extra_forward_kwargs["attention_meta"] is metadata
 
 
 def test_bailing_vl_model_patch_strips_native_mtp_tail():

@@ -130,7 +130,11 @@ def _narrow_pipeline_vl_stage_to_language_model(
     return stage_model
 
 
-def _build_pipeline_model(user_input: UserInputConfig, model_config) -> PipelineModel:
+def _build_pipeline_model(
+    user_input: UserInputConfig,
+    model_config,
+    omitted_paths: tuple[str, ...] = (),
+) -> PipelineModel:
     if not _supports_pipeline_text_path(model_config):
         raise UnsupportedPPConfigurationError(
             "Pipeline parallel model construction only supports text-only decoder models "
@@ -150,7 +154,11 @@ def _build_pipeline_model(user_input: UserInputConfig, model_config) -> Pipeline
             stage_spec.layer_end,
         )
         stage_model_config = build_stage_model_config(model_config, stage_spec)
-        stage_model = TransformerModel(user_input.model_id, stage_model_config)
+        stage_model = TransformerModel(
+            user_input.model_id,
+            stage_model_config,
+            omitted_paths=omitted_paths,
+        )
         # MiniMax image embedding belongs to stage 0. Other stages retain the
         # existing language-only path and do not own duplicate vision weights.
         if not (
@@ -192,10 +200,23 @@ def build_model(
     config.compilation.fusion_patterns.enable_mlapo = bool(user_input and user_input.enable_mlapo)
     config_resolver = ConfigResolver(user_input=user_input)
     model_config = config_resolver.resolve()
+    omitted_paths = ()
+    if user_input.language_model_only and getattr(model_config.hf_config, "vision_config", None) is not None:
+        profile = get_model_profile(model_config.hf_config.model_type)
+        if profile is None or not profile.visual_module_path:
+            raise ValueError("language_model_only requires the model profile to declare visual_module_path")
+        omitted_paths = (
+            profile.visual_module_path,
+            *profile.language_model_only_extra_paths,
+        )
     if model_config.parallel_config.pipeline_parallel_size > 1:
-        return _build_pipeline_model(user_input, model_config)
+        return _build_pipeline_model(
+            user_input,
+            model_config,
+            omitted_paths=omitted_paths,
+        )
 
-    model = TransformerModel(user_input.model_id, model_config)
+    model = TransformerModel(user_input.model_id, model_config, omitted_paths=omitted_paths)
     return model if defer_compile else compile_model(model, user_input)
 
 

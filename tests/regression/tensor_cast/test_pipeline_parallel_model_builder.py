@@ -96,8 +96,14 @@ class _FakeTextConfig:
 
 class _FakeTransformerModel(torch.nn.Module):
     builds: list[ModelConfig] = []
+    omitted_path_builds: list[tuple[str, ...]] = []
 
-    def __init__(self, model_id: str, model_config: ModelConfig):
+    def __init__(
+        self,
+        model_id: str,
+        model_config: ModelConfig,
+        omitted_paths: tuple[str, ...] = (),
+    ):
         super().__init__()
         self.model_id = model_id
         self.model_config = model_config
@@ -110,6 +116,7 @@ class _FakeTransformerModel(torch.nn.Module):
         self.weight_size = self.num_hidden_layers * 10
         self.forward_calls = []
         type(self).builds.append(model_config)
+        type(self).omitted_path_builds.append(omitted_paths)
 
     def forward(
         self,
@@ -251,6 +258,7 @@ class _RequiresIndexerCache:
 
 def _install_fake_builder(monkeypatch, model_config: ModelConfig):
     _FakeTransformerModel.builds = []
+    _FakeTransformerModel.omitted_path_builds = []
     _FakeResolver.model_config = model_config
     monkeypatch.setattr(model_builder, "ConfigResolver", _FakeResolver)
     monkeypatch.setattr(model_builder, "TransformerModel", _FakeTransformerModel)
@@ -355,6 +363,23 @@ def test_build_model_keeps_single_model_path_when_pp_size_is_one(monkeypatch):
 
 
 @pytest.mark.parametrize("pp_size", [1, 2])
+def test_language_model_only_is_noop_for_text_model(monkeypatch, pp_size):
+    world_size = 2 * pp_size
+    _install_fake_builder(monkeypatch, _make_model_config(num_layers=4, pp_size=pp_size, world_size=world_size))
+    user_input = UserInputConfig(
+        model_id="fake/model",
+        world_size=world_size,
+        tp_size=2,
+        pp_size=pp_size,
+        language_model_only=True,
+    )
+
+    model_builder.build_model(user_input)
+
+    assert _FakeTransformerModel.omitted_path_builds == [()] * pp_size
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
 def test_build_model_passes_compile_mode_to_pipeline_stages(monkeypatch, pp_size):
     _install_fake_builder(monkeypatch, _make_model_config(num_layers=4, pp_size=pp_size, world_size=4))
     monkeypatch.setattr(torch, "compile", lambda model, **_kwargs: model)
@@ -382,6 +407,35 @@ def test_build_model_returns_real_split_pipeline_model_for_pp_size(monkeypatch):
     assert all(build.parallel_config.pipeline_parallel_size == 1 for build in builds)
     assert all(build.parallel_config.world_size == 2 for build in builds)
     assert all(build.parallel_config.data_parallel_size == 1 for build in builds)
+
+
+def test_build_model_passes_language_model_only_paths_to_every_pipeline_stage(monkeypatch):
+    model_config = _make_model_config(num_layers=4, pp_size=2, world_size=4)
+    model_config.hf_config.model_type = "fake_vl"
+    model_config.hf_config.vision_config = SimpleNamespace()
+    _install_fake_builder(monkeypatch, model_config)
+    profile = SimpleNamespace(
+        visual_module_path="model.visual",
+        language_model_only_extra_paths=("linear_proj", "image_start"),
+        language_module_path="model.language_model",
+        language_layers_path_str="model.language_model.layers",
+    )
+    monkeypatch.setattr(model_builder, "get_model_profile", lambda _model_type: profile)
+    user_input = UserInputConfig(
+        model_id="fake/model",
+        world_size=4,
+        tp_size=2,
+        pp_size=2,
+        language_model_only=True,
+    )
+
+    model = model_builder.build_model(user_input)
+
+    assert isinstance(model, PipelineModel)
+    assert _FakeTransformerModel.omitted_path_builds == [
+        ("model.visual", "linear_proj", "image_start"),
+        ("model.visual", "linear_proj", "image_start"),
+    ]
 
 
 def test_build_model_keeps_mtp_only_on_last_pipeline_stage(monkeypatch):
@@ -1102,7 +1156,7 @@ def test_build_model_allows_text_config_with_none_vision_config(monkeypatch):
     monkeypatch.setattr(
         model_builder,
         "_build_pipeline_model",
-        lambda _user_input, _model_config: pipeline_model,
+        lambda _user_input, _model_config, **_kwargs: pipeline_model,
     )
 
     assert model_builder.build_model(user_input) is pipeline_model

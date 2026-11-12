@@ -269,7 +269,7 @@ def _patch_bailing_v3_vl_official_runtime(decoder):
     if not getattr(vision_attention_cls, "_bailing_vl_tc_vision_patched", False):
 
         def _tc_vision_attention_forward(self, hidden_states, cu_seqlens, position_embeddings=None, **kwargs):
-            dim = self.dim
+            dim = self.num_heads * self.head_dim
             num_heads = self.num_heads
             head_dim = self.head_dim
             input_was_2d = hidden_states.dim() == 2
@@ -417,56 +417,60 @@ def _patch_bailing_v3_vl_model(model):
       kv_cache_by_layers, ...) into the attention wrappers.
     """
     wrapper = model._inner
-    if getattr(wrapper, "_bailing_v3_tc_kwargs_patched", False):
-        return
-
     unwrapped = model.unwrap()
     # BailingMoeV3VLForConditionalGeneration: the decoder stack lives
     # under ``.model``; fall back to the wrapper itself for text-only
     # layouts.
     decoder = getattr(unwrapped, "model", unwrapped)
-    if getattr(decoder, "_bailing_v3_tc_patched", False):
-        return
+    if not getattr(decoder, "_bailing_v3_tc_patched", False):
+        decoder._use_flash_attention_2 = True
+        decoder._use_sdpa = False
+        if hasattr(decoder, "rotary_emb") and not isinstance(decoder.rotary_emb, CachingMRotaryEmb):
+            decoder.rotary_emb = CachingMRotaryEmb(
+                decoder.rotary_emb,
+                act_dtype=model.model_config.dtype,
+                max_position_embeddings=model.text_config.max_position_embeddings,
+            )
+        stripped_mtp_layers = _strip_bailing_v3_native_mtp(decoder)
+        if stripped_mtp_layers:
+            logger.warning(
+                "Bailing V3 VL config declares %d native MTP layer(s) "
+                "(num_nextn_predict_layers > 0; e.g. the internal SFT RC2 config, "
+                "while the open Ling-3.0-flash-VL config ships 0). Structural "
+                "simulation never runs the MTP forward path, so the MTP tail is "
+                "stripped and the decoder stays at the 42 main layers + 27 vision "
+                "blocks layout.",
+                stripped_mtp_layers,
+            )
 
-    decoder._use_flash_attention_2 = True
-    decoder._use_sdpa = False
-    if hasattr(decoder, "rotary_emb") and not isinstance(decoder.rotary_emb, CachingMRotaryEmb):
-        decoder.rotary_emb = CachingMRotaryEmb(
-            decoder.rotary_emb,
-            act_dtype=model.model_config.dtype,
-            max_position_embeddings=model.text_config.max_position_embeddings,
-        )
-    stripped_mtp_layers = _strip_bailing_v3_native_mtp(decoder)
-    if stripped_mtp_layers:
-        logger.warning(
-            "Bailing V3 VL config declares %d native MTP layer(s) "
-            "(num_nextn_predict_layers > 0; e.g. the internal SFT RC2 config, "
-            "while the open Ling-3.0-flash-VL config ships 0). Structural "
-            "simulation never runs the MTP forward path, so the MTP tail is "
-            "stripped and the decoder stays at the 42 main layers + 27 vision "
-            "blocks layout.",
-            stripped_mtp_layers,
-        )
+        _replace_bailing_v3_kda_modules(decoder)
+        _patch_bailing_v3_vl_official_runtime(decoder)
+        decoder._bailing_v3_tc_patched = True
 
-    _replace_bailing_v3_kda_modules(decoder)
-    _patch_bailing_v3_vl_official_runtime(decoder)
-    decoder._bailing_v3_tc_patched = True
+    # The full-VL model forwards runtime kwargs into this decoder, and pipeline
+    # narrowing retains the same decoder under CausalLmWrapper.  Patching this
+    # single persistent entry point therefore covers both execution paths.
+    if not getattr(decoder, "_bailing_v3_tc_kwargs_patched", False):
+        original_decoder_forward = decoder.forward
 
-    original_forward = wrapper.forward
-
-    def patched_forward(self, *args, **kwargs):
-        extra_kwargs = {key: kwargs.get(key) for key in _EXTRA_TC_KWARGS_KEYS if kwargs.get(key) is not None}
-        attention_modules = getattr(self, "_bailing_v3_tc_attention_modules", None)
-        if attention_modules is None:
-            attention_modules = _collect_bailing_v3_vl_attention_modules(model, self)
-            self._bailing_v3_tc_attention_modules = attention_modules
-        for attention in attention_modules:
-            if attention is not None:
+        def patched_decoder_forward(self, *args, **kwargs):
+            # BailingMoeV3VLModel accesses ``super().forward(...).
+            # last_hidden_state`` internally, so its backbone must keep the
+            # ModelOutput contract even when CausalLmWrapper requests tuples.
+            kwargs.pop("return_dict", None)
+            extra_kwargs = {key: kwargs.get(key) for key in _EXTRA_TC_KWARGS_KEYS if kwargs.get(key) is not None}
+            attention_modules = getattr(self, "_bailing_v3_tc_attention_modules", None)
+            if attention_modules is None:
+                # Collect lazily: patch_mla runs after this model patch and may
+                # replace attention objects before the first forward.
+                attention_modules = _collect_bailing_v3_vl_attention_modules(model, wrapper)
+                self._bailing_v3_tc_attention_modules = attention_modules
+            for attention in attention_modules:
                 attention._extra_forward_kwargs = extra_kwargs
-        return original_forward(*args, **kwargs)
+            return original_decoder_forward(*args, **kwargs)
 
-    wrapper.forward = types.MethodType(patched_forward, wrapper)
-    wrapper._bailing_v3_tc_kwargs_patched = True
+        decoder.forward = types.MethodType(patched_decoder_forward, decoder)
+        decoder._bailing_v3_tc_kwargs_patched = True
 
     # The official ForCondGen chain expects ModelOutput semantics internally
     # (``BailingMoeV3VLModel.forward`` accesses ``super().forward(...).
@@ -509,8 +513,11 @@ register_model_profile(
         hf_config_patch_method=_patch_hf_config_for_bailing_moe_v3_vl,
         patch_method=_patch_bailing_v3_vl_model,
         visual_module_path="model.visual",
+        language_module_path="model",
         visual_layers_path_str="model.visual.blocks",
         language_layers_path_str="model.layers",
+        embedding_module_path="model.word_embeddings",
+        language_model_only_extra_paths=("linear_proj",),
         # The Bailing merger itself is Norm + reshape only, but the
         # root-level projector (linear_proj.0/.2, the visual→language
         # 4608→2560→2560 chain) belongs to the same "visual feature

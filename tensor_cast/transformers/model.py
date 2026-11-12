@@ -44,6 +44,7 @@ from ..model_config import ModelConfig, config_has_draft_spec
 from ..parallel_group import ParallelGroupManager
 from ..performance_model.utils import bytes_of_tensor
 from .custom_model_registry import get_custom_model
+from .module_omission import omit_model_parts
 from .transformations import patch_model
 from .utils import (
     AutoModelConfigLoader,
@@ -336,6 +337,7 @@ class TransformerModel(ModelWrapperBase):
         model_id: str,
         model_config: ModelConfig,
         hf_model: PreTrainedModel = None,
+        omitted_paths: Sequence[str] = (),
     ):
         """
         Construct a transformer model wrapper that auto-loads a transformer model and converts
@@ -377,6 +379,7 @@ class TransformerModel(ModelWrapperBase):
                 logger.info("Auto-loading model and configuration for: %s", model_id)
                 self.hf_config, self._inner = auto_loader.auto_load_model_and_config(self.model_id, self.model_config)
             logger.info("origin model and config are loaded successfully")
+            omit_model_parts(self._inner, omitted_paths, hf_config=self.hf_config)
 
             self.text_config = self.hf_config.get_text_config()
             self.is_vl_model = hasattr(self.hf_config, "vision_config")
