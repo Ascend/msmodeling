@@ -1,0 +1,52 @@
+# Source: MiniMaxM3VLDenseMLP plus TP linear transformations.
+fragment_id: minimax_m3_dense_decoder_v1
+fragment_kind: model_decoder
+include_fragments:
+- minimax_m3_attention_v1
+stages:
+- id: dense_ffn
+  modules:
+  - name: gate_up_projection
+    tensors:
+      INPUT[0]:
+        shape: '[T, H]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[T, 2 * M3Dense]'
+        dtype: OUT
+  - name: m3_swiglu
+    tensors:
+      INPUT[0]:
+        shape: '[1, T, M3Dense]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[1, T, M3Dense]'
+        dtype: ACT
+      OUTPUT[0]:
+        shape: '[1, T, M3Dense]'
+        dtype: ACT
+  - name: down_projection
+    tensors:
+      INPUT[0]:
+        shape: '[T, M3Dense]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[T, H]'
+        dtype: OUT
+  runtime:
+    boundary_operators:
+    - add_rms_norm2
+    ignored_operators:
+    - add_rms_norm2
+    - dynamic_quantize_symmetric
+    - all_reduce
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+    - add

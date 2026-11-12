@@ -201,7 +201,15 @@ PERFORMANCE_MODEL = Param(
     cli_help="Performance model type.",
 )
 
-# Debug Options (1 param - chrome_trace already in shared.py)
+# Debug Options (chrome_trace is already in shared.py)
+DUMP_INPUT_SHAPES = Param(
+    name="dump-input-shapes",
+    data_type="boolean",
+    default=False,
+    cli_action="store_true",
+    group="Debug",
+    cli_help="Group operator result tables by input shapes. [default: off]",
+)
 
 # Service Options
 TTFT_LIMIT = Param(
@@ -583,6 +591,7 @@ SPEC = ModuleSpec(
         S.ANALYTIC_CALIBRATION_PROFILE,
         S.ANALYTIC_CALIBRATION_STACK,
         # Debug Options
+        DUMP_INPUT_SHAPES,
         S.CHROME_TRACE,
         S.TEMPLATE_GRAPH_OPTIMIZATION,
         # Service Options

@@ -1,0 +1,231 @@
+# Source: official M3.1 config, MiniMaxM3VLIndexer.forward and TP wrapper head partition.
+fragment_id: minimax_m3_attention_v1
+fragment_kind: model_decoder
+stages:
+- id: attention_qkv
+  modules:
+  - name: q_projection
+    tensors:
+      INPUT[0]:
+        shape: '[T, H]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[T, Lh * Dh]'
+        dtype: OUT
+  - name: k_projection
+    tensors:
+      INPUT[0]:
+        shape: '[T, H]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[T, Lkv * Dh]'
+        dtype: OUT
+  - name: v_projection
+    tensors:
+      INPUT[0]:
+        shape: '[T, H]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[T, Lkv * Dh]'
+        dtype: OUT
+  - name: index_q_projection
+    tensors:
+      INPUT[0]:
+        shape: '[T, H]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[T, M3LocalIh * M3Id]'
+        dtype: OUT
+  - name: index_k_projection
+    tensors:
+      INPUT[0]:
+        shape: '[T, H]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[T, M3Id]'
+        dtype: OUT
+  runtime:
+    boundary_operators:
+    - rms_norm_dynamic_quant_symmetric
+    ignored_operators:
+    - rms_norm
+    - rms_norm_dynamic_quant_symmetric
+    - dynamic_quantize_symmetric
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+    - cat
+  comparisons:
+    theory-runtime:
+      strategy: concat_shape
+- id: q_norm
+  modules:
+  - name: rms_norm
+    tensors:
+      INPUT[0]:
+        shape: '[1, T, Lh, Dh]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[Dh]'
+        dtype: WEIGHT
+      OUTPUT[0]:
+        shape: '[1, T, Lh, Dh]'
+        dtype: ACT
+  runtime:
+    boundary_operators:
+    - rms_norm
+    ignored_operators:
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+- id: k_norm
+  modules:
+  - name: rms_norm
+    tensors:
+      INPUT[0]:
+        shape: '[1, T, Lkv, Dh]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[Dh]'
+        dtype: WEIGHT
+      OUTPUT[0]:
+        shape: '[1, T, Lkv, Dh]'
+        dtype: ACT
+  runtime:
+    boundary_operators:
+    - rms_norm
+    ignored_operators:
+    - fused_rope
+    - reshape_and_cache
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+- id: index_q_norm
+  modules:
+  - name: rms_norm
+    tensors:
+      INPUT[0]:
+        shape: '[1, T, M3LocalIh, M3Id]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[M3Id]'
+        dtype: WEIGHT
+      OUTPUT[0]:
+        shape: '[1, T, M3LocalIh, M3Id]'
+        dtype: ACT
+  runtime:
+    boundary_operators:
+    - rms_norm
+    ignored_operators:
+    - view
+    - permute
+    - reshape
+- id: index_k_norm
+  modules:
+  - name: rms_norm
+    tensors:
+      INPUT[0]:
+        shape: '[1, T, 1, M3Id]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[M3Id]'
+        dtype: WEIGHT
+      OUTPUT[0]:
+        shape: '[1, T, 1, M3Id]'
+        dtype: ACT
+  runtime:
+    boundary_operators:
+    - rms_norm
+    ignored_operators:
+    - view
+    - permute
+    - reshape
+    - fused_rope
+    - siso_reshape_and_cache
+    - cat
+- id: indexer
+  modules:
+  - name: minimax_indexer
+    tensors:
+      INPUT[0]:
+        shape: '[T, M3LocalIh, M3Id]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[Nblk, Bs, M3Id]'
+        dtype: ACT
+      OUTPUT[0]:
+        shape: '[T, M3LocalIh, M3Topk]'
+        dtype: int32
+  runtime:
+    boundary_operators:
+    - minimax_indexer
+    ignored_operators:
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+- id: attention
+  modules:
+  - name: minimax_sparse_attention
+    tensors:
+      INPUT[0]:
+        shape: '[T, Lh * Dh]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[Nblk, Bs, Lkv, Dh]'
+        dtype: ACT
+      INPUT[2]:
+        shape: '[Nblk, Bs, Lkv, Dh]'
+        dtype: ACT
+      INPUT[3]:
+        shape: '[T, M3LocalIh, M3Topk]'
+        dtype: int32
+      OUTPUT[0]:
+        shape: '[T, Lh * Dh]'
+        dtype: ACT
+  - name: o_projection
+    tensors:
+      INPUT[0]:
+        shape: '[T, Lh * Dh]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[T, H]'
+        dtype: OUT
+  runtime:
+    boundary_operators:
+    - minimax_sparse_attention
+    ignored_operators:
+    - dynamic_quantize_symmetric
+    - all_reduce
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_

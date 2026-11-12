@@ -250,6 +250,8 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
         if is_decode:
             # In the decode phase, the image input is removed, but the image token needs to be added to content_length
             image_kwargs = {}
+            if not request.image_tokens_included:
+                context_length += num_image_tokens
         elif not request.image_tokens_included:
             query_len += num_image_tokens
     else:
@@ -450,6 +452,16 @@ def resize_image(
             "max_pixels": max_pixels,
         }
 
+    def build_minimax_resize_params():
+        # Official MiniMax image_processor.py: 28-aligned, at most 672**2 pixels.
+        return {
+            "height": image_height,
+            "width": image_width,
+            "factor": factor,
+            "min_pixels": 4 * 28 * 28,
+            "max_pixels": 672 * 672,
+        }
+
     def build_glm_resize_params():
         return {
             "height": image_height,
@@ -460,6 +472,10 @@ def resize_image(
         }
 
     resize_specs = {
+        "minimax_m3_vl": (
+            "transformers.models.minimax_m3_vl.image_processing_minimax_m3_vl",
+            build_minimax_resize_params,
+        ),
         "glm4v": (
             "transformers.models.glm4v.image_processing_glm4v",
             build_glm_resize_params,
@@ -767,9 +783,12 @@ def generate_image_inputs_for_specs(model, groups, concurrency: int) -> dict:
             row_tokens += token_count
         per_request_tokens.append(row_tokens)
 
+    packed_grid = torch.cat(image_grid_thw, dim=0)
+    if hf_config.model_type == "minimax_m3_vl":
+        packed_grid._minimax_patch_lengths = tuple(item["patch_rows"] for item in per_image)
     return {
         "pixel_values": torch.cat(pixel_values, dim=0),
-        "image_grid_thw": torch.cat(image_grid_thw, dim=0),
+        "image_grid_thw": packed_grid,
         # Total across the batch; per-request totals travel in
         # ``per_request_image_tokens`` so each row can grow by its own amount.
         "num_image_tokens": sum(per_request_tokens),
@@ -856,7 +875,7 @@ def generate_image_inputs(
     patch_rows = grid_t * grid_h * grid_w
     merge_length = merge_size**2
     image_grid_thw = torch.tensor([[grid_t, grid_h, grid_w]], dtype=torch.long).expand(image_batch_size, 3)
-    channel = vision_config.in_channels or 3
+    channel = getattr(vision_config, "in_channels", None) or getattr(vision_config, "num_channels", 3)
     hidden_dim = channel * temporal_patch_size * patch_size * patch_size
     tokens = patch_rows
     pixel_values = torch.empty(
@@ -921,6 +940,8 @@ def generate_image_inputs(
         batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
     pixel_values = pixel_values.repeat(batch_size, 1)
     image_grid_thw = image_grid_thw.repeat(batch_size, 1)
+    if hf_config.model_type == "minimax_m3_vl":
+        image_grid_thw._minimax_patch_lengths = (patch_rows,) * image_grid_thw.shape[0]
     return {
         "pixel_values": pixel_values,
         "image_grid_thw": image_grid_thw,

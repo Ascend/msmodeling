@@ -94,11 +94,15 @@ def product_eq_num_devices(params: dict[str, Any]) -> str | None:
 
 
 def moe_product_eq_num_devices(params: dict[str, Any]) -> str | None:
-    """text_generate: moe_tp_size × moe_dp_size × ep_size == num_devices."""
+    """MoE parallel groups partition devices within each pipeline stage."""
     num_devices = params.get("num-devices")
     if not num_devices or not isinstance(num_devices, (int, float)):
         return None
 
+    pp = params.get("pp-size") or 1
+    if num_devices % pp:
+        return f"num_devices({num_devices}) must be divisible by pp_size({pp})"
+    stage_devices = num_devices // pp
     ep = params.get("ep-size") or 1
     moe_dp = params.get("moe-dp-size")
     moe_tp = params.get("moe-tp-size")
@@ -109,15 +113,18 @@ def moe_product_eq_num_devices(params: dict[str, Any]) -> str | None:
 
     # moe_tp is optional: if not provided, derive it
     if moe_tp is None or moe_tp == "":
-        moe_tp = num_devices // (ep * moe_dp)
+        moe_tp = stage_devices // (ep * moe_dp)
 
-    if moe_tp * moe_dp * ep == num_devices:
+    if moe_tp * moe_dp * ep == stage_devices:
         return None
-    return f"moe_tp({moe_tp}) × moe_dp({moe_dp}) × ep({ep}) must equal num_devices({num_devices})"
+    return (
+        f"moe_tp({moe_tp}) × moe_dp({moe_dp}) × ep({ep}) must equal "
+        f"num_devices({num_devices}) / pp_size({pp}) = {stage_devices}"
+    )
 
 
 def per_layer_product_eq_num_devices(params: dict[str, Any]) -> str | None:
-    """Per-layer TP×DP==num_devices for o_proj/mlp/lmhead.
+    """Per-layer TP×DP==num_devices/PP for o_proj/mlp/lmhead.
 
     Args:
         params: Dict keyed by kebab-case param names.
@@ -129,6 +136,10 @@ def per_layer_product_eq_num_devices(params: dict[str, Any]) -> str | None:
     if not num_devices or not isinstance(num_devices, (int, float)):
         return None
 
+    pp = params.get("pp-size") or 1
+    if num_devices % pp:
+        return f"num_devices({num_devices}) must be divisible by pp_size({pp})"
+    stage_devices = num_devices // pp
     groups = [
         ("o-proj-tp-size", "o-proj-dp-size", "o_proj"),
         ("mlp-tp-size", "mlp-dp-size", "mlp"),
@@ -144,10 +155,13 @@ def per_layer_product_eq_num_devices(params: dict[str, Any]) -> str | None:
             continue
 
         tp = 1 if (tp_raw is None or tp_raw == "") else tp_raw
-        dp = (num_devices // tp) if (dp_raw is None or dp_raw == "") else dp_raw
+        dp = (stage_devices // tp) if (dp_raw is None or dp_raw == "") else dp_raw
 
-        if tp * dp != num_devices:
-            return f"{name}: {tp_field}({tp}) × {dp_field}({dp}) must equal num_devices({num_devices})"
+        if tp * dp != stage_devices:
+            return (
+                f"{name}: {tp_field}({tp}) × {dp_field}({dp}) must equal "
+                f"num_devices({num_devices}) / pp_size({pp}) = {stage_devices}"
+            )
 
     return None
 

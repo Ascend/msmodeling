@@ -414,7 +414,11 @@ class TensorCastQuantLinear(QuantLinearBase):
         x_shape = x.shape
         x = x.reshape(-1, x_shape[-1])
         qweight = self.qweight.transpose(0, 1)
-        out_dtype = self.quant_config.out_dtype if self.quant_config.out_dtype is not None else x.dtype
+        # A fused activation may supply an already-quantized integer payload.
+        # Dequantized matmul output retains the original floating-point dtype,
+        # just as it does when this layer performs activation quantization.
+        input_dtype = self.weight_dtype if external_activation_scale is not None else x.dtype
+        out_dtype = self.quant_config.out_dtype if self.quant_config.out_dtype is not None else input_dtype
         if self.quant_config.quant_type == LinearQuantType.HIF8:
             # Keep the compute format in the operator target, never in uint8 dtype.
             if external_activation_scale is not None:

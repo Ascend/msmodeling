@@ -151,7 +151,14 @@ def _build_pipeline_model(user_input: UserInputConfig, model_config) -> Pipeline
         )
         stage_model_config = build_stage_model_config(model_config, stage_spec)
         stage_model = TransformerModel(user_input.model_id, stage_model_config)
-        stage_model = _narrow_pipeline_vl_stage_to_language_model(stage_model)
+        # MiniMax image embedding belongs to stage 0. Other stages retain the
+        # existing language-only path and do not own duplicate vision weights.
+        if not (
+            stage_spec.is_first
+            and model_config.hf_config.model_type == "minimax_m3_vl"
+            and user_input.image_batch_size is not None
+        ):
+            stage_model = _narrow_pipeline_vl_stage_to_language_model(stage_model)
         apply_stage_boundaries(stage_model, stage_spec)
         if user_input.do_compile:
             import torch

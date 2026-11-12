@@ -731,3 +731,20 @@ class TestQuantLinearNightly(QuantLinearTestMixin, unittest.TestCase):
     )
     def test_deepseek_mtp_quant_tensorcast_static_w8a8_kimi(self, model_id):
         TestQuantLinear._run_test_deepseek_mtp_quant_tensorcast_static_w8a8(self, model_id, False)
+
+
+@pytest.mark.parametrize("output_dtype", [None, torch.float32])
+def test_fused_quantized_activation_preserves_float_output_dtype(output_dtype):
+    """M3 fused SwiGLU INT8 payload must not make its down projection INT8."""
+    linear = torch.nn.Linear(16, 8, device="meta", dtype=torch.bfloat16)
+    config = LinearQuantConfig(
+        quant_type=LinearQuantType.W8A8,
+        weight_scale=torch.empty((), device="meta", dtype=torch.float32),
+        out_dtype=output_dtype,
+    )
+    layer = TensorCastQuantLinear(linear, config)
+    payload = torch.empty((2, 16), device="meta", dtype=torch.int8)
+    scale = torch.empty((2, 1), device="meta", dtype=torch.float32)
+    actual = layer(payload, external_activation_scale=scale)
+    assert actual.shape == (2, 8)
+    assert actual.dtype == (torch.bfloat16 if output_dtype is None else output_dtype)

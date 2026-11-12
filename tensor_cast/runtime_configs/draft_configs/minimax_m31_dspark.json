@@ -1,0 +1,61 @@
+{
+  "_source": "MiniMaxAI/MiniMax-M3.1-Flash/dspark/config.json",
+  "architectures": [
+    "DSparkMiniMaxDraftModel"
+  ],
+  "model_type": "minimax_m3_vl",
+  "text_config": {
+    "hidden_size": 6144,
+    "num_hidden_layers": 5,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 4,
+    "head_dim": 128,
+    "vocab_size": 200064,
+    "max_position_embeddings": 1048576,
+    "rms_norm_eps": 1e-06,
+    "use_gemma_norm": true,
+    "rope_theta": 10000000,
+    "rotary_dim": 64,
+    "partial_rotary_factor": 0.5,
+    "dense_intermediate_size": 12288,
+    "swiglu_alpha": 1.702,
+    "swiglu_limit": 7.0
+  },
+  "dspark_block_size": 7,
+  "dspark_markov_rank": 256,
+  "dspark_markov_head_type": "vanilla",
+  "dspark_use_dense_ffn": true,
+  "dspark_ffn_hidden_size": 12288,
+  "dspark_target_layer_ids": [
+    3,
+    17,
+    31,
+    45,
+    59
+  ],
+  "dspark_noise_token_id": 200058,
+  "enable_confidence_head": true,
+  "confidence_head_with_markov": true,
+  "dflash_config": {
+    "num_hidden_layers": 5,
+    "num_target_layers": 60,
+    "context_source": "target_layers",
+    "block_size": 7,
+    "mask_token_id": 200058,
+    "target_layer_ids": [
+      3,
+      17,
+      31,
+      45,
+      59
+    ],
+    "layer_types": [
+      "sliding_attention",
+      "sliding_attention",
+      "sliding_attention",
+      "sliding_attention",
+      "sliding_attention"
+    ],
+    "sliding_window": 4096
+  }
+}

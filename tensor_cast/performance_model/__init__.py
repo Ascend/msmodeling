@@ -505,6 +505,13 @@ def _(
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.masked_scatter.default)
+def _masked_scatter_properties(info):
+    # Read base embeddings, Boolean mask and image features; write the merged
+    # embeddings. This is a memory movement, not another vision computation.
+    return info.get_memory_access_properties()
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.hif8_kv_cache_write.default)
 def _hif8_kv_cache_write_properties(info):
     named = get_named_args(info)

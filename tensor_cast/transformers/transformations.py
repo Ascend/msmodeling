@@ -531,7 +531,7 @@ def patch_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
 
     visual_model = get_visual(model)
     if visual_model is not None:
-        pattern = "blocks.*.attn"
+        pattern = "layers.*.self_attn" if model.hf_config.model_type == "minimax_m3_vl" else "blocks.*.attn"
         depth_layer_idx = len(model.attention_by_layers)
         for name, module in visual_model.named_modules():
             if fnmatch.fnmatchcase(strip_module_name(name), pattern):

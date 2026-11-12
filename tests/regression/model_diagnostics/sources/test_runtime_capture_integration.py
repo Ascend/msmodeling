@@ -674,3 +674,39 @@ def test_deepseek_routed_expert_config_rejects_illegal_moe_layout_before_model_b
     with pytest.raises(SourceLoadError, match="must equal pipeline stage world_size"):
         capture_artifact_for_profile(profile)
     assert model_runner_called is False
+
+
+@pytest.mark.parametrize("value", [None, 128])
+def test_minimax_context_skips_missing_optional_expert_fields(value):
+    from tools.model_diagnostics.sources.runtime_capture import _run_context_after_model_load
+    from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
+
+    profile = DiagnosticsRunProfile(
+        schema_version="1",
+        model_name="test/minimax",
+        entrypoint="text_generate",
+        phase=ExecutionPhase.PREFILL,
+        batch_size=1,
+        query_length=2,
+        context_length=None,
+        num_mtp_tokens=0,
+        parallel=ParallelContext(),
+        selected_stage_regions=(),
+        num_hidden_layers_override=1,
+        do_compile=False,
+        device="TEST_DEVICE",
+        quantize_linear_action="DISABLED",
+        word_embedding_tp=None,
+    )
+    text = SimpleNamespace(model_type="minimax_m3_vl_text", num_hidden_layers=1, mlp_layer_types=["dense"])
+    if value is not None:
+        text.num_local_experts = value
+        text.intermediate_size = 3072
+    model = SimpleNamespace(hf_config=SimpleNamespace(model_type="minimax_m3_vl"), text_config=text)
+    context = _run_context_after_model_load(profile, SimpleNamespace(model=model))
+    if value is None:
+        assert "num_experts" not in context.model_config
+        assert "moe_intermediate_size" not in context.model_config
+    else:
+        assert context.model_config["num_experts"] == 128
+        assert context.model_config["moe_intermediate_size"] == 3072

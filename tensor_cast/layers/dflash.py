@@ -36,6 +36,7 @@ from ..model_config import DflashConfig
 from .attention import AttentionMetadataTensorCast
 from .dflash_qwen3 import Qwen3DFlashDecoderLayer, _flatten_tokens
 from .sampler import Sampler, SamplingMetadata
+from .draft_registry import normalize_draft_config
 from .utils import ModelWrapperBase
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,8 @@ def load_dflash_draft_config_dict(path: Optional[str] = None) -> dict:
         if not p.is_file():
             raise FileNotFoundError(f"Builtin Dflash draft config missing: {p}")
     with open(p, encoding="utf-8") as f:
-        return json.load(f)
+        source = json.load(f)
+    return normalize_draft_config(source)
 
 
 def _sync_layer_types(layer_types: List[str], num_layers: int) -> List[str]:
@@ -230,6 +232,12 @@ def apply_cli_overrides_to_source_and_dcfg(
         num_layers = int(file_layers or dcfg.num_draft_layers)
     dcfg.dflash_block_size = int(block_size)
     dcfg.num_draft_layers = int(num_layers)
+    # Resolve cache geometry before input/cache allocation, not only when the
+    # draft HF model is constructed. MiniMax's draft window is 4096, not 2048.
+    if source.get("sliding_window") is not None:
+        dcfg.sliding_window = int(source["sliding_window"])
+    if source.get("layer_types"):
+        dcfg.layer_types = _sync_layer_types(list(source["layer_types"]), dcfg.num_draft_layers)
     if dcfg.aux_hidden_state_layer_ids is None:
         # Draft profiles store target_layer_ids either nested under
         # ``dflash_config`` or at the top level (e.g. Inferact/Kimi-K3-DSpark);
@@ -623,7 +631,7 @@ class DflashDraftModel(torch.nn.Module):
         cos_c, sin_c = self.rotary_emb(ref_tensor, fused_pos)
         # One full-length context RoPE on K only (no Q in context stage); not repeated inside Decoder.
         # apply_rope_single(..., is_neox=True) keeps default transpose_output=True: BHSD → BSHD.
-        k_roped_bshd = torch.ops.tensor_cast.apply_rope_single(k_fused, cos_c, sin_c, True)
+        k_roped_bshd = self._apply_context_rope(k_fused, cos_c, sin_c)
 
         prepared: list[tuple[torch.Tensor, torch.Tensor]] = []
         offset = 0
@@ -651,6 +659,9 @@ class DflashDraftModel(torch.nn.Module):
                 ctx_meta.slot_mapping,
             )
         return prepared
+
+    def _apply_context_rope(self, key, cos, sin):
+        return torch.ops.tensor_cast.apply_rope_single(key, cos, sin, True)
 
     def prepare_context_kv(
         self,
@@ -873,9 +884,11 @@ class DflashWrapper(ModelWrapperBase):
         is_decode = self._is_decode_step(kwargs)
         batch_size = self._resolve_batch_size(input_ids, inputs_embeds, kwargs)
         # Draft decoder seq length is always dflash_block_size (not --query-length).
-        block = self.dflash_block_size
+        block = self._draft_query_length()
         # Target hiddens follow packed [1, B*query_len]; decode query_len == block.
-        tokens_per_req = block if is_decode else self._resolve_tokens_per_request(input_ids, kwargs, batch_size)
+        tokens_per_req = (
+            self.dflash_block_size if is_decode else self._resolve_tokens_per_request(input_ids, kwargs, batch_size)
+        )
         attn_meta = kwargs.get("attention_meta")
         query_lens_values = getattr(attn_meta, "query_lens_values", None) if attn_meta is not None else None
         varlen_query_lens = None
@@ -911,7 +924,7 @@ class DflashWrapper(ModelWrapperBase):
         # NPU order (decode): ConcatD(aux) → noise embedding → fc/hidden_norm/context
         # KV write ×N_draft → Layer0 Pre-LN → qkv → RoPE → noise reshape_and_cache → Attn.
         # Prefill: align aux token axis to L_ctx before ConcatD; Decode: already [B,block,H].
-        aux_seq_len = block if is_decode else self.draft.max_l_ctx()
+        aux_seq_len = self.dflash_block_size if is_decode else self.draft.max_l_ctx()
         target_context = self.draft.build_context_features(
             aux_hiddens,
             aux_seq_len,
@@ -963,6 +976,10 @@ class DflashWrapper(ModelWrapperBase):
 
         assert next_tokens is not None, "Dflash decode requires target sampler output"
         return self._propose_draft_tokens(draft_hidden, draft_logits, batch_size, block, next_tokens)
+
+    def _draft_query_length(self) -> int:
+        """Draft query length; native drafters may exclude the verifier anchor."""
+        return self.dflash_block_size
 
     def _exclude_anchor_from_lm_head(self) -> bool:
         """DFlash proposes ``block_size-1`` tokens; DSpark uses full ``block_size``."""

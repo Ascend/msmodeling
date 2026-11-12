@@ -457,12 +457,26 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         "linear_conv_kernel_dim",
         "layer_types",
         "shared_expert_intermediate_size",
+        "dense_intermediate_size",
+        "shared_intermediate_size",
+        "mlp_layer_types",
+        "index_topk_blocks",
     ):
         value = getattr(hf_config, key, None)
         if value is not None:
             model_config[key] = value
     model_config["enable_mlapo"] = profile.enable_mlapo
     root_model_type = getattr(root_config, "model_type", None)
+    if root_model_type == "minimax_m3_vl":
+        # Official M3/M3.1 TextConfig uses intermediate_size for routed
+        # experts and a separate width for its dense/shared FFNs.
+        for source_key, target_key in (
+            ("num_local_experts", "num_experts"),
+            ("intermediate_size", "moe_intermediate_size"),
+        ):
+            value = getattr(hf_config, source_key, None)
+            if value is not None:
+                model_config[target_key] = value
     # Qwen3-VL, GLM-4V and Kimi-K2.5 Specs intentionally match their multimodal root
     # types. Other nested configs keep the effective text type copied above;
     # in particular, Qwen3.5 Specs match ``qwen3_5_text`` /
@@ -489,8 +503,8 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
             (("depth", "num_hidden_layers", "vt_num_hidden_layers"), "vision_num_hidden_layers"),
             (("patch_size",), "vision_patch_size"),
             (("temporal_patch_size",), "vision_temporal_patch_size"),
-            (("in_channels",), "vision_in_channels"),
-            (("out_hidden_size", "text_hidden_size"), "vision_out_hidden_size"),
+            (("in_channels", "num_channels"), "vision_in_channels"),
+            (("out_hidden_size", "text_hidden_size", "projection_dim"), "vision_out_hidden_size"),
         ):
             value = next(
                 (
@@ -609,6 +623,11 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
     effective = model_config.get("effective_num_hidden_layers")
     if isinstance(layer_types, list) and isinstance(effective, int) and len(layer_types) > effective:
         model_config["layer_types"] = layer_types[:effective]
+    if root_model_type == "minimax_m3_vl" and isinstance(effective, int):
+        mlp_types = model_config.get("mlp_layer_types")
+        if not isinstance(mlp_types, (list, tuple)) or len(mlp_types) < effective:
+            raise SourceLoadError("MiniMax-M3 requires an explicit mlp_layer_types sequence")
+        model_config["mlp_layer_types"] = list(mlp_types[:effective])
     if root_model_type == "qwen3_vl_moe" and _is_moe_config(hf_config) and isinstance(effective, int):
         model_config["language_layer_kinds"] = qwen3_vl_moe_layer_kinds(
             model_config,

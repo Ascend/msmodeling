@@ -1,0 +1,212 @@
+# Source: M3 shared FFN followed by residual and PP-stage RoPE preparation.
+# RoPE scaffolding is outside the compared linear/activation boundaries.
+fragment_id: minimax_m3_moe_decoder_v1
+fragment_kind: model_decoder
+include_fragments:
+- minimax_m3_attention_v1
+stages:
+- id: moe_gate
+  modules:
+  - name: gate_linear
+    tensors:
+      INPUT[0]:
+        shape: '[MOE_GATE_TOKENS, H]'
+        dtype: ACT
+      OUTPUT[0]:
+        shape: '[MOE_GATE_TOKENS, E]'
+        dtype: ACT
+  - name: moe_gating_top_k_sigmoid
+    tensors:
+      INPUT[0]:
+        shape: '[MOE_GATE_TOKENS, E]'
+        dtype: float32
+      OUTPUT[0]:
+        shape: '[MOE_GATE_TOKENS, Ktop]'
+        dtype: float32
+      OUTPUT[1]:
+        shape: '[MOE_GATE_TOKENS, Ktop]'
+        dtype: int64
+  runtime:
+    boundary_operators:
+    - add_rms_norm2
+    ignored_operators:
+    - add_rms_norm2
+    - constant_pad_nd
+    - convert_element_type
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+    - dynamic_quantize_symmetric
+- id: moe_dispatch
+  modules:
+  - name: init_routing_v2
+    tensors:
+      INPUT[0]:
+        shape: '[Tmoe, H]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[Tmoe, Ktop]'
+        dtype: int64
+      OUTPUT[0]:
+        shape: '[Tmoe * Ktop, H]'
+        dtype: ACT
+  runtime:
+    boundary_operators:
+    - init_routing_v2
+    ignored_operators:
+    - all_to_all
+    - cat
+    - dynamic_quantize_symmetric
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+- id: moe_experts
+  modules:
+  # Gate/up matmul is followed by a separate M3-specific clipped SwiGLU.
+  # Do not label this as grouped_matmul_swiglu (which includes activation).
+  - name: grouped_matmul
+    tensors:
+      OUTPUT[0]:
+        shape: '[Te, 2 * Fe]'
+        dtype: OUT
+  - name: m3_swiglu
+    tensors:
+      OUTPUT[0]:
+        shape: '[Te, Fe]'
+        dtype: ACT
+  - name: grouped_matmul
+    tensors:
+      OUTPUT[0]:
+        shape: '[Te, H]'
+        dtype: OUT
+  runtime:
+    boundary_operators:
+    - grouped_matmul
+    - grouped_matmul_quant
+    ignored_operators:
+    - dynamic_quantize_symmetric
+    - all_to_all
+    - cat
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+- id: moe_combine
+  modules:
+  - name: unpermute_tokens
+    tensors:
+      INPUT[0]:
+        shape: '[Tmoe * Ktop, H]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[Tmoe, Ktop]'
+        dtype: int64
+      OUTPUT[0]:
+        shape: '[Tmoe, Ktop, H]'
+        dtype: ACT
+  - name: mul
+    tensors:
+      OUTPUT[0]:
+        shape: '[Tmoe, Ktop, H]'
+        dtype: ACT
+  - name: sum
+    tensors:
+      OUTPUT[0]:
+        shape: '[Tmoe, H]'
+        dtype: ACT
+  runtime:
+    boundary_operators:
+    - unpermute_tokens
+    ignored_operators:
+    - all_to_all
+    - all_gather
+    - convert_element_type
+    - unsqueeze
+    - add
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+- id: shared_expert
+  modules:
+  - name: gate_up_projection
+    tensors:
+      INPUT[0]:
+        shape: '[Tshared, H]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[Tshared, 2 * M3Shared]'
+        dtype: OUT
+  - name: m3_swiglu_quant
+    tensors:
+      INPUT[0]:
+        shape: '[Tshared, M3Shared]'
+        dtype: ACT
+      INPUT[1]:
+        shape: '[Tshared, M3Shared]'
+        dtype: ACT
+      OUTPUT[0]:
+        shape: '[Tshared, M3Shared]'
+        dtype: int8
+      OUTPUT[1]:
+        shape: '[Tshared, 1]'
+        dtype: float32
+  - name: down_projection
+    tensors:
+      INPUT[0]:
+        shape: '[Tshared, M3Shared]'
+        dtype: LINEAR_IN
+      OUTPUT[0]:
+        shape: '[Tshared, H]'
+        dtype: OUT
+  runtime:
+    boundary_operators:
+    - static_quant_linear
+    - mm
+    ignored_operators:
+    - dynamic_quantize_symmetric
+    - all_reduce
+    - view
+    - reshape
+    - permute
+    - transpose
+    - split_with_sizes
+    - slice
+    - select
+    - alias
+    - copy_
+    - add
+    - all_gather
+    - cos
+    - sin
+    - bmm
+    - mul
+    ignored_operator_groups:
+    - dtype_cast
+    - shape_views
+    - layout_permute
+    - cat_split
+    - broadcast_shapes
+    - tensor_storage

@@ -242,7 +242,18 @@ def derive_key_op_expectations(
         moe_source = "structure scan (field-based MoE modules)"
 
     vision_executed = _vision_runs(user_input, visual_prefixes)
-    expected_attention = len(text_attention) + (len(vision_attention) if vision_executed else 0)
+    vision_calls = len(vision_attention) if vision_executed else 0
+    vision_repeats = 1
+    if vision_executed and structure.get("model_type") == "minimax_m3_vl":
+        # MiniMax's meta tower executes each local image independently.
+        dp = getattr(user_input, "dp_size", None) or (
+            getattr(user_input, "world_size", 1)
+            // (getattr(user_input, "tp_size", 1) * getattr(user_input, "pp_size", 1))
+        )
+        local_requests = (getattr(user_input, "num_queries", 1) + dp - 1) // dp
+        vision_repeats = local_requests * user_input.image_batch_size
+        vision_calls *= vision_repeats
+    expected_attention = len(text_attention) + vision_calls
     if visual_prefixes and not vision_executed:
         notes.append(
             "Visual tower is present but not executed (decode mode or missing image "
@@ -257,18 +268,16 @@ def derive_key_op_expectations(
             "follow the scanned module tree."
         )
 
+    vision_basis = (
+        f" + {vision_calls} vision attention calls ({len(vision_attention)} modules x {vision_repeats} images)"
+        if vision_repeats != 1
+        else f" + {len(vision_attention)} vision attention modules (image input present)"
+    )
     expectations = {
         ATTENTION_CATEGORY: KeyOpExpectation(
             category=ATTENTION_CATEGORY,
             expected_count=expected_attention,
-            basis=(
-                f"{len(text_attention)} text attention modules"
-                + (
-                    f" + {len(vision_attention)} vision attention modules (image input present)"
-                    if vision_executed
-                    else ""
-                )
-            ),
+            basis=f"{len(text_attention)} text attention modules" + (vision_basis if vision_executed else ""),
         ),
         MOE_GATING_CATEGORY: KeyOpExpectation(
             category=MOE_GATING_CATEGORY,

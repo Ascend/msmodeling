@@ -103,3 +103,19 @@ python -m cli.inference.text_generate /data/models/Qwen3-32B \
 - `--num-draft-layers` 不得大于主模型 `num_hidden_layers`。内置 `target_layer_ids`（按 64 层 Qwen3 标定）在主模型更浅时会按层数等间隔重采样，而不是直接报错。
 - draft 自有 Linear 不参与 `--quantize-linear-action` 量化。
 - `--acceptance-length` 仅用于 `throughput_optimizer` 的 Decode 吞吐折算，不参与 `text_generate` 构图。
+
+## 7 Draft 扩展注册
+
+`tensor_cast/layers/draft_registry.py` 提供配置解析器和 DSpark 类型注册接口：
+
+- `register_draft_config_parser(architecture, parser)`：按 JSON 的 `architectures` 选择配置归一化函数。
+- `register_dspark_family(family, draft_type, wrapper_type)`：按归一化后的 `tensor_cast_draft_family` 选择实现。
+  类型路径使用受信任代码中登记的 `module:Class`，构建时才加载，不接受 JSON 指定任意导入路径。
+
+配置加载器 `dflash.py` 只调用通用解析入口；`dspark.py` 只查询类型注册表。
+没有家族字段时保留通用 Draft/Wrapper；显式但未注册的家族报错，避免静默套用错误结构。
+重复冲突注册及多解析器匹配会报错。
+
+MiniMax 的配置转换与注册位于轻量模块 `minimax_m31_draft_config.py`，由 layers 包初始化登记；
+该模块不导入主模型、Draft 基类或 transformations。具体实现仍位于 `minimax_m31_dspark.py`。
+新增家族应遵循相同分层，避免在配置加载或基础 Draft 层硬编码模型类型分支。

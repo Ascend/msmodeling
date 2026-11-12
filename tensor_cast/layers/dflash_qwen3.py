@@ -118,7 +118,7 @@ class Qwen3DFlashAttention(nn.Module):
 
         cos_n, sin_n = position_embeddings
         # NPU Decoder: _triton_rope only on block_size noise tokens (Q + noise K).
-        q_bshd, k_noise_bshd = torch.ops.tensor_cast.apply_rope(q, k_noise, cos_n, sin_n, True)
+        q_bshd, k_noise_bshd = self._apply_noise_rope(q, k_noise, cos_n, sin_n)
         v_noise_bshd = v_noise.transpose(1, 2)
 
         attention_by_layers = kwargs.get("attention_by_layers")
@@ -184,6 +184,9 @@ class Qwen3DFlashAttention(nn.Module):
         attn_output = attn_output.view(bsz, q_len, -1)
         attn_output = self.o_proj(attn_output)
         return attn_output, None
+
+    def _apply_noise_rope(self, query, key, cos, sin):
+        return torch.ops.tensor_cast.apply_rope(query, key, cos, sin, True)
 
 
 class Qwen3DFlashDecoderLayer(nn.Module):

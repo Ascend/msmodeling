@@ -19,6 +19,7 @@ from types import MethodType
 
 import torch
 import torch.nn.functional as F
+from transformers.utils.generic import can_return_tuple
 from tensor_cast.transformers.transformations import patch_moe
 
 from ..custom_model_registry import (
@@ -412,10 +413,183 @@ def patch_minimax_m3_moe_gate_attrs(model: TransformerModel) -> TransformerModel
     return model
 
 
+def _minimax_vision_patch_lengths(grid_thw):
+    """Read static CPU image geometry, never values from meta image pixels."""
+    if grid_thw is None or grid_thw.device.type != "cpu":
+        raise ValueError("MiniMax meta vision requires a concrete CPU grid_thw")
+    static_lengths = getattr(grid_thw, "_minimax_patch_lengths", None)
+    if static_lengths is not None:
+        return static_lengths
+    if torch.compiler.is_compiling():
+        raise ValueError("MiniMax compiled vision requires static per-image patch metadata from the input generator")
+    lengths = []
+    for row in grid_thw.tolist():
+        if len(row) != 3 or any(value <= 0 for value in row):
+            raise ValueError("MiniMax image grids must contain positive (T, H, W) triples")
+        lengths.append(int(row[0] * row[1] * row[2]))
+    if not lengths:
+        raise ValueError("MiniMax image grids must not be empty")
+    return tuple(lengths)
+
+
+def _minimax_vision_meta_forward(self, pixel_values, grid_thw=None, **kwargs):
+    """Keep image attention independent while tracing upstream ViT math.
+
+    Execute each image independently and restore packed order for the projector.
+    This also avoids the generic packed-query cost model joining image lengths.
+    """
+    if pixel_values.device.type != "meta":
+        return self._tensor_cast_original_forward(self, pixel_values, grid_thw=grid_thw, **kwargs)
+    from transformers.modeling_outputs import BaseModelOutputWithPooling
+
+    lengths = _minimax_vision_patch_lengths(grid_thw)
+    if sum(lengths) != pixel_values.shape[0]:
+        raise ValueError("MiniMax image grid patch counts do not match pixel_values")
+    embeds = self.embeddings(pixel_values).to(self.pre_layrnorm.weight.dtype)
+    rotary_width = 3 * self.rotary_emb.axis_dim
+    hidden_states = self.pre_layrnorm(embeds)
+    for layer in self.layers:
+        outputs = []
+        offset = 0
+        for length in lengths:
+            group = hidden_states[offset : offset + length].unsqueeze(0)
+            cos = torch.empty((length, rotary_width), dtype=embeds.dtype, device=embeds.device)
+            sin = torch.empty_like(cos)
+            output = layer(group, attention_mask=None, position_embeddings=(cos, sin), **kwargs)
+            outputs.append(output.squeeze(0))
+            offset += length
+        hidden_states = torch.cat(outputs, dim=0)
+    hidden_states = hidden_states.unsqueeze(0)
+    return BaseModelOutputWithPooling(last_hidden_state=hidden_states, pooler_output=hidden_states[:, 0])
+
+
+def _minimax_placeholder_mask(self, input_ids, inputs_embeds=None, image_features=None, video_features=None):
+    if inputs_embeds is None or inputs_embeds.device.type != "meta":
+        return self._tensor_cast_original_placeholder_mask(
+            self, input_ids, inputs_embeds, image_features=image_features, video_features=video_features
+        )
+    # Generated meta token IDs have no values to count. Retain shape checks;
+    # exact image span counts are validated by the input geometry tests.
+    for features in (image_features, video_features):
+        if features is not None and (
+            features.shape[-1] != inputs_embeds.shape[-1] or features.numel() > inputs_embeds.numel()
+        ):
+            raise ValueError("MiniMax visual features do not fit the token embedding geometry")
+    mask = torch.empty_like(inputs_embeds, dtype=torch.bool)
+    return mask, torch.empty_like(mask)
+
+
+def _minimax_merge_visual_features(inputs_embeds, mask, features):
+    if inputs_embeds.device.type == "meta":
+        return torch.ops.tensor_cast.masked_scatter.default(inputs_embeds, mask, features)
+    return inputs_embeds.masked_scatter(mask, features)
+
+
+@can_return_tuple
+def _minimax_multimodal_forward(
+    self,
+    input_ids=None,
+    pixel_values=None,
+    pixel_values_videos=None,
+    image_grid_thw=None,
+    video_grid_thw=None,
+    attention_mask=None,
+    position_ids=None,
+    past_key_values=None,
+    inputs_embeds=None,
+    **kwargs,
+):
+    """Follow MiniMaxM3VLModel.forward with a model-local meta image merge.
+
+    Preserve the visual dependency without changing Tensor.masked_scatter for
+    other model families. Real tensors use the original decorated HF forward.
+    """
+    tensor = inputs_embeds if inputs_embeds is not None else input_ids
+    if tensor is None or tensor.device.type != "meta":
+        return self._tensor_cast_original_multimodal_forward(
+            self,
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
+    from transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import MiniMaxM3VLModelOutputWithPast
+
+    if (input_ids is None) ^ (inputs_embeds is not None):
+        raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+    if inputs_embeds is None:
+        inputs_embeds = self.get_input_embeddings()(input_ids)
+    image_features = None
+    if pixel_values is not None:
+        image_features = self.get_image_features(
+            pixel_values=pixel_values, image_grid_thw=image_grid_thw
+        ).pooler_output.to(inputs_embeds.device, inputs_embeds.dtype)
+    video_features = None
+    if pixel_values_videos is not None:
+        video_features = self.get_video_features(
+            pixel_values_videos=pixel_values_videos, video_grid_thw=video_grid_thw
+        ).pooler_output.to(inputs_embeds.device, inputs_embeds.dtype)
+    image_mask, video_mask = self.get_placeholder_mask(
+        input_ids, inputs_embeds, image_features=image_features, video_features=video_features
+    )
+    if image_features is not None:
+        inputs_embeds = _minimax_merge_visual_features(inputs_embeds, image_mask, image_features)
+    if video_features is not None:
+        inputs_embeds = _minimax_merge_visual_features(inputs_embeds, video_mask, video_features)
+    outputs = self.language_model(
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        **kwargs,
+    )
+    return MiniMaxM3VLModelOutputWithPast(
+        last_hidden_state=outputs.last_hidden_state,
+        past_key_values=outputs.past_key_values,
+        hidden_states=getattr(outputs, "hidden_states", None),
+        attentions=getattr(outputs, "attentions", None),
+        image_hidden_states=image_features,
+        video_hidden_states=video_features,
+    )
+
+
 def patch_method_for_minimax_m3(model: TransformerModel) -> TransformerModel:
     # MiniMax-M3 uses partial/3D RoPE; the generic rotary cache rewrites
     # position_embeddings to a shape that is incompatible with its attention.
     model.model_config.cache_rotary_embedding = False
+    visual = getattr(model.unwrap(), "vision_tower", None)
+    backbone = model.unwrap()
+    if hasattr(backbone, "get_placeholder_mask") and not hasattr(backbone, "_tensor_cast_original_placeholder_mask"):
+        backbone._tensor_cast_original_placeholder_mask = type(backbone).get_placeholder_mask
+        backbone.get_placeholder_mask = MethodType(_minimax_placeholder_mask, backbone)
+        backbone._tensor_cast_original_multimodal_forward = type(backbone).forward
+        backbone.forward = MethodType(_minimax_multimodal_forward, backbone)
+    if visual is not None and not hasattr(visual, "_tensor_cast_original_forward"):
+        visual._tensor_cast_original_forward = type(visual).forward
+        visual.forward = MethodType(_minimax_vision_meta_forward, visual)
+    if visual is not None and model.model_config.parallel_config.vision_tensor_parallel_size != 1:
+        raise ValueError("MiniMax vision simulation currently requires --vision-tp-size 1")
+    # The official checkpoint excludes the vision tower and multimodal
+    # projector from low-bit quantization. Keep them at the model float dtype.
+    visual_roots = tuple(
+        module
+        for name in ("vision_tower", "multi_modal_projector")
+        if (module := getattr(model.unwrap(), name, None)) is not None
+    )
+    visual_linear_ids = {id(module) for root in visual_roots for module in root.modules()}
+    quant_config = getattr(model.model_config, "quant_config", None)
+    if quant_config is not None:
+        excluded = list(quant_config.modules_to_not_convert or [])
+        for name, module in model._inner.named_modules():
+            if id(module) in visual_linear_ids and isinstance(module, torch.nn.Linear) and name not in excluded:
+                excluded.append(name)
+        quant_config.modules_to_not_convert = excluded
     model = patch_minimax_m3_attention(model)
     model = patch_minimax_m3_layernorm(model)
     model = patch_minimax_m3_dense_mlp(model)
@@ -433,6 +607,7 @@ register_model_profile(
         patch_method=patch_method_for_minimax_m3,
         mtp_block_module_name=_MINIMAX_M3_DECODER_LAYER_NAME,
         language_module_path=_MINIMAX_M3_LANGUAGE_MODULE_PATH,
+        visual_module_path="vision_tower",
         language_layers_path_str=f"{_MINIMAX_M3_LANGUAGE_MODULE_PATH}.layers",
         custom_expert_module_type=MiniMaxM3MoeExpertMLP,
     )

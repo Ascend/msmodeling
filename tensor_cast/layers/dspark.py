@@ -28,6 +28,7 @@ import torch
 from transformers import Qwen3Config
 
 from ..model_config import DflashConfig, DsparkConfig
+from .draft_registry import get_dspark_family
 from .dflash import (
     DflashDraftModel,
     DflashWrapper,
@@ -349,7 +350,11 @@ def build_dspark_draft_and_wrapper(
     scfg.aux_hidden_state_layer_ids = list(dcfg.aux_hidden_state_layer_ids)
 
     layer_idx_offset = int(num_target_hidden_layers)
-    draft = DsparkDraftModel(draft_hf_config, dcfg, scfg, layer_idx_offset=layer_idx_offset)
+    draft_cls, wrapper_cls = get_dspark_family(
+        getattr(draft_hf_config, "tensor_cast_draft_family", None),
+        default=(DsparkDraftModel, DsparkWrapper),
+    )
+    draft = draft_cls(draft_hf_config, dcfg, scfg, layer_idx_offset=layer_idx_offset)
     embed, lm_head = resolve_target_embed_and_lm_head(model)
     draft.set_shared(embed, lm_head)
     if dtype is not None:
@@ -357,7 +362,7 @@ def build_dspark_draft_and_wrapper(
             if name in ("embed_tokens", "lm_head"):
                 continue
             module.to(dtype=dtype)
-    return DsparkWrapper(
+    return wrapper_cls(
         scfg,
         dcfg,
         hf_config,

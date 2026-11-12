@@ -126,6 +126,10 @@ class CompilerBackend:
         self.apply_redundant_node_elimination_pass(fx_graph, inputs)
         self.apply_quantization_passes(fx_graph, inputs)
         self.apply_pattern_match_passes(fx_graph, inputs)
+        # Multi-output norm fusion may move a consumer ahead of a computed
+        # Gemma weight (1 + weight). Freezing's CSE requires topological order.
+        stable_topo_sort(fx_graph)
+        fx_graph.graph.lint()
         self.apply_sequence_parallel_pass(fx_graph, inputs)
         return fx_graph
 

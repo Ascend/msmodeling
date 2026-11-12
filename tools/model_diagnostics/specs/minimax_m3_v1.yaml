@@ -1,0 +1,112 @@
+# Official M3.1 text-only baseline.
+schema_version: '1'
+spec_id: minimax_m3_v1
+spec_version: 1.0.0
+model_category: minimax_m3
+matches:
+  entrypoints:
+  - text_generate
+  model_types:
+  - minimax_m3_vl_text
+regions:
+  input:
+    stages:
+    - id: embedding
+      source_options:
+        theory:
+          modules:
+          - name: embedding
+            tensors:
+              INPUT[0]:
+                shape: '[EV, EH]'
+                dtype: WEIGHT
+              INPUT[1]:
+                shape: '[1, T]'
+                dtype: int64
+              OUTPUT[0]:
+                shape: '[1, T, H]'
+                dtype: ACT
+        runtime:
+          boundary_operators:
+          - embedding
+          ignored_operators:
+          - view
+          - reshape
+          - permute
+          - transpose
+          - split_with_sizes
+          - slice
+          - select
+          - alias
+          - copy_
+          - bmm
+          - mul
+          - cos
+          - sin
+          - clone
+          ignored_operator_groups:
+          - rotary_embedding
+          - dtype_cast
+          - shape_views
+          - layout_permute
+          - cat_split
+          - broadcast_shapes
+  language:
+    layer_layout_rule:
+      strategy: sequence
+      count_from: model_config.effective_num_hidden_layers
+      kinds_from: model_config.mlp_layer_types
+    layer_specs:
+      dense:
+        include_fragment: minimax_m3_dense_decoder_v1
+      sparse:
+        include_fragment: minimax_m3_moe_decoder_v1
+  output:
+    stages:
+    - id: lm_head
+      source_options:
+        theory:
+          modules:
+          - name: lm_head_select
+            activation: lm_head_token_selection
+            tensors:
+              INPUT[0]:
+                shape: '[1, T, H]'
+                dtype: ACT
+              INPUT[1]:
+                shape: '[B]'
+                dtype: int64
+              OUTPUT[0]:
+                shape: '[1, B, H]'
+                dtype: ACT
+          - name: lm_head
+            tensors:
+              OUTPUT[0]:
+                shape: '[Rout, Vtp]'
+                dtype: OUT
+        runtime:
+          boundary_operators:
+          - rms_norm
+          ignored_operators:
+          # Boundary detection precedes filtering: the final norm locates this
+          # region, but its computation is outside the lm_head contract.
+          - rms_norm
+          - all_gather
+          - view
+          - reshape
+          - permute
+          - transpose
+          - split_with_sizes
+          - slice
+          - select
+          - alias
+          - copy_
+          ignored_operator_groups:
+          - norm_math_with_add
+          - dtype_cast
+          - shape_views
+          - tensor_storage
+operator_aliases:
+  index_q_projection: mm
+  index_k_projection: mm
+  gate_linear: mm

@@ -469,6 +469,7 @@ UI: dict[str, UIFieldProps] = {
     ),
     "word-embedding-tp": UIFieldProps(hidden=True),
     "performance-model": UIFieldProps(hidden=True),
+    "dump-input-shapes": UIFieldProps(hidden=True),
     "profiling-database-path": UIFieldProps(hidden=True),
     "analytic-calibration-profile": UIFieldProps(hidden=True),
     "analytic-calibration-stack": UIFieldProps(hidden=True),

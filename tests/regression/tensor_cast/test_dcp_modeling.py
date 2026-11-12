@@ -1017,13 +1017,19 @@ class TestMlaDcpCompileSafety:
             sum("all_to_all" in n for n in names),
         )
 
-    def test_mla_decode_compiles_without_graph_break(self):
+    @pytest.mark.parametrize("num_requests", [1, 4, 8])
+    def test_mla_decode_compiles_without_graph_break(self, num_requests):
         # fullgraph=True: a data-dependent branch (the regression) would raise here
         # instead of silently falling back to eager, so reaching the assert proves the
         # MLA forward branches on the host-side flag rather than reducing tensors.
-        out, _ = _run_mla_attention(self._DCP2, compile_forward=True)
-        # o_proj input width is h_q/tp * v_head_dim, reshaped back to hidden_size.
-        assert out.shape[0] == 4  # one decode token per request
+        eager_out, _ = _run_mla_attention(self._DCP2, num_requests=num_requests, compile_forward=False)
+        out, _ = _run_mla_attention(self._DCP2, num_requests=num_requests, compile_forward=True)
+        # The helper packs requests as [1, num_requests, hidden_size]. MLA
+        # restores batch/sequence before o_proj, so compile must preserve the
+        # same rank and hidden width as eager, rather than flattening requests.
+        assert eager_out.ndim == 3
+        assert eager_out.shape[:2] == (1, num_requests)
+        assert out.shape == eager_out.shape
 
     def test_mla_dcp_collectives_survive_compile(self):
         _, eager = _run_mla_attention(self._DCP2, compile_forward=False)

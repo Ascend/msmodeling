@@ -48,6 +48,48 @@ class TestValidatorIntegration:
             # parse_module_args calls parser.error() → SystemExit(2) on failure
             return parse_module_args(spec, parser)
 
+    @pytest.mark.parametrize("moe_tp", [None, 1])
+    def test_text_generate_pipeline_stage_local_moe(self, moe_tp):
+        argv = [
+            "--model-id",
+            "MiniMaxAI/MiniMax-M3.1-Flash",
+            "--num-devices",
+            "64",
+            "--tp-size",
+            "4",
+            "--dp-size",
+            "4",
+            "--pp-size",
+            "4",
+            "--ep-size",
+            "16",
+            "--moe-dp-size",
+            "1",
+            "--num-queries",
+            "2",
+            "--query-length",
+            "131072",
+        ]
+        if moe_tp is not None:
+            argv.extend(["--moe-tp-size", str(moe_tp)])
+        assert self._parse("text_generate", argv).pp_size == 4
+
+    def test_moe_global_group_cannot_span_pipeline_stages(self):
+        assert (
+            V.moe_product_eq_num_devices(
+                {
+                    "num-devices": 64,
+                    "pp-size": 4,
+                    "ep-size": 16,
+                    "moe-tp-size": 4,
+                }
+            )
+            is not None
+        )
+
+    def test_moe_pipeline_requires_divisible_device_count(self):
+        assert V.moe_product_eq_num_devices({"num-devices": 63, "pp-size": 4}) is not None
+
     def test_text_generate_tp_product_mismatch(self, capsys):
         """tg: tp_size × dp_size × pp_size != num_devices → validator error."""
         with pytest.raises(SystemExit) as exc_info:
@@ -555,3 +597,16 @@ class TestHelpUnaffected:
         result = run_cli_main(main_map[module_id], ["--help"], prog="msmodeling")
         assert result.returncode == 0
         assert "usage:" in result.stdout.lower()
+
+
+@pytest.mark.parametrize("prefix", ["o-proj", "mlp", "lmhead"])
+@pytest.mark.parametrize("dp", [None, 1])
+def test_per_layer_parallelism_uses_pipeline_stage_devices(prefix, dp):
+    params = {"num-devices": 16, "pp-size": 4, prefix + "-tp-size": 4, prefix + "-dp-size": dp}
+    assert V.per_layer_product_eq_num_devices(params) is None
+    params[prefix + "-dp-size"] = 4
+    assert V.per_layer_product_eq_num_devices(params) is not None
+
+
+def test_per_layer_pipeline_requires_divisible_device_count():
+    assert V.per_layer_product_eq_num_devices({"num-devices": 15, "pp-size": 4}) is not None

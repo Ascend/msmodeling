@@ -428,6 +428,14 @@ class ConfigResolver:
         from tensor_cast.layers.dspark import apply_cli_overrides_to_dspark_config
 
         text_config = _resolve_text_config(self.hf_config)
+        if (
+            draft_model_config_path is None
+            and getattr(text_config, "model_type", None) in ("minimax_m3_vl", "minimax_m3_vl_text")
+            and all(kind == "minimax_m3_sparse" for kind in (getattr(text_config, "layer_types", None) or [None]))
+        ):
+            from tensor_cast.layers.minimax_m31_dspark import MINIMAX_M31_DRAFT_CONFIG
+
+            draft_model_config_path = str(MINIMAX_M31_DRAFT_CONFIG)
         # Only supported native DSpark adapters own these defaults. A positive
         # num_nextn_predict_layers on another model may describe generic MTP.
         native_dspark = getattr(text_config, "model_type", None) in ("deepseek_v41", "deepseek_v41_text")

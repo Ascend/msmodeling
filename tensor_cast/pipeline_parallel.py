@@ -693,8 +693,8 @@ class PipelineModel(torch.nn.Module):
 
     @property
     def is_vl_model(self) -> bool:
-        """Pipeline split models are text-only in this code path."""
-        return False
+        """MiniMax carries image inputs through the first pipeline stage."""
+        return self.hf_config.model_type == "minimax_m3_vl"
 
     @property
     def hf_config(self):
@@ -785,6 +785,9 @@ def build_pipeline_stage_kwargs(
         if "input_ids" not in input_kwargs:
             raise ValueError("The first pipeline stage requires input_ids.")
         stage_kwargs["input_ids"] = input_kwargs["input_ids"]
+        for key in ("pixel_values", "image_grid_thw"):
+            if key in input_kwargs:
+                stage_kwargs[key] = input_kwargs[key]
     else:
         if hidden_states is None:
             raise ValueError("Non-first pipeline stages require hidden_states.")

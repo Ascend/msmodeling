@@ -16,6 +16,7 @@
 
 from .parallel_embedding import ParallelEmbedding
 from .parallel_linear import ColumnParallelLinear, RowParallelLinear
+from . import minimax_m31_draft_config  # noqa: F401 (register lightweight built-in draft plugin)
 
 COLWISE_LINEAR = "colwise"
 ROWWISE_LINEAR = "rowwise"

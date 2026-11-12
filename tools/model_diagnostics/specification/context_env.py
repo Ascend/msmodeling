@@ -725,6 +725,25 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         if conv_kernel is not None:
             linear_env["LCONV"] = _config_int(config, "linear_conv_kernel_dim")
 
+    m3_env: dict[str, object] = {}
+    if model_type == "minimax_m3_vl_text":
+        attention_types = config.get("layer_types")
+        if not attention_types or any(kind != "minimax_m3_sparse" for kind in attention_types):
+            raise SpecificationLoadError("MiniMax-M3.1 Theory requires an explicit all-sparse attention layout")
+        dense_width = _config_int(config, "dense_intermediate_size")
+        if dense_width % mlp_tp:
+            raise SpecificationLoadError("dense_intermediate_size must be divisible by MLP_TP")
+        m3_env = {
+            "M3Dense": dense_width // mlp_tp,
+            # Shared experts are replicated under the approved default EP
+            # layout (enable_shared_expert_tp is disabled).
+            "M3Shared": _config_int(config, "shared_intermediate_size"),
+            "M3Ih": _config_int(config, "index_n_heads"),
+            "M3LocalIh": max(_config_int(config, "index_n_heads") // tp, 1),
+            "M3Id": _config_int(config, "index_head_dim"),
+            "M3Topk": _config_int(config, "index_topk_blocks"),
+        }
+
     shared_env: dict[str, object] = {}
     n_shared = config.get("n_shared_experts")
     if n_shared is not None:
@@ -781,6 +800,8 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         "ACC": accumulation_dtype,
         "OUT": output_dtype,
         "int64": "int64",
+        "int32": "int32",
+        "int8": "int8",
         "float32": "float32",
         "unknown": None,
         **moe_env,
@@ -790,4 +811,5 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         **shared_env,
         **vision_env,
         **v4_env,
+        **m3_env,
     }

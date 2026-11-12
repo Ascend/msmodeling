@@ -27,3 +27,15 @@ def _static_false_mask(mask: torch.Tensor) -> torch.Tensor:
 
 def static_false_mask(mask: torch.Tensor) -> torch.Tensor:
     return torch.ops.tensor_cast.static_false_mask.default(mask)
+
+
+@register_tensor_cast_op("masked_scatter")
+def masked_scatter(input: torch.Tensor, mask: torch.Tensor, source: torch.Tensor) -> torch.Tensor:
+    """Shape-only image/token merge, retaining all three compiled dependencies.
+
+    The ATen decomposition requires an Inductor device backend, which meta
+    simulation does not have. Real tensors keep the native masked_scatter path.
+    """
+    if mask.dtype != torch.bool or input.dtype != source.dtype:
+        raise ValueError("masked_scatter requires a Boolean mask and matching input/source dtypes")
+    return torch.empty_like(input)
