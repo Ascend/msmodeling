@@ -14,9 +14,9 @@ msModeling 提供模型推理性能仿真与服务化性能仿真能力。本文
 
 | 步骤 | 环节 | 核心模块 | 参考操作耗时 | 建议原理学习 |
 | :---: | :---: | :--- | :---: | :---: |
-| **1** | **环境准备** | `msModeling` | 2 分钟 | 5 分钟 |
-| **2** | **模型推理性能仿真** | `TensorCast` | 1 分钟 | 10 分钟 |
-| **3** | **服务化性能仿真** | `Throughput Optimizer` | 2 分钟 | 15 分钟 |
+| **1** | **环境准备** | msModeling | 2 分钟 | 5 分钟 |
+| **2** | **模型推理性能仿真** | TensorCast | 1 分钟 | 10 分钟 |
+| **3** | **服务化性能仿真** | Throughput Optimizer | 2 分钟 | 15 分钟 |
 
 ### 1.2 环境准备
 
@@ -30,7 +30,7 @@ msModeling 提供模型推理性能仿真与服务化性能仿真能力。本文
 > [!NOTE]说明
 > 后续命令均支持直接复制执行。建议先使用 `TEST_DEVICE` 跑通流程，确认输出符合预期后，再替换为实际目标硬件设备和业务模型。
 
-### 2.1【环境】确认运行环境
+### 2.1 【环境】确认运行环境
 
 开始体验前，请先完成《[msModeling 安装指南](../install_guide/msmodeling_install_guide.md)》中的环境搭建，包括克隆仓库、创建虚拟环境、安装依赖以及配置 `PYTHONPATH`。
 
@@ -75,7 +75,7 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
 
 命令执行成功后，终端会输出类似以下内容：
 
-```text
+```output
 Model compilation and execution time: 0.192 s
 ----------------------------------------------  --------------  ------------  ----------
                      Name                       analytic total  analytic avg  # of Calls
@@ -102,7 +102,7 @@ Total device memory: 64.000 GB
 - 输出 `Total time for analytic` 或 `[analytic] TPS/Device`。
 - 输出显存估算结果，例如 `Total device memory`。
 
-#### 2.2.3 生成 Chrome Trace（可选）
+#### 2.2.3 生成 Chrome Trace【可选】
 
 如需查看更细粒度的时间线，可增加 `--chrome-trace-file` 参数：
 
@@ -138,12 +138,11 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --tpot-limit 50
 ```
 
-
 #### 2.3.2 查看优化结果
 
 命令执行成功后，终端会先打印输入配置和最优配置摘要，随后展示候选并行配置表。例如：
 
-```text
+```output
 Input Configuration:
   Model: Qwen/Qwen3-32B
   Devices: 8 TEST_DEVICE

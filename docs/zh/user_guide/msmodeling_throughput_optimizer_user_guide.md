@@ -1,4 +1,4 @@
-# 服务化性能仿真 使用指南
+# 服务化性能仿真使用指南
 
 ## 1 简介
 
@@ -13,11 +13,11 @@
 
 | 模式 | 适用场景 | 关键参数 |
 | --- | --- | --- |
-| PD 混部 | Prefill 与 Decode 运行在同一实例中，适合快速评估整体吞吐 | `--tpot-limit`、`--ttft-limit`|
-| PD 分离 | Prefill 与 Decode 分开部署，需要分别评估阶段能力 | `--disagg`、`--ttft-limit` 或 `--tpot-limit` |
-| PD 配比 | 需要规划 Prefill 与 Decode 实例数量比例 | `--enable-optimize-prefill-decode-ratio`、`--prefill-devices-per-instance`、`--decode-devices-per-instance` |
-| KV Cache Offload | 需要评估 KV Cache 卸载（Decode 稀疏 / Prefill 层级）后的 TTFT、TPOT 与并发上限变化 | `--enable-decode-kv-offload`、`--enable-prefill-kv-offload` |
-| 容量规划 | 已知目标 QPS 与 SLO，需要反推最少卡数 | `--target-qps`（可叠加以上任一模式的参数） |
+| PD 混部 | Prefill 与 Decode 运行在同一实例中，适合快速评估整体吞吐 | --tpot-limit、--ttft-limit|
+| PD 分离 | Prefill 与 Decode 分开部署，需要分别评估阶段能力 | --disagg、--ttft-limit 或 --tpot-limit |
+| PD 配比 | 需要规划 Prefill 与 Decode 实例数量比例 | --enable-optimize-prefill-decode-ratio、--prefill-devices-per-instance、--decode-devices-per-instance |
+| KV Cache Offload | 需要评估 KV Cache 卸载（Decode 稀疏 / Prefill 层级）后的 TTFT、TPOT 与并发上限变化 | --enable-decode-kv-offload、--enable-prefill-kv-offload |
+| 容量规划 | 已知目标 QPS 与 SLO，需要反推最少卡数 | --target-qps（可叠加以上任一模式的参数） |
 
 按评估目标选择模式：评估 P/D 同实例部署的整体吞吐，使用 PD 混部；分别评估两个阶段的处理能力，使用 PD 分离；进一步规划 P/D 实例数量比例，使用 PD 配比。同一实例可使用多个设备，并不限定为单台物理机器。
 
@@ -97,7 +97,7 @@ PD 分离 Prefill 未设置 `--max-batched-tokens` 时，不设置组 batch 的 
 
 #### Prefill 模式
 
-在 TTFT（Time-to-First-Token，首 token 时间）约束下优化 Prefill 阶段吞吐量。此模式下应设置 `--disagg` 与 `--ttft-limit`。
+在 TTFT（Time-to-First-Token，首 token 延迟）约束下优化 Prefill 阶段吞吐量。此模式下应设置 `--disagg` 与 `--ttft-limit`。
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -217,7 +217,7 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 
 #### 约束
 
-- `--enable-optimize-prefill-decode-ratio` 不能与 `--disagg` 同时使用
+- `--enable-optimize-prefill-decode-ratio` 不能与 `--disagg` 同时使用。
 - `--prefill-devices-per-instance` 与 `--decode-devices-per-instance` 必须成对指定；仅在设置 `--target-qps` 时允许同时省略，不能只指定其中一个。
 
 #### 实践案例与结果分析
@@ -400,7 +400,7 @@ No PD ratio results found.
 
 PD 配比模式内部已经分别执行 Prefill 与 Decode 优化，不能在上述命令中再添加 `--disagg`，否则会输出：
 
-```text
+```output
 msmodeling inference throughput-optimizer: error: PD-ratio optimization cannot be used together with disagg
 ```
 
@@ -658,9 +658,9 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   - PD 分离：在设置相应限制时，分别输出 Prefill 与 Decode 的跨硬件表。
   - PD 配比模式：在 TTFT/TPOT 限制下各设备的最佳均衡 QPS，包含 PD 配比；若设置 `--num-devices`，还可包含 P/D 实例数量。
 
-#### 使用多个 `--device` 时的示例输出
+#### 使用多个 --device 时的示例输出
 
-指定两个及以上设备配置时，优化器会先为每个配置打印单设备结果，再输出两张跨硬件表：
+指定两个及以上设备画像时，优化器会先为每个配置打印单设备结果，再输出两张跨硬件表：
 
 **硬件配置对比表**
 
@@ -758,12 +758,12 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 | 字段 | 含义 |
 | --- | --- |
-| `Minimum Devices` | 满足目标 QPS 与 SLO 的最少总卡数 |
-| `Achieved QPS` | 按最少卡数方案推算实际达到的请求 QPS，不低于目标 QPS |
-| `Per-Die QPS` | 单卡请求 QPS，用于同卡数方案之间比较 |
-| `Replicas Needed` | 所需实例（副本）数 |
-| `Per-Replica Dies` | 每个实例占用的卡数 |
-| `Parallel` / `Batch Size` / `TTFT` / `TPOT` | 最优配置的并行策略与性能指标 |
+| Minimum Devices | 满足目标 QPS 与 SLO 的最少总卡数 |
+| Achieved QPS | 按最少卡数方案推算实际达到的请求 QPS，不低于目标 QPS |
+| Per-Die QPS | 单卡请求 QPS，用于同卡数方案之间比较 |
+| Replicas Needed | 所需实例（副本）数 |
+| Per-Replica Dies | 每个实例占用的卡数 |
+| Parallel / Batch Size / TTFT / TPOT | 最优配置的并行策略与性能指标 |
 
 PD 配比模式下，摘要改为输出 `Topology`（形如 `xPyD`）、`P QPS`、`D QPS`、`PD Ratio`，推算对比表列出各 (P, D) 组合的总卡数与单卡 QPS。
 
@@ -935,63 +935,63 @@ KV Cache Offload Options:
 
 | 参数名称 | 分类 | 可选/必选 | 参数说明 |
 | --- | --- | --- | --- |
-| `--device` | Options | 可选 | 指定一个或多个设备画像名称；传入多个设备时会输出跨硬件对比结果。<br>1. 类型：Str 或 List[Str]。<br>2. 参考值：任意已注册的 `DeviceProfile` 名称；内置值见 TensorCast 用户指南“设备类型”章节。<br>3. 默认值：未指定时使用 `TEST_DEVICE`。<br>4. 支持一次传入多个已注册 `DeviceProfile` 名称，重复名称会去重并保留输入顺序。 |
-| `--input-length` | Options | 必选 | 输入 prompt 的 token 长度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。 |
-| `--output-length` | Options | 必选 | 期望生成的输出 token 长度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。 |
-| `--mtp-acceptance-rates` | Options | 可选 | 指定 MTP token 的接受率列表。<br>1. 类型：List[Float]。<br>2. 取值范围：浮点数列表。<br>3. 默认值：`[0.9, 0.6, 0.4, 0.2]`。<br>4. 与原有 `--num-mtp-tokens` 配套，不可与 `--speculative-method` / `--num-speculative-tokens` / `--acceptance-length` 混用。后续版本将随旧 MTP 接口逐步弃用；新接口请使用 `--acceptance-length`。 |
-| `--prefix-cache-hit-rate` | Options | 可选 | 指定 prefix cache 命中率。<br>1. 类型：Float。<br>2. 取值范围：`[0, 1)`。<br>3. 默认值：`0.0`。 |
-| `--dump-original-results` | Options | 可选 | 输出原始搜索结果，便于进一步分析。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `model_id` | General Options | 必选 | 模型 ID 或已审核的本地模型绝对路径。<br>1. 类型：Str。<br>2. 参考值：Hugging Face ID、ModelScope ID 或本地绝对路径。<br>3. 默认值：无。<br>4. 使用远端模型 ID 时，可能通过 `trust_remote_code=True` 执行远端代码。 |
-| `--num-devices` | General Options | 可选 | 指定参与仿真的设备总数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
-| `--reserved-memory-gb` | General Options | 可选 | 指定每张设备预留给系统使用的显存，单位为 GB。<br>1. 类型：Float。<br>2. 取值范围：非负数；设置为 `0` 表示不预留系统显存。<br>3. 默认值：`10.0`。 |
-| `--log-level` | General Options | 可选 | 指定日志级别。<br>1. 类型：Str。<br>2. 参考值：`debug`、`info`、`warning`、`error`、`critical`。<br>3. 默认值：`error`。 |
-| `--compile` | Model & Quantization Options | 可选 | 在推理前对模型调用 `torch.compile()`。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `--compile-allow-graph-break` | Model & Quantization Options | 可选 | 允许 `torch.compile()` 过程中出现 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `--num-mtp-tokens` | Model & Quantization Options | 可选 | 指定 MTP token 数量候选，支持传入一个或多个值进行搜索；`0` 表示不启用。<br>1. 类型：List[Int]（`nargs="+"`）。<br>2. 取值范围：每个候选为 `0` 到 `9`；可一次传入多个值，例如 `--num-mtp-tokens 0 1 2`。<br>3. 默认值：未指定时等价于 `0`（不启用 MTP）。<br>4. 传入单个值时固定该 MTP 配置；传入多个值时在吞吐寻优中对候选组合进行搜索，并与 TP / EP / MOE-DP 搜索组合相乘。<br>5. 仅支持具备 MTP 能力的模型；每个候选值不能超过 `len(--mtp-acceptance-rates) + 1`（默认接受率列表长度为 `4`，故上限为 `5`；超过时运行时提示 `exceed the supported mtp_acceptance_rate length`）。<br>6. 旧 MTP 入口，不可与 `--speculative-method` / `--num-speculative-tokens` / `--acceptance-length` 混用。<br>7. 建议优先使用统一接口 `--speculative-method mtp --num-speculative-tokens`（语义等价，同样支持多值搜索）。本参数目前仍可单独兼容使用，后续版本将逐步弃用。 |
-| `--speculative-method` | Model & Quantization Options | 可选 | 指定投机解码方法。<br>1. 类型：Str。<br>2. 取值：`mtp`、`dflash` 或 `dspark`。<br>3. 默认值：未指定（关闭）。<br>4. 新投机入口，不可与旧 MTP 入口 `--num-mtp-tokens` / `--mtp-acceptance-rates` 混用。<br>5. 选用 `mtp` 时必须同时配置 `--num-speculative-tokens`。是 `--num-speculative-tokens` / `--acceptance-length` 等从属参数的前置开关。 |
-| `--num-speculative-tokens` | Model & Quantization Options | 可选 | 投机 token 数 / 深度 `n`（不含 anchor/bonus）。<br>1. 类型：List[Int]（`nargs="+"`，可多值搜索）。<br>2. 语义：`>= 1` 时内部 `block_size = n + 1`；**省略**时 dflash/dspark 使用 builtin / 外部 config；已设置 `--speculative-method` 时，任一候选为**显式** `0` 会解析失败（关闭请省略 `--speculative-method`）；对 `mtp` 时 `n` 即 MTP token 数，且必须显式配置。<br>3. 默认值：未指定。<br>4. 需要 `--speculative-method`。传入多个值时与 TP / EP / MOE-DP 组合搜索。 |
-| `--acceptance-length` | Model & Quantization Options | 可选 | Decode 吞吐折算用接受长度。<br>1. 类型：Float。<br>2. 取值范围：非负；对所有方法统一 clamp 到 `n`（`= block_size - 1`）。<br>3. 默认值：`5.0`。<br>4. 需要 `--speculative-method`；不参与构图，仅影响 Decode 延迟折算。 |
-| `--dspark-markov-rank` | Model & Quantization Options | 可选 | Markov embedding 维度。<br>1. 类型：Int。<br>2. 取值范围：非负整数；`0` 禁用 MarkovHead。<br>3. 默认值：`256`。<br>4. 需要 `--speculative-method dspark`。 |
-| `--dspark-markov-head` | Model & Quantization Options | 可选 | Markov head 类型。<br>1. 类型：Str。<br>2. 参考值：`vanilla`、`gated`、`rnn`。<br>3. 默认值：`vanilla`。<br>4. 需要 `--speculative-method dspark`。 |
-| `--num-draft-layers` | Model & Quantization Options | 可选 | 覆盖 draft `num_hidden_layers`。<br>1. 类型：Int。<br>2. 取值范围：非负整数；`0` 表示使用 config 默认。<br>3. 默认值：`0`。<br>4. 需要 `--speculative-method dflash` 或 `dspark`（不可与 `mtp` 同用）。 |
-| `--draft-model-config-path` | Model & Quantization Options | 可选 | 外部 draft `config.json` 路径（或含该文件的目录）。<br>1. 类型：Str。<br>2. 默认值：`None`（使用 `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`）。<br>3. 需要 `--speculative-method dflash` 或 `dspark`（不可与 `mtp` 同用）。<br>4. 字段说明见 [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md)。 |
-| `--quantize-linear-action` | Model & Quantization Options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`HIF8`。<br>3. 默认值：`W8A8_DYNAMIC`。<br>4. draft 自有 Linear 不量化。<br>5. 取值大小写及下划线/连字符写法均可，例如 `W8A8_DYNAMIC` 与 `w8a8-dynamic`、`DISABLED` 与 `disabled`。 |
-| `--quantize-non-expert-linear-action` | Model & Quantization Options | 可选 | 为 attention 投影、dense MLP、shared experts 等非 expert 线性层指定独立量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`HIF8`。<br>3. 默认值：`DISABLED`。<br>4. 主要用于 DeepSeek V4 风格 MoE 模型；路由 MoE experts 仍使用 `--quantize-linear-action`。<br>5. 取值大小写及下划线/连字符写法均可，例如 `DISABLED` 与 `disabled`。 |
-| `--mxfp4-group-size` | Model & Quantization Options | 可选 | 指定 mxfp4 量化的 group size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`32`。 |
-| `--quantize-attention-action` | Model & Quantization Options | 可选 | 指定 KV cache 量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`、`HIF8`。<br>3. 默认值：`DISABLED`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `DISABLED` 与 `disabled`、`INT8` 与 `int8`。 |
-| `--tp-sizes` | Model & Quantization Options | 可选 | 启用 TP 搜索，并可显式指定 TP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
-| `--ep-sizes` | Model & Quantization Options | 可选 | 启用 EP 搜索，并可显式指定 EP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
-| `--moe-dp-sizes` | Model & Quantization Options | 可选 | 启用 MOE-DP 搜索，并可显式指定 MOE-DP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
-| `--pp-sizes` | Model & Quantization Options | 可选 | 启用流水线并行（Pipeline Parallel, PP）搜索，并可显式指定 PP 取值范围。<br>1. 类型：List[Int]（`nargs="*"`）。<br>2. 取值范围：正整数列表，每个值需为正整数且不超过 `num_devices`，且不超过模型 `num_hidden_layers`。<br>3. 默认值：`None`；未指定时 PP 固定为 1（向后兼容，走原有 TP/EP/DCP 搜索路径）。仅传入参数但不指定取值时，默认搜索不超过 `num_devices` 的 2 的幂（`1, 2, 4, ...`）。<br>4. 指定后进入 PP-aware 搜索路径：按 stage-local 算术推导 `dp = num_devices // (tp * pp)`、`moe_tp = (num_devices // pp) // (ep * moe_dp)`，并使用前向阻塞式流水线调度器计算 PP>1 候选的 makespan、bubble ratio 与 schedule-aware 吞吐量。PP 与 DCP 可联合搜索（显式 `--dcp-sizes` 不会被丢弃）。<br>5. 暂不支持 PP>1 的场景：VL/多模态模型、变长输入分布（`length_distribution`）——命中时跳过候选并记录 warning。PP 与投机解码（`--speculative-method mtp/dflash/dspark`）可联合搜索，投机解码的 proposal/draft 计算在流水线最后一个 stage 上执行。 |
-| `--pp-layer-partitions` | Model & Quantization Options | 可选 | 显式指定 PP 各 stage 的层划分。<br>1. 类型：Str（JSON list of lists）。<br>2. 格式：如 `'[[31,30],[16,15,15,15]]'`；每个内层 list 长度必须等于对应的 `pp_size`，所有内层 list 元素之和必须等于模型 `num_hidden_layers`（DeepSeek-V3.1 有 61 层，31+30=61，16+15+15+15=61）。内层 list 按长度自动匹配对应的 `pp_size`。<br>3. 默认值：`None`；未指定时使用均匀切分（余数放在前面的 stage，避免最后 stage 同时背 norm + lm_head）。<br>4. 仅 PP>1 时生效。 |
-| `--enable-shared-expert-tp` | Model & Quantization Options | 可选 | 启用 vLLM 风格的 shared experts 张量并行。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. shared experts 使用 dense MLP TP，并延迟执行 `down_proj` 规约。 |
-| `--compilation-config` | Model & Quantization Options | 可选 | 按需启用指定的编译特性。<br>1. 类型：List[Str]。<br>2. 取值范围：`enable_multistream`、`enable_sequence_parallel`、`enable_matmul_allreduce`、`enable_dispatch_ffn_combine`，可同时传入多个，以空格分隔，例如 `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`。<br>3. 默认值：`None`，未指定时所有编译特性保持关闭。<br>4. 该参数自 PR #573 起统一替代原 `--enable_sequence_parallel` / `--enable_dispatch_ffn_combine` 等分散开关。<br>5. 取值大小写及下划线/连字符写法均可，例如 `enable_multistream` 与 `enable-multistream`。 |
-| `--word-embedding-tp` | Model & Quantization Options | 可选 | 启用 word embedding 张量并行并指定并行模式。<br>1. 类型：Str。<br>2. 参考值：`col`、`row`。<br>3. 默认值：`None`，表示不启用 embedding TP。 |
-| `--enable-decode-kv-offload` | KV Cache Offload Options | 可选 | 开启 Decode 稀疏 KV Cache 卸载建模。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 稀疏窗口 top-k 从模型 checkpoint config（`index_topk`，或 `topk_limit` + `index_n_heads`）解析，config 未声明时开启即拒绝；dense/GQA 模型（无 indexer cache）同样拒绝。 |
-| `--decode-offload-buffer-multiplier` | KV Cache Offload Options | 可选 | 热 buffer 容量 = multiplier × top-k。<br>1. 类型：Float。<br>2. 取值范围：≥ 1（buffer 须容纳至少一个完整 top-k 窗口，正命中率才可部署）。<br>3. 默认值：`2.0`（上游实测 2×top-k 命中率 80–90%）。 |
-| `--decode-offload-hit-rate` | KV Cache Offload Options | 可选 | 热 buffer 命中率，决定每步 miss 行回载量。<br>1. 类型：Float。<br>2. 取值范围：`[0, 1]`。<br>3. 默认值：`0.85`（保守下界）。<br>4. `hit_rate = 1` 时每步仍有新 KV 回写代价，卸载不免费。 |
-| `--enable-prefill-kv-offload` | KV Cache Offload Options | 可选 | 开启 Prefill 层级 KV Cache 卸载建模（N 层共享 B 个物理 buffer）。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. B/I 使用代码级默认（`B=2`、`I=0`，见 `ModelRunner._PREFILL_OFFLOAD_*`）；与 PP>1 互斥。 |
-| `--host-memory-available-gb` | KV Cache Offload Options | 可选 | offload KV 池的 host 内存预算（GB）。<br>1. 类型：Float。<br>2. 取值范围：≥ 0。<br>3. 默认值：`0`（不做容量检查）。<br>4. >0 时，卸载池超预算的候选折入 OOM 提前停止路径（搜索收缩并保留可行解），不产出不可部署结果。 |
-| `--performance-model` | Performance Model Options | 可选 | 指定性能模型类型。<br>1. 类型：Str。<br>2. 参考值：`analytic`、`profiling`。<br>3. 默认值：`analytic`。<br>4. `profiling` 模式需配合 `--profiling-database-path` 使用。 |
-| `--profiling-database-path` | Performance Model Options | 条件必选 | 指定 profiling 模式使用的实测算子 CSV 数据库目录。<br>1. 类型：Str。<br>2. 取值范围：数据库目录路径，例如 `tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/`。<br>3. 默认值：`None`；使用 `--performance-model profiling` 时必填。 |
-| `--chrome-trace-file` | Debug Options | 可选 | 生成 Chrome Trace 文件，用于可视化分析算子级性能。<br>1. 类型：Str。<br>2. 参考值：Trace 文件路径，例如 `trace.json`。<br>3. 默认值：`None`，表示不生成 Chrome Trace 文件。 |
-| `--ttft-limit` | Service Options | 可选 | 指定 TTFT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TTFT。<br>4. 兼容别名：`--ttft-limits`。 |
-| `--tpot-limit` | Service Options | 可选 | 指定 TPOT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TPOT。<br>4. 兼容别名：`--tpot-limits`。 |
-| `--target-qps` | Service Options | 可选 | 指定目标请求 QPS（req/s）；设置后触发容量规划模式，在给定 SLO 下反推满足该 QPS 的最少卡数。<br>1. 类型：Float。<br>2. 取值范围：正数。<br>3. 默认值：`None`。<br>4. 与 `--num-devices` 的配合方式、以及 `--disagg` 下需恰好指定一个阶段 SLO 的约束，见 [2.5 容量规划场景](#25-容量规划场景)。 |
-| `--max-batched-tokens` | Service Options | 可选 | 指定单个数据并行（DP）副本在一次 prefill 或混合 prefill/decode step 的最大 batched tokens。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；自动模式先使用 `4 * input_length`，并在 Prefill OOM 时依次降级为 `2 * input_length`、`1 * input_length`。 |
-| `--max-concurrency` | Service Options | 可选 | 限制每个优化器实例的并发请求总数。<br>1. 类型：Int。<br>2. 取值范围：大于等于 1 的整数。<br>3. 默认值：`None`，表示此选项不限制并发数。 |
-| `--batch-range` | Service Options | 可选 | 指定 batch size 搜索范围。<br>1. 类型：List[Int]。<br>2. 格式：`[min max]` 或 `[max]`。<br>3. 默认值：`None`；未指定 `min` 时默认从 `1` 开始搜索，未指定 `max` 时此选项不设置上限；设置 `--max-concurrency` 时仍受其限制。 |
-| `--serving-cost` | Service Options | 可选 | 指定服务成本，用于成本相关指标计算。<br>1. 类型：Float。<br>2. 取值范围：非负数。<br>3. 默认值：`0`。 |
-| `--disagg` | Service Options | 可选 | 启用 PD 分离模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `--jobs` | Service Options | 可选 | 指定并行搜索任务数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`8`。 |
-| `--max-search-combinations` | Service Options | 可选 | 当 TP / EP / MOE-DP / MTP 搜索组合数超过该值时输出警告。<br>1. 类型：Int。<br>2. 取值范围：非负整数；设置为 `0` 表示关闭该警告。<br>3. 默认值：`100`。 |
-| `--concurrency-search-strategy` | Service Options | 可选 | 指定并发度搜索策略。<br>1. 类型：Str。<br>2. 参考值：`exponential`、`linear_exponential`。<br>3. 默认值：`exponential`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `linear_exponential` 与 `linear-exponential`。 |
-| `--image-batch-size` | MultiModal Options | 可选 | 指定每个请求的图像数量。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；未设置时复用 batch size。 |
-| `--image-height` | MultiModal Options | 可选 | 指定输入图像高度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`。 |
-| `--image-width` | MultiModal Options | 可选 | 指定输入图像宽度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`。 |
-| `--prefill-devices-per-instance` | PD Ratio Optimization Options | 条件必选 | 指定每个 Prefill 实例的设备数，与 Decode 参数成对提供；仅在设置 `--target-qps` 时可同时省略以自动搜索。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。<br>4. 用于确定 Prefill 阶段的并行配置搜索空间。 |
-| `--decode-devices-per-instance` | PD Ratio Optimization Options | 条件必选 | 指定每个 Decode 实例的设备数，与 Prefill 参数成对提供；仅在设置 `--target-qps` 时可同时省略以自动搜索。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。<br>4. 用于确定 Decode 阶段的并行配置搜索空间。 |
-| `--enable-optimize-prefill-decode-ratio` | PD Ratio Optimization Options | 可选 | 启用 Prefill/Decode 实例配比优化模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 不能与 `--disagg` 同时使用。 |
+| --device | Options | 可选 | 指定一个或多个设备画像名称；传入多个设备时会输出跨硬件对比结果。<br>1. 类型：Str 或 List[Str]。<br>2. 参考值：任意已注册的 `DeviceProfile` 名称；内置值见 TensorCast 用户指南“设备类型”章节。<br>3. 默认值：未指定时使用 `TEST_DEVICE`。<br>4. 支持一次传入多个已注册 `DeviceProfile` 名称，重复名称会去重并保留输入顺序。 |
+| --input-length | Options | 必选 | 输入 prompt 的 token 长度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。 |
+| --output-length | Options | 必选 | 期望生成的输出 token 长度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。 |
+| --mtp-acceptance-rates | Options | 可选 | 指定 MTP token 的接受率列表。<br>1. 类型：List[Float]。<br>2. 取值范围：浮点数列表。<br>3. 默认值：`[0.9, 0.6, 0.4, 0.2]`。<br>4. 与原有 `--num-mtp-tokens` 配套，不可与 `--speculative-method` / `--num-speculative-tokens` / `--acceptance-length` 混用。后续版本将随旧 MTP 接口逐步弃用；新接口请使用 `--acceptance-length`。 |
+| --prefix-cache-hit-rate | Options | 可选 | 指定 prefix cache 命中率。<br>1. 类型：Float。<br>2. 取值范围：`[0, 1)`。<br>3. 默认值：`0.0`。 |
+| --dump-original-results | Options | 可选 | 输出原始搜索结果，便于进一步分析。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| model_id | General Options | 必选 | 模型 ID 或已审核的本地模型绝对路径。<br>1. 类型：Str。<br>2. 参考值：Hugging Face ID、ModelScope ID 或本地绝对路径。<br>3. 默认值：无。<br>4. 使用远端模型 ID 时，可能通过 `trust_remote_code=True` 执行远端代码。 |
+| --num-devices | General Options | 可选 | 指定参与仿真的设备总数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
+| --reserved-memory-gb | General Options | 可选 | 指定每张设备预留给系统使用的显存，单位为 GB。<br>1. 类型：Float。<br>2. 取值范围：非负数；设置为 `0` 表示不预留系统显存。<br>3. 默认值：`10.0`。 |
+| --log-level | General Options | 可选 | 指定日志级别。<br>1. 类型：Str。<br>2. 参考值：`debug`、`info`、`warning`、`error`、`critical`。<br>3. 默认值：`error`。 |
+| --compile | Model & Quantization Options | 可选 | 在推理前对模型调用 `torch.compile()`。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| --compile-allow-graph-break | Model & Quantization Options | 可选 | 允许 `torch.compile()` 过程中出现 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| --num-mtp-tokens | Model & Quantization Options | 可选 | 指定 MTP token 数量候选，支持传入一个或多个值进行搜索；`0` 表示不启用。<br>1. 类型：List[Int]（`nargs="+"`）。<br>2. 取值范围：每个候选为 `0` 到 `9`；可一次传入多个值，例如 `--num-mtp-tokens 0 1 2`。<br>3. 默认值：未指定时等价于 `0`（不启用 MTP）。<br>4. 传入单个值时固定该 MTP 配置；传入多个值时在吞吐寻优中对候选组合进行搜索，并与 TP / EP / MOE-DP 搜索组合相乘。<br>5. 仅支持具备 MTP 能力的模型；每个候选值不能超过 `len(--mtp-acceptance-rates) + 1`（默认接受率列表长度为 `4`，故上限为 `5`；超过时运行时提示 `exceed the supported mtp_acceptance_rate length`）。<br>6. 旧 MTP 入口，不可与 `--speculative-method` / `--num-speculative-tokens` / `--acceptance-length` 混用。<br>7. 建议优先使用统一接口 `--speculative-method mtp --num-speculative-tokens`（语义等价，同样支持多值搜索）。本参数目前仍可单独兼容使用，后续版本将逐步弃用。 |
+| --speculative-method | Model & Quantization Options | 可选 | 指定投机解码方法。<br>1. 类型：Str。<br>2. 取值：`mtp`、`dflash` 或 `dspark`。<br>3. 默认值：未指定（关闭）。<br>4. 新投机入口，不可与旧 MTP 入口 `--num-mtp-tokens` / `--mtp-acceptance-rates` 混用。<br>5. 选用 `mtp` 时必须同时配置 `--num-speculative-tokens`。是 `--num-speculative-tokens` / `--acceptance-length` 等从属参数的前置开关。 |
+| --num-speculative-tokens | Model & Quantization Options | 可选 | 投机 token 数 / 深度 `n`（不含 anchor/bonus）。<br>1. 类型：List[Int]（`nargs="+"`，可多值搜索）。<br>2. 语义：`>= 1` 时内部 `block_size = n + 1`；**省略**时 dflash/dspark 使用 builtin / 外部 config；已设置 `--speculative-method` 时，任一候选为**显式** `0` 会解析失败（关闭请省略 `--speculative-method`）；对 `mtp` 时 `n` 即 MTP token 数，且必须显式配置。<br>3. 默认值：未指定。<br>4. 需要 `--speculative-method`。传入多个值时与 TP / EP / MOE-DP 组合搜索。 |
+| --acceptance-length | Model & Quantization Options | 可选 | Decode 吞吐折算用接受长度。<br>1. 类型：Float。<br>2. 取值范围：非负；对所有方法统一 clamp 到 `n`（`= block_size - 1`）。<br>3. 默认值：`5.0`。<br>4. 需要 `--speculative-method`；不参与构图，仅影响 Decode 延迟折算。 |
+| --dspark-markov-rank | Model & Quantization Options | 可选 | Markov embedding 维度。<br>1. 类型：Int。<br>2. 取值范围：非负整数；`0` 禁用 MarkovHead。<br>3. 默认值：`256`。<br>4. 需要 `--speculative-method dspark`。 |
+| --dspark-markov-head | Model & Quantization Options | 可选 | Markov head 类型。<br>1. 类型：Str。<br>2. 参考值：`vanilla`、`gated`、`rnn`。<br>3. 默认值：`vanilla`。<br>4. 需要 `--speculative-method dspark`。 |
+| --num-draft-layers | Model & Quantization Options | 可选 | 覆盖 draft `num_hidden_layers`。<br>1. 类型：Int。<br>2. 取值范围：非负整数；`0` 表示使用 config 默认。<br>3. 默认值：`0`。<br>4. 需要 `--speculative-method dflash` 或 `dspark`（不可与 `mtp` 同用）。 |
+| --draft-model-config-path | Model & Quantization Options | 可选 | 外部 draft `config.json` 路径（或含该文件的目录）。<br>1. 类型：Str。<br>2. 默认值：`None`（使用 `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`）。<br>3. 需要 `--speculative-method dflash` 或 `dspark`（不可与 `mtp` 同用）。<br>4. 字段说明见 [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md)。 |
+| --quantize-linear-action | Model & Quantization Options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`HIF8`。<br>3. 默认值：`W8A8_DYNAMIC`。<br>4. draft 自有 Linear 不量化。<br>5. 取值大小写及下划线/连字符写法均可，例如 `W8A8_DYNAMIC` 与 `w8a8-dynamic`、`DISABLED` 与 `disabled`。 |
+| --quantize-non-expert-linear-action | Model & Quantization Options | 可选 | 为 attention 投影、dense MLP、shared experts 等非 expert 线性层指定独立量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`HIF8`。<br>3. 默认值：`DISABLED`。<br>4. 主要用于 DeepSeek V4 风格 MoE 模型；路由 MoE experts 仍使用 `--quantize-linear-action`。<br>5. 取值大小写及下划线/连字符写法均可，例如 `DISABLED` 与 `disabled`。 |
+| --mxfp4-group-size | Model & Quantization Options | 可选 | 指定 mxfp4 量化的 group size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`32`。 |
+| --quantize-attention-action | Model & Quantization Options | 可选 | 指定 KV cache 量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`、`HIF8`。<br>3. 默认值：`DISABLED`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `DISABLED` 与 `disabled`、`INT8` 与 `int8`。 |
+| --tp-sizes | Model & Quantization Options | 可选 | 启用 TP 搜索，并可显式指定 TP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
+| --ep-sizes | Model & Quantization Options | 可选 | 启用 EP 搜索，并可显式指定 EP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
+| --moe-dp-sizes | Model & Quantization Options | 可选 | 启用 MOE-DP 搜索，并可显式指定 MOE-DP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
+| --pp-sizes | Model & Quantization Options | 可选 | 启用流水线并行（Pipeline Parallel，PP）搜索，并可显式指定 PP 取值范围。<br>1. 类型：List[Int]（`nargs="*"`）。<br>2. 取值范围：正整数列表，每个值需为正整数且不超过 `num_devices`，且不超过模型 `num_hidden_layers`。<br>3. 默认值：`None`；未指定时 PP 固定为 1（向后兼容，走原有 TP/EP/DCP 搜索路径）。仅传入参数但不指定取值时，默认搜索不超过 `num_devices` 的 2 的幂（`1, 2, 4, ...`）。<br>4. 指定后进入 PP-aware 搜索路径：按 stage-local 算术推导 `dp = num_devices // (tp * pp)`、`moe_tp = (num_devices // pp) // (ep * moe_dp)`，并使用前向阻塞式流水线调度器计算 PP>1 候选的 makespan、bubble ratio 与 schedule-aware 吞吐量。PP 与 DCP 可联合搜索（显式 `--dcp-sizes` 不会被丢弃）。<br>5. 暂不支持 PP>1 的场景：VL/多模态模型、变长输入分布（`length_distribution`）——命中时跳过候选并记录 warning。PP 与投机解码（`--speculative-method mtp/dflash/dspark`）可联合搜索，投机解码的 proposal/draft 计算在流水线最后一个 stage 上执行。 |
+| --pp-layer-partitions | Model & Quantization Options | 可选 | 显式指定 PP 各 stage 的层划分。<br>1. 类型：Str（JSON list of lists）。<br>2. 格式：如 `'[[31,30],[16,15,15,15]]'`；每个内层 list 长度必须等于对应的 `pp_size`，所有内层 list 元素之和必须等于模型 `num_hidden_layers`（DeepSeek-V3.1 有 61 层，31+30=61，16+15+15+15=61）。内层 list 按长度自动匹配对应的 `pp_size`。<br>3. 默认值：`None`；未指定时使用均匀切分（余数放在前面的 stage，避免最后 stage 同时背 norm + lm_head）。<br>4. 仅 PP>1 时生效。 |
+| --enable-shared-expert-tp | Model & Quantization Options | 可选 | 启用 vLLM 风格的 shared experts 张量并行。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. shared experts 使用 dense MLP TP，并延迟执行 `down_proj` 规约。 |
+| --compilation-config | Model & Quantization Options | 可选 | 按需启用指定的编译特性。<br>1. 类型：List[Str]。<br>2. 取值范围：`enable_multistream`、`enable_sequence_parallel`、`enable_matmul_allreduce`、`enable_dispatch_ffn_combine`，可同时传入多个，以空格分隔，例如 `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`。<br>3. 默认值：`None`，未指定时所有编译特性保持关闭。<br>4. 该参数自 PR #573 起统一替代原 `--enable_sequence_parallel` / `--enable_dispatch_ffn_combine` 等分散开关。<br>5. 取值大小写及下划线/连字符写法均可，例如 `enable_multistream` 与 `enable-multistream`。 |
+| --word-embedding-tp | Model & Quantization Options | 可选 | 启用 word embedding 张量并行并指定并行模式。<br>1. 类型：Str。<br>2. 参考值：`col`、`row`。<br>3. 默认值：`None`，表示不启用 embedding TP。 |
+| --enable-decode-kv-offload | KV Cache Offload Options | 可选 | 开启 Decode 稀疏 KV Cache 卸载建模。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 稀疏窗口 top-k 从模型 checkpoint config（`index_topk`，或 `topk_limit` + `index_n_heads`）解析，config 未声明时开启即拒绝；dense/GQA 模型（无 indexer cache）同样拒绝。 |
+| --decode-offload-buffer-multiplier | KV Cache Offload Options | 可选 | 热 buffer 容量 = multiplier × top-k。<br>1. 类型：Float。<br>2. 取值范围：≥ 1（buffer 须容纳至少一个完整 top-k 窗口，正命中率才可部署）。<br>3. 默认值：`2.0`（上游实测 2×top-k 命中率 80–90%）。 |
+| --decode-offload-hit-rate | KV Cache Offload Options | 可选 | 热 buffer 命中率，决定每步 miss 行回载量。<br>1. 类型：Float。<br>2. 取值范围：`[0, 1]`。<br>3. 默认值：`0.85`（保守下界）。<br>4. `hit_rate = 1` 时每步仍有新 KV 回写代价，卸载不免费。 |
+| --enable-prefill-kv-offload | KV Cache Offload Options | 可选 | 开启 Prefill 层级 KV Cache 卸载建模（N 层共享 B 个物理 buffer）。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. B/I 使用代码级默认（`B=2`、`I=0`，见 `ModelRunner._PREFILL_OFFLOAD_*`）；与 PP>1 互斥。 |
+| --host-memory-available-gb | KV Cache Offload Options | 可选 | offload KV 池的 host 内存预算（GB）。<br>1. 类型：Float。<br>2. 取值范围：≥ 0。<br>3. 默认值：`0`（不做容量检查）。<br>4. >0 时，卸载池超预算的候选折入 OOM 提前停止路径（搜索收缩并保留可行解），不产出不可部署结果。 |
+| --performance-model | Performance Model Options | 可选 | 指定性能模型类型。<br>1. 类型：Str。<br>2. 参考值：`analytic`、`profiling`。<br>3. 默认值：`analytic`。<br>4. `profiling` 模式需配合 --profiling-database-path 使用。 |
+| --profiling-database-path | Performance Model Options | 条件必选 | 指定 profiling 模式使用的实测算子 CSV 数据库目录。<br>1. 类型：Str。<br>2. 取值范围：数据库目录路径，例如 `tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/`。<br>3. 默认值：`None`；使用 `--performance-model profiling` 时必填。 |
+| --chrome-trace-file | Debug Options | 可选 | 生成 Chrome Trace 文件，用于可视化分析算子级性能。<br>1. 类型：Str。<br>2. 参考值：Trace 文件路径，例如 `trace.json`。<br>3. 默认值：`None`，表示不生成 Chrome Trace 文件。 |
+| --ttft-limit | Service Options | 可选 | 指定 TTFT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TTFT。<br>4. 兼容别名：`--ttft-limits`。 |
+| --tpot-limit | Service Options | 可选 | 指定 TPOT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TPOT。<br>4. 兼容别名：`--tpot-limits`。 |
+| --target-qps | Service Options | 可选 | 指定目标请求 QPS（req/s）；设置后触发容量规划模式，在给定 SLO 下反推满足该 QPS 的最少卡数。<br>1. 类型：Float。<br>2. 取值范围：正数。<br>3. 默认值：`None`。<br>4. 与 `--num-devices` 的配合方式、以及 `--disagg` 下需恰好指定一个阶段 SLO 的约束，见 [2.5 容量规划场景](#25-容量规划场景)。 |
+| --max-batched-tokens | Service Options | 可选 | 指定单个数据并行（DP）副本在一次 prefill 或混合 prefill/decode step 的最大 batched tokens。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；自动模式先使用 `4 * input_length`，并在 Prefill OOM 时依次降级为 `2 * input_length`、`1 * input_length`。 |
+| --max-concurrency | Service Options | 可选 | 限制每个优化器实例的并发请求总数。<br>1. 类型：Int。<br>2. 取值范围：大于等于 1 的整数。<br>3. 默认值：`None`，表示此选项不限制并发数。 |
+| --batch-range | Service Options | 可选 | 指定 batch size 搜索范围。<br>1. 类型：List[Int]。<br>2. 格式：`[min max]` 或 `[max]`。<br>3. 默认值：`None`；未指定 `min` 时默认从 `1` 开始搜索，未指定 `max` 时此选项不设置上限；设置 `--max-concurrency` 时仍受其限制。 |
+| --serving-cost | Service Options | 可选 | 指定服务成本，用于成本相关指标计算。<br>1. 类型：Float。<br>2. 取值范围：非负数。<br>3. 默认值：`0`。 |
+| --disagg | Service Options | 可选 | 启用 PD 分离模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| --jobs | Service Options | 可选 | 指定并行搜索任务数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`8`。 |
+| --max-search-combinations | Service Options | 可选 | 当 TP / EP / MOE-DP / MTP 搜索组合数超过该值时输出警告。<br>1. 类型：Int。<br>2. 取值范围：非负整数；设置为 `0` 表示关闭该警告。<br>3. 默认值：`100`。 |
+| --concurrency-search-strategy | Service Options | 可选 | 指定并发度搜索策略。<br>1. 类型：Str。<br>2. 参考值：`exponential`、`linear_exponential`。<br>3. 默认值：`exponential`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `linear_exponential` 与 `linear-exponential`。 |
+| --image-batch-size | MultiModal Options | 可选 | 指定每个请求的图像数量。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；未设置时复用 batch size。 |
+| --image-height | MultiModal Options | 可选 | 指定输入图像高度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`。 |
+| --image-width | MultiModal Options | 可选 | 指定输入图像宽度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`。 |
+| --prefill-devices-per-instance | PD Ratio Optimization Options | 条件必选 | 指定每个 Prefill 实例的设备数，与 Decode 参数成对提供；仅在设置 `--target-qps` 时可同时省略以自动搜索。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。<br>4. 用于确定 Prefill 阶段的并行配置搜索空间。 |
+| --decode-devices-per-instance | PD Ratio Optimization Options | 条件必选 | 指定每个 Decode 实例的设备数，与 Prefill 参数成对提供；仅在设置 `--target-qps` 时可同时省略以自动搜索。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。<br>4. 用于确定 Decode 阶段的并行配置搜索空间。 |
+| --enable-optimize-prefill-decode-ratio | PD Ratio Optimization Options | 可选 | 启用 Prefill/Decode 实例配比优化模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 不能与 `--disagg` 同时使用。 |
 
 ### 搜索维度与范围
 
@@ -1080,7 +1080,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device ATLAS_8
 
   启用 `--speculative-method` 时，Decode 延迟按 `--acceptance-length`（已按方法 clamp 到 `n = block_size - 1`）折算后再参与 TPOT 计算；Prefill 延迟不受 acceptance 折算影响。
 
-- 输出吞吐量
+- 输出吞吐量：
   `output_throughput = 1000 * (output_length * concurrency) / (ttft + tpot * output_length)`
 
 ### 5.2 PD 配比模式下性能指标的计算方法
@@ -1093,7 +1093,7 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
 
   PP=1：`P QPS = p_concurrency / ttft_p * 1000` (req/s)
 
-  PP>1：`P QPS = token/s / input_length` (req/s，稳态完整 prompt 口径)
+  PP>1：`P QPS = token/s / input_length` （req/s，稳态完整 prompt 口径）
 
   其中：
   - `p_concurrency`：Prefill 阶段的总并发数；PD 配比模式按 `batch_size × DP` 计算

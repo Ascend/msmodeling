@@ -45,7 +45,7 @@ uv run --no-sync msmodeling optix --mode pd_disagg -c ./pd_full.toml
 开启 `enabled = true` 时，运行结束直接查看 **`output/pd_disagg/<run_id>/final_result.md`**，命令最后会打印该文件路径。报告在一个文件中集中展示：
 
 - 完整流程状态，以及完整服务的吞吐、TTFT、TPOT、成功率和逐项 SLO 判定；
-- 最终并发、请求速率及压测命令覆盖；
+- 最终并发、请求率及压测命令覆盖；
 - 最终选中的 P/D 服务参数、单侧负载与指标、理论配比及实际实例数；
 - 实际机器、容器、物理卡、Proxy 地址与完整部署配置（内嵌 JSON，可直接核对和提取）。
 
@@ -87,9 +87,9 @@ dataset_name = "random"
 
 | 参数 | 本例设置的含义 |
 |---|---|
-| `skip_pso = false` | 执行 PSO 服务参数搜索。`pd_disagg` 模式要求此值为 `false`。 |
-| `manage_simulator_lifecycle = true` | 由 OptiX 启停用于搜索的 vLLM 服务。`pd_disagg` 模式要求此值为 `true`。 |
-| `use_request_rate_calibration = false` | 不追加请求率校准轮次；搜索时并发可变，请求速率使用最大值：范围包含 `0` 时取 `0`（不限速），否则取 `max`。也用于启用后面的 Decode 预热测评。 |
+| skip_pso = false | 执行 PSO 服务参数搜索。`pd_disagg` 模式要求此值为 `false`。 |
+| manage_simulator_lifecycle = true | 由 OptiX 启停用于搜索的 vLLM 服务。`pd_disagg` 模式要求此值为 `true`。 |
+| use_request_rate_calibration = false | 不追加请求率校准轮次；搜索时并发可变，请求速率使用最大值：范围包含 `0` 时取 `0`（不限速），否则取 `max`。也用于启用后面的 Decode 预热测评。 |
 
 ### 2. 设置设备数和两个阶段的测评参数
 
@@ -147,23 +147,23 @@ Decode 的两轮请求需要一致，所以示例在 **benchmark 命令**中设�
 
 | 参数 | 含义与修改方法 |
 |---|---|
-| `total_devices` | 最终部署可使用的总卡数，用于实例配比计算，不负责分配具体卡号。 |
-| `prefill_devices_per_instance` / `decode_devices_per_instance` | 每个 P/D 实例使用的卡数。本例分别与 `--tensor-parallel-size 4/2` 对应；总卡数和这两项应同时设置。三项均为 `0` 时只计算理论配比。 |
-| `use_full_device` | `true` 时只推荐恰好用满总卡数的组合；`false` 时允许剩余设备。 |
-| `top_k` | 控制阶段候选保留与微调数量，默认 `3`。设为 `0` 可跳过 P/D 阶段内的微调，仍会验证 PSO 最优结果并计算配比；卡数约束允许时仍有整数实例推荐。 |
-| `n_particles` / `iters` | PSO 粒子数和迭代数。增加通常会带来更多候选测评；此外还有基线、验证和微调的开销。P/D 可分别设置，缺省项继承顶层同名值。 |
-| `benchmark_run_count` | 每组候选在同一服务实例上的测评次数，默认 `1`。大于 `1` 时前 N−1 次预热、最后一次计分，且要求 `use_request_rate_calibration=false`。 |
-| `ttft_slo` / `tpot_slo` | 当前阶段的时延目标。本例 P 关注 TTFT，D 关注 TPOT；`0.05` 秒即 `50` 毫秒。 |
-| `ttft_penalty` / `tpot_penalty` | 时延对评分的影响；设为 `0` 时该项不影响候选优劣。示例中 P 不按 TPOT 评分，D 不按 TTFT 评分。 |
-| `simulator_command_overrides` | 修改当前阶段的 vLLM 启动配置，如 `port`、`model`、`others`，不影响另一个阶段。 |
-| `benchmark_command_overrides` | 修改当前阶段的压测命令配置，如示例中的输入输出长度。 |
-| `phase_output_dir` | P/D 结果目录名，位于 `output` 下，默认 `pd_disagg`。 |
+| total_devices | 最终部署可使用的总卡数，用于实例配比计算，不负责分配具体卡号。 |
+| prefill_devices_per_instance / decode_devices_per_instance | 每个 P/D 实例使用的卡数。本例分别与 `--tensor-parallel-size 4/2` 对应；总卡数和这两项应同时设置。三项均为 `0` 时只计算理论配比。 |
+| use_full_device | `true` 时只推荐恰好用满总卡数的组合；`false` 时允许剩余设备。 |
+| top_k | 控制阶段候选保留与微调数量，默认 `3`。设为 `0` 可跳过 P/D 阶段内的微调，仍会验证 PSO 最优结果并计算配比；卡数约束允许时仍有整数实例推荐。 |
+| n_particles / iters | PSO 粒子数和迭代数。增加通常会带来更多候选测评；此外还有基线、验证和微调的开销。P/D 可分别设置，缺省项继承顶层同名值。 |
+| benchmark_run_count | 每组候选在同一服务实例上的测评次数，默认 `1`。大于 `1` 时前 N−1 次预热、最后一次计分，且要求 `use_request_rate_calibration=false`。 |
+| ttft_slo / tpot_slo | 当前阶段的时延目标。本例 P 关注 TTFT，D 关注 TPOT；`0.05` 秒即 `50` 毫秒。 |
+| ttft_penalty / tpot_penalty | 时延对评分的影响；设为 `0` 时该项不影响候选优劣。示例中 P 不按 TPOT 评分，D 不按 TTFT 评分。 |
+| simulator_command_overrides | 修改当前阶段的 vLLM 启动配置，如 `port`、`model`、`others`，不影响另一个阶段。 |
+| benchmark_command_overrides | 修改当前阶段的压测命令配置，如示例中的输入输出长度。 |
+| phase_output_dir | P/D 结果目录名，位于 `output` 下，默认 `pd_disagg`。 |
 
 `others` 的阶段覆盖会替换整个字符串。如果公共配置中还有量化等必要启动参数，应在两个阶段的 `others` 中一并保留。
 
 ### 3. 配置服务参数和负载的搜索范围
 
-继续在 `pd_disagg_config.toml` 中添加下列搜索字段。P 和 D 的 `target_field` 分别是一份完整列表：某阶段配置了非空列表后，该阶段就使用这份列表，不再合并公共插件的搜索字段。因此服务参数、并发和请求率都需要列出。
+继续在 `pd_disagg_config.toml` 中添加下列搜索字段：P 和 D 的 `target_field` 分别是一份完整列表：某阶段配置了非空列表后，该阶段就使用这份列表，不再合并公共插件的搜索字段。因此服务参数、并发和请求率都需要列出。
 
 ```toml
 [[pd_disagg.prefill.target_field]]
@@ -235,7 +235,7 @@ value = 100
 
 本例 P 的请求率固定为不限速。D 的请求率保留可调范围，是因为 `top_k>0` 时，D 阶段微调会先不限速测量 QPS，再以该 QPS 为请求率调整并发。D 的 `REQUESTRATE` 范围需要覆盖预期 QPS；如果实测值超过 `1000`，应扩大上限。`top_k=0` 时不执行这一步微调，也不检查该范围。
 
-Decode 的 `pd_disaggregation` 微调优先按 TPOT 调整并发；并发无法继续变化后，若设置 `ttft_penalty>0`，则二分调整请求率，使实测 TTFT 落在 `[0.8 × ttft_slo, ttft_slo]`。例如请求率 2.4 req/s 时 TTFT 超标，先降至 1.2；若此时 TTFT 低于目标的 0.8 倍，再试 1.8。尚未找到两侧速率边界时先减半或翻倍；找到两侧后取中点。下一候选速率经配置范围和数据类型约束后，若与当前速率的差值不超过两者较大值的 3%，会直接停止，不再执行该候选的压测；该容差由 `REQUEST_RATE_CONVERGENCE_TOLERANCE` 定义。达到速率范围、数据类型精度限制或最大微调次数时也会结束。请求率收敛不代表 TTFT 达标，因此目标区间不可达时仍需检查最终指标。该分支不受 `step_size` 和 `slo_coefficient` 控制；本例 Decode 的 `ttft_penalty=0`，不启用请求率续调。 该 TTFT 区间是请求率调整的停止条件；最终推荐仍从 TPOT 达标的候选中选择请求吞吐最高者，因此推荐结果不保证落入此 TTFT 区间。
+Decode 的 `pd_disaggregation` 微调优先按 TPOT 调整并发；并发无法继续变化后，若设置 `ttft_penalty>0`，则二分调整请求率，使实测 TTFT 落在 `[0.8 × ttft_slo, ttft_slo]`。例如请求率 2.4 req/s 时 TTFT 超标，先降至 1.2；若此时 TTFT 低于目标的 0.8 倍，再试 1.8。尚未找到两侧速率边界时先减半或翻倍；找到两侧后取中点。下一候选速率经配置范围和数据类型约束后，若与当前速率的差值不超过两者较大值的 3%，会直接停止，不再执行该候选的压测；该容差由 `REQUEST_RATE_CONVERGENCE_TOLERANCE` 定义。达到速率范围、数据类型精度限制或最大微调次数时也会结束。请求率收敛不代表 TTFT 达标，因此目标区间不可达时仍需检查最终指标。该分支不受 `step_size` 和 `slo_coefficient` 控制；本例 Decode 的 `ttft_penalty=0`，不启用请求率续调。该 TTFT 区间是请求率调整的停止条件；最终推荐仍从 TPOT 达标的候选中选择请求吞吐最高者，因此推荐结果不保证落入此 TTFT 区间。
 
 ### 使用 AISBench 时怎么改
 
@@ -303,7 +303,7 @@ pd_ratio = 单个 D 实例的 QPS / 单个 P 实例的 QPS
 2. 按 `instances` 中的数量启动 P、D 实例，并用现有部署工具配置 Proxy、请求路由和 KV cache 传输。
 3. 从运行 OptiX 的机器访问 Proxy，确认请求可以正常完成，再进行下一步压测。
 
-例如 Proxy 暴露了 OpenAI 兼容接口，可先查看服务模型名（替换地址和端口；启用鉴权时带上相应请求头）：
+例如 Proxy 暴露了 OpenAI 兼容接口，可先查看服务模型名（替换地址和端口；启用认证时带上相应请求头）：
 
 ```bash
 curl http://<proxy-host>:<proxy-port>/v1/models
@@ -365,12 +365,12 @@ value = 100
 
 | 参数 | 本步的作用 |
 |---|---|
-| `skip_pso = true` | 跳过 PSO，完成基线测评后直接微调；`optimizer_strategy` 保持为 `"pso"` 即可。 |
-| `manage_simulator_lifecycle = false` | 使用已运行的 PD 服务，OptiX 只执行压测，不启动、监控或停止该服务。 |
-| `fine_tune_mode = "pd_mixed"` | 对完整服务按 TPOT 调整并发、按 TTFT 调整请求率。请求率固定且 TTFT 超标时，会尝试降低并发。 |
-| `max_fine_tune` | 微调最多尝试的次数。本例为 `10`；先检查压测流程时可减小，算法也可能提前结束。 |
-| `ttft_slo` / `tpot_slo` | 完整服务的时延目标，应按业务要求填写。 |
-| `CONCURRENCY.value` / `REQUESTRATE.value` | 本例从并发 100、请求率 100 req/s 开始测评，再在各自的 `min`～`max` 范围内调整。 |
+| skip_pso = true | 跳过 PSO，完成基线测评后直接微调；`optimizer_strategy` 保持为 `"pso"` 即可。 |
+| manage_simulator_lifecycle = false | 使用已运行的 PD 服务，OptiX 只执行压测，不启动、监控或停止该服务。 |
+| fine_tune_mode = "pd_mixed" | 对完整服务按 TPOT 调整并发、按 TTFT 调整请求率。请求率固定且 TTFT 超标时，会尝试降低并发。 |
+| max_fine_tune | 微调最多尝试的次数。本例为 `10`；先检查压测流程时可减小，算法也可能提前结束。 |
+| ttft_slo / tpot_slo | 完整服务的时延目标，应按业务要求填写。 |
+| CONCURRENCY.value / REQUESTRATE.value | 本例从并发 100、请求率 100 req/s 开始测评，再在各自的 `min`～`max` 范围内调整。 |
 
 如只想调整并发，可将 `REQUESTRATE` 的 `min`、`max`、`value` 都设为相同值；都设为 `0` 时表示固定不限速。
 
@@ -382,7 +382,7 @@ value = 100
 msmodeling optix --mode standard -e vllm -b vllm_benchmark -c ./pd_fine_tune.toml
 ```
 
-这一阶段先测初始负载，再尝试调整并发和请求率，结果单独写入 `result/pd_fine_tune/`。查看结果 CSV 时，结合 TTFT、TPOT、成功率和吞吐量判断是否满足业务目标，字段含义见[结果文件说明](../user_guide/msmodeling_optix_user_guide.md#9-结果文件说明)。本流程无需安装 `contrib/optix/vllm_pd_simulator`。
+这一阶段先测初始负载，再尝试调整并发和请求率，结果单独写入 `result/pd_fine_tune/`。查看结果 CSV 时，结合 TTFT、TPOT、成功率和吞吐判断是否满足业务目标，字段含义见[结果文件说明](../user_guide/msmodeling_optix_user_guide.md#9-结果文件说明)。本流程无需安装 `contrib/optix/vllm_pd_simulator`。
 
 ## 常见问题
 

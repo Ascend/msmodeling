@@ -26,7 +26,7 @@
 | 文本模型 | Qwen 系列 | Qwen3.8-Flash-Next（需 transformers ≥ 5.16）、Qwen3.8、Qwen3.6、Qwen3.6 MoE、Qwen3.5、Qwen3.5 MoE、Qwen3-Next、Qwen3 Dense、Qwen3 MoE |
 | 文本模型 | GLM 系列 | GLM-5.3-Flash、GLM5.2、GLM5.1、GLM5、GLM-4 MoE |
 | 文本模型 | ERNIE 系列 | ERNIE 4.5 MoE |
-| 文本模型 | Bailing / MiMo / MiniMax | Bailing MoE、MiMo v2 Flash、MiniMax M2.7、MiniMax M2.5、MiniMax M2、MiniMax M3 |
+| 文本模型 | Bailing / MiMo / MiniMax | Bailing MoE、MiMo V2 Flash、MiniMax M2.7、MiniMax M2.5、MiniMax M2、MiniMax M3 |
 | 文本模型 | Step 系列 | Step 5 Preview |
 | 视觉-语言模型 | VL 模型 | DeepSeek-V4.1-Flash、Step 5 Preview、Qwen3-VL、Qwen3-VL MoE、GLM-4V、GLM-4V MoE、InternVL |
 | 视觉-语言模型 | Bailing VL | Ling-3.0-flash-VL（Bailing MoE V3 VL：结构级仿真——单图/多图输入、M-RoPE 契约、视觉塔 27 层 ViT + 无 MLP Merger + 根级 Projector；数值级 M-RoPE 与实测对齐属后续精度阶段；**PP>1 暂不支持**——VL profile 未提供 language_module_path，PP 候选会被跳过，属阶段一范围边界） |
@@ -49,7 +49,7 @@
 | 量化仿真 | 分别建模 Linear、非 Expert Linear、LMHead、Attention 等路径的量化计算与访存成本，支持 W8A8、W4A8、FP8、MXFP4、HIF8 等多种策略组合。HIF8 支持 A5 上的 Dense Linear、Attention 线性投影和 MoE 专家 GMM，以及编译与 TP/EP 路径；Attention/KV 量化独立配置。MiMo V2 Flash 不支持 HIF8 KV Cache，CLI 与 Web UI 在配置解析阶段拒绝该组合；其原有 Attention 路径和独立的 Linear HIF8 不受影响。 |
 | 并行与 MoE 扩展 | 建模全局 TP / DP / EP 及细粒度并行（Embedding TP、Vision TP 等）切分后的通信与计算开销，覆盖 redundant experts、external/shared expert 等 MoE 部署形态。 |
 | 流水线并行（PP）仿真 | 支持 stage-local 模型构造、逻辑 send/recv 通信、stage 显存估算与显式层划分。 |
-| 解码上下文并行（DCP）仿真 | 沿序列维切分 Decode 阶段 KV cache，建模 DCP 的显存、attention 计算与集合通信变化；不表示支持 Prefill Context Parallel。 |
+| 解码上下文并行（DCP）仿真 | 沿序列维度切分 Decode 阶段 KV cache，建模 DCP 的显存、attention 计算与集合通信变化；不表示支持 Prefill Context Parallel。 |
 | VL 多模态输入 | 将图像 batch、分辨率等视觉输入与视觉编码器并行策略纳入前向仿真，支持文本与多模态联合分析。 |
 | 模型配置来源 | 支持本地模型目录，以及从 Hugging Face、ModelScope 等远程源加载模型配置。 |
 | 性能模型切换 | 支持 Roofline 解析估算、校准画像修正的解析模型与基于实测数据的 Profiling 性能模型，可按需组合对比不同估算路径。 |
@@ -71,7 +71,7 @@
 | PD 配比寻优 | 在固定硬件规模下搜索最优 Prefill / Decode 实例配比，平衡两类实例的资源投入与服务能力。 |
 | 并行策略搜索 | 在 TP、EP、MOE-DP、PP、DCP 等维度上进行组合搜索。 |
 | 流水线并行（PP）搜索 | 通过 `--pp-sizes` 启用 PP 搜索，按 stage-local 算术推导 DP/MoE-TP，并用前向阻塞式调度器计算 PP>1 候选的 makespan、bubble ratio、bottleneck stage 与 schedule-aware 吞吐；支持 `--pp-layer-partitions` 显式层划分，可与 DCP 联合搜索；PP=1 走原有路径完全向后兼容。 |
-| 解码上下文并行（DCP）搜索 | 通过 `--dcp-sizes` 搜索 Decode Context Parallel 候选，可与 TP、EP、MoE-DP 和 PP 联合搜索。 |
+| 解码上下文并行（DCP）搜索 | 通过 `--dcp-sizes` 搜索 Decode Context Parallel 候选，可与 TP、EP、MOE-DP 和 PP 联合搜索。 |
 | 投机解码配置搜索 | 搜索 MTP、DFlash、DSpark 的 speculative token 数量、接受长度等配置，支持与 PP 联合搜索并评估对服务吞吐与 TPOT 的影响。 |
 | Batch 与并发搜索 | 自动搜索满足 SLO 的 batch 大小与请求并发组合，并考虑单步最大 batched tokens 等服务约束。 |
 | Chunked Prefill 仿真 | 当有效输入长度超过单步 prefill token 预算时，自动将长 prompt 拆分为多个 prefill chunk 分步建模，更准确评估 TTFT、P 阶段吞吐、混部调度行为与显存占用；可与 Prefix Cache 组合分析。 |
@@ -81,7 +81,7 @@
 | 编译与融合选项 | 在寻优过程中启用编译、Sequence Parallel、MoE 融合与 Embedding TP 等优化路径，更贴近真实服务部署形态。 |
 | 多流通算掩盖 | 在启用编译的吞吐寻优路径中，通过多流调度将计算与通信拆分到不同执行流，建模流间同步开销与通算掩盖带来的端到端收益。 |
 | 结果可视化与导出 | 输出候选配置曲线、原始寻优结果与算子级 trace，便于对比不同并行与 batch 组合。 |
-| KV Cache Offload 建模 | 将 Decode 稀疏 / Prefill 层级 KV 卸载的显存与传输代价建模进吞吐寻优，评估开启后 TTFT、TPOT 与并发上限的变化。当前面向 GLM-5.2 等 DSA indexer 型模型（稀疏窗口读模型 config；indexer 缓存常驻设备、不参与卸载；PP>1 互斥）。 |
+| KV Cache Offload 建模 | 将 Decode 稀疏 / Prefill 层级 KV 卸载的显存与传输代价建模进吞吐寻优，评估开启后 TTFT、TPOT 与并发上限的变化。当前面向 GLM-5.2 等 DSA indexer 型模型（稀疏窗口读取模型 config；indexer 缓存常驻设备、不参与卸载；PP>1 互斥）。 |
 
 ### 服务化细粒度仿真
 

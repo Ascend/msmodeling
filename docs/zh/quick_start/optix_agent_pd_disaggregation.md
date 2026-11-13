@@ -90,7 +90,7 @@ docker run -d --name optix-pd \
   --entrypoint /bin/bash "$IMAGE" -lc 'sleep infinity'
 ```
 
-RDMA 部署还需按所选镜像和网络方案映射 `/dev/infiniband` 等设备、设置相应权限及网络参数；由设备管理员确认。上面的基础容器命令不能替代 RDMA/HCCL 配置。host 网络下，同一宿主机的所有服务共享端口空间，必须避开已有业务。
+RDMA 部署还需按所选镜像和网络方案映射 `/dev/infiniband` 等设备、设置相应权限及网络参数，由设备管理员确认。上面的基础容器命令不能替代 RDMA/HCCL 配置。host 网络下，同一宿主机的所有服务共享端口空间，必须避开已有业务端口。
 
 检查两台容器：
 
@@ -202,7 +202,7 @@ opencode
 机器：A 为 192.0.2.10，B 为 192.0.2.11；SSH 用户 root、端口 22。
 两台宿主机的容器名均为 optix-pd，每台可用卡为 0、1、2、3。
 模型：两台容器内均为 /models/Qwen2.5-7B-Instruct，服务模型名 pd-demo。
-负载：输入 1024 token、输出 256 token，200 个请求，固定并发 16。
+负载：输入 1024 token、输出 256 token、200 个请求、固定并发 16。
 目标：在 TTFT≤2000ms、TPOT≤100ms 的前提下提高吞吐。
 预算：最多 24 次实测、总计 4 小时，包含基线和最终复测。
 

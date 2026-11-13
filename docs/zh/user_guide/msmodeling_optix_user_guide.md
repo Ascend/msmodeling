@@ -19,32 +19,32 @@
 2. [快速入门](#5-快速入门) — 完成一次默认寻优。
 3. [寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent) — 了解两种寻优模式的差异与选择依据。
 4. [配置文件说明](#7-配置文件说明) 和 [命令参数说明](#8-命令参数说明) — 了解全部参数与配置项。
-5. [结果文件说明](#9-结果文件说明) — 根据业务 SLO 筛选最优参数。
+5. [结果文件说明](#9-结果文件说明) — 根据业务 SLO（Service Level Objective，服务级别目标）筛选最优参数。
 6. [附录](#10-附录) — 运维与排障，三元派生类型用法按需查阅。
 
 ## 3. 插件支持
 
-服务化实测寻优支持用户自定义搜索参数配置以及测试工具，只需适配插件模式注册对应插件即可。内置插件随 `optix` 包发布，通过 `-e`/`-b` 直接选用；也可通过插件模式接入自定义插件。
+服务化实测寻优支持用户自定义搜索参数配置以及测评工具，只需适配插件模式注册对应插件即可。内置插件随 `optix` 包发布，通过 `-e`/`-b` 直接选用；也可通过插件模式接入自定义插件。
 
 **内置插件**：
 
 |插件名称|类型|插件描述|
 |---|---|---|
-|`vllm`|服务框架（`-e`）|vLLM 服务化框架适配|
-|`mindie`|服务框架（`-e`）|MindIE 服务化框架适配|
-|`ais_bench`|测评工具（`-b`）|AISBench 测评工具适配|
-|`vllm_benchmark`|测评工具（`-b`）|vllm_benchmark 测评工具适配|
+|vllm|服务框架（`-e`）|vLLM 服务化框架适配|
+|mindie|服务框架（`-e`）|MindIE 服务化框架适配|
+|ais_bench|测评工具（`-b`）|AISBench 测评工具适配|
+|vllm_benchmark|测评工具（`-b`）|vllm_benchmark 测评工具适配|
 
 **扩展插件**（位于 `contrib/optix/`，按需安装）：
 
 |插件名称|类型|提供者|插件描述|插件目录|
 |---|---|---|---|---|
-|`custom_vllm`|服务框架（`-e`）|contrib 示例|通过 Docker + SSH 拉起本地与远端 vLLM 容器，演示自定义服务框架接入|`contrib/optix/vllm_msserviceprofiler/`|
-|`multihost_infer`|服务框架（`-e`）|小巧灵突击队|vLLM 多机混合部署插件，基于多节点 DP（Data Parallel）+ headless 方案，node 主节点对外提供 API、work 节点仅作工作节点|`contrib/optix/multihost_infer/`|
-|`vllm_pd`|服务框架（`-e`）|小巧灵突击队|vLLM PD（Prefill-Decode）分离部署集群插件，通过 SSH 远程管理多节点启停与健康检查|`contrib/optix/vllm_pd_simulator/`|
-|`evalscopeperf`|测评工具（`-b`）|小巧灵突击队|封装 `evalscope perf` 命令作为测评工具，演示自定义测评工具接入|`contrib/optix/evalscopeplugin/`|
+|custom_vllm|服务框架（`-e`）|contrib 示例|通过 Docker + SSH 拉起本地与远端 vLLM 容器，演示自定义服务框架接入|`contrib/optix/vllm_msserviceprofiler/`|
+|multihost_infer|服务框架（`-e`）|小巧灵突击队|vLLM 多机混合部署插件，基于多节点 DP（Data Parallel）+ headless 方案，node 主节点对外提供 API、work 节点仅作工作节点|`contrib/optix/multihost_infer/`|
+|vllm_pd|服务框架（`-e`）|小巧灵突击队|vLLM PD（Prefill-Decode）分离部署集群插件，通过 SSH 远程管理多节点启停与健康检查|`contrib/optix/vllm_pd_simulator/`|
+|evalscopeperf|测评工具（`-b`）|小巧灵突击队|封装 `evalscope perf` 命令作为测评工具，演示自定义测评工具接入|`contrib/optix/evalscopeplugin/`|
 
-> 插件通过 Python entry points 注册，自定义插件开发与使用详见[插件开发操作步骤](msmodeling_optix_plugin_user_guide.md)。
+> 插件通过 Python entry points 注册，自定义插件开发与使用请参见[插件开发操作步骤](msmodeling_optix_plugin_user_guide.md)。
 
 ## 4. 环境准备与安装
 
@@ -66,7 +66,7 @@ uv sync
 ```
 
 > [!WARNING]
-> 不要在 msmodeling 虚拟环境里 `pip install vllm`、`mindie_llm` 等部署包，也不要在未建 venv 的系统 Python 里安装 msmodeling，若有疑问，可参考[推荐实践：服务化实测寻优环境与部署栈](../install_guide/msmodeling_optix_env_and_deployment_stack.md)
+> 不要在 msmodeling 虚拟环境里 `pip install vllm`、`mindie_llm` 等部署包，也不要在未建 venv 的系统 Python 里安装 msmodeling，若有疑问，请参见[推荐实践：服务化实测寻优环境与部署栈](../install_guide/msmodeling_optix_env_and_deployment_stack.md)
 
 ### 验证安装
 
@@ -84,17 +84,17 @@ uv pip uninstall msmodeling
 
 ## 5. 快速入门
 
-1. **修改配置文件**：完成[环境准备与安装](#4-环境准备与安装)，按实际情况修改配置文件 `config.toml`，包括寻优参数、测评工具参数、服务化参数。详见 [配置文件说明](#7-配置文件说明)。
+1. **修改配置文件**：完成[环境准备与安装](#4-环境准备与安装)，按实际情况修改配置文件 `config.toml`，包括寻优参数、测评工具参数、服务化参数。请参见 [配置文件说明](#7-配置文件说明)。
 
    > **说明：** 若不确定该调哪些参数及参数范围，可使用 **`optix-assistant` 寻优 skill**（统一入口，AGENTS.md 中已路由）的 PSO 模式，输入硬件、模型、负载和优化目标后即可获得推荐参数与搜索范围，再按实际部署环境（显存、卡数、时延要求等）核对并由其写入 `config.toml`。
 
-2. **启动寻优**：默认执行的是基于 `AISBench` 的 `vLLM` 服务化参数寻优（PSO 模式），其他用法详见 [命令参数说明](#8-命令参数说明)；如需改用 Agent 模式，见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。
+2. **启动寻优**：默认执行的是基于 `AISBench` 的 `vLLM` 服务化参数寻优（PSO 模式），其他用法请参见 [命令参数说明](#8-命令参数说明)；如需改用 Agent 模式，见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。
 
     ```bash
     msmodeling optix
     ```
 
-3. **查看结果**：寻优时间由模型大小、数据集大小和寻优次数等决定，结束后会生成 `data_storage_*.csv` 文件并保存在**当前工作目录下的 `result/store`** 子目录中（可用 `[data_storage].store_dir` 修改），详见 [结果文件说明](#9-结果文件说明)。
+3. **查看结果**：寻优时间由模型大小、数据集大小和寻优次数等决定，结束后会生成 `data_storage_*.csv` 文件并保存在**当前工作目录下的 `result/store`** 子目录中（可用 `[data_storage].store_dir` 修改），请参见 [结果文件说明](#9-结果文件说明)。
 
 ## 6. 寻优模式：PSO 与 Agent
 
@@ -108,7 +108,7 @@ uv pip uninstall msmodeling
 两种模式共用[配置文件说明](#7-配置文件说明)中的寻优参数、测评工具参数和服务化参数，差异主要体现在搜索控制方式上：
 
 - PSO 模式由 `n_particles` 与 `iters` 控制搜索规模；Agent 模式由 `[agent_optimizer]` 配置节控制轮数、单轮 trial 数量与时间预算。
-- Agent 模式要求 `use_request_rate_calibration = false`，此时 `CONCURRENCY` 参与搜索、`REQUESTRATE` 固定为最大施压速率，以便逐 trial 观测并发与时延的关系；若保持默认 `true`，候选中的 `CONCURRENCY` 会被固定为 `max`，并发搜索维度失效。
+- Agent 模式要求 `use_request_rate_calibration = false`，此时 CONCURRENCY 参与搜索、REQUESTRATE 固定为最大施压速率，以便逐 trial 观测并发与时延的关系；若保持默认 `true`，候选中的 CONCURRENCY 会被固定为 `max`，并发搜索维度失效。
 
 ### Agent 模式工作方式
 
@@ -120,14 +120,14 @@ Agent 模式下，工具不在内部运行 PSO，而是从 `[agent_optimizer].ru
 
 |参数|默认值|说明|
 |---|---|---|
-|`run_id`|`"default"`|寻优运行标识，候选与结果文件按该标识组织于运行目录中。|
-|`run_dir`|空|运行目录，留空时自动解析为 `.agent_optimizer/runs/{run_id}`。|
-|`max_rounds`|`32`|最大寻优轮数，达到后自然终止。|
-|`max_trials`|`12`|单轮执行的 trial 数量上限，超出部分不执行。|
-|`time_limit_minutes`|`1440`|单轮执行 trial 的时长上限（分钟），默认 1440；全局预算由 agent 跨轮累计。|
-|`convergence_rounds`|`6`|触发收敛检测所需的连续无显著改善轮数。|
-|`min_rounds`|`4`|收敛前至少完成的寻优轮数。|
-|`min_trials`|`4`|收敛前至少完成的 trial 数。Agent 模式每轮 1 个 trial，与 `min_rounds` 等价，取较大者生效。|
+|run_id|`"default"`|寻优运行标识，候选与结果文件按该标识组织于运行目录中。|
+|run_dir|空|运行目录，留空时自动解析为 `.agent_optimizer/runs/{run_id}`。|
+|max_rounds|`32`|最大寻优轮数，达到后自然终止。|
+|max_trials|`12`|单轮执行的 trial 数量上限，超出部分不执行。|
+|time_limit_minutes|`1440`|单轮执行 trial 的时长上限（分钟），默认 1440；全局预算由 agent 跨轮累计。|
+|convergence_rounds|`6`|触发收敛检测所需的连续无显著改善轮数。|
+|min_rounds|`4`|收敛前至少完成的寻优轮数。|
+|min_trials|`4`|收敛前至少完成的 trial 数。Agent 模式每轮 1 个 trial，与 `min_rounds` 等价，取较大者生效。|
 
 推荐通过 **`optix-assistant` 寻优 skill** 使用 Agent 模式。该 skill 提供配置预检（config_preflight）、上下文采集（collect_context）、配置参数检查（check_search_space）与最优配置导出（export_best_config）等配套脚本，并对候选生成、失败分析与判优规则遵循统一的行为契约。典型使用流程：
 
@@ -157,16 +157,16 @@ Agent 模式下，工具不在内部运行 PSO，而是从 `[agent_optimizer].ru
 
 |参数|可选/必选| 说明                                                                                                         |
 |---|---|------------------------------------------------------------------------------------------------------------|
-|`n_particles`|必选| 寻优种子数，即一组生成的参数组合数，取值范围：1-1000 的整数。建议设为 8~16。                                                               |
-|`iters`|必选| 迭代轮次数，取值范围：1-1000 的整数。建议设为 4~8。                                                                            |
-|`ttft_penalty`|必选| `time_to_first_token` 即首 token 时延超时惩罚系数，若对 `time_to_first_token` 没有时延要求设置为 0 即可。取值范围：[0, 100]。建议设为 1。      |
-|`tpot_penalty`|必选| `time_per_output_token` 即非首 token 时延超时惩罚系数，若对 `time_per_output_token` 没有时延要求设置为 0 即可。取值范围：[0, 100]。建议设为 1。 |
-|`success_rate_penalty`|必选| 请求成功率惩罚系数，取值范围为：1-1000 的整数。建议设为 5。                                                                         |
-|`ttft_slo`|必选| `time_to_first_token` 的限制时延。如对 `time_to_first_token` 限制为 2s 内，则设为 2，取值范围：(0, 100]，单位 s。                    |
-|`tpot_slo`|必选| `time_per_output_token` 的限制时延。如对 `time_per_output_token` 限制为 50ms 内，则设为 0.05，取值范围：(0, 100]，单位 s。           |
-|`optimizer_strategy`|可选| 寻优模式，取值 `pso`（默认）或 `agent`，详见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。|
-|`use_request_rate_calibration`|可选| 是否对 `REQUESTRATE` 做实测校准，默认 `true`。详见下方说明。                                                                  |
-|`benchmark_run_count`|可选| `standard` 模式下每组候选的测评次数，默认 `1`，须为正整数。大于 `1` 时，前 N−1 轮预热、最后一轮计分；须同时设置 `use_request_rate_calibration=false`。|
+|n_particles|必选| 寻优种子数，即一组生成的参数组合数，取值范围：1-1000 的整数。建议设为 8~16。                                                               |
+|iters|必选| 迭代轮次数，取值范围：1-1000 的整数。建议设为 4~8。                                                                            |
+|ttft_penalty|必选| `time_to_first_token` 即首 token 时延超时惩罚系数，若对 `time_to_first_token` 没有时延要求设置为 0 即可。取值范围：[0, 100]。建议设为 1。      |
+|tpot_penalty|必选| `time_per_output_token` 即非首 token 时延超时惩罚系数，若对 `time_per_output_token` 没有时延要求设置为 0 即可。取值范围：[0, 100]。建议设为 1。 |
+|success_rate_penalty|必选| 请求成功率惩罚系数，取值范围为：1-1000 的整数。建议设为 5。                                                                         |
+|ttft_slo|必选| `time_to_first_token` 的限制时延。如对 `time_to_first_token` 限制为 2s 内，则设为 2，取值范围：(0, 100]，单位 s。                    |
+|tpot_slo|必选| `time_per_output_token` 的限制时延。如对 `time_per_output_token` 限制为 50ms 内，则设为 0.05，取值范围：(0, 100]，单位 s。           |
+|optimizer_strategy|可选| 寻优模式，取值 `pso`（默认）或 `agent`，详见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。|
+|use_request_rate_calibration|可选| 是否对 REQUESTRATE 做实测校准，默认 `true`。详见下方说明。                                                                  |
+|benchmark_run_count|可选| `standard` 模式下每组候选的测评次数，默认 `1`，须为正整数。大于 `1` 时，前 N−1 轮预热、最后一轮计分；须同时设置 `use_request_rate_calibration=false`。|
 
 例如，在同一服务实例上先预热再正式测量，在 TOML 顶层设置：
 
@@ -191,7 +191,7 @@ benchmark_run_count = 2
 `REQUESTRATE=0` 表示不限速，因此“最大施压速率”按业务语义取值：范围包含 `0` 时取 `0`，否则取配置的数值 `max`。Agent 模式下该开关必须为 `false`，原因见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。
 
 > [!NOTE]
-> 用户可根据预估时间自行配置种子和迭代次数。单个种子使用时间为拉起服务 + 测试数据。比如用户拉起服务 + 完成测试需 15min，且愿意用 8 小时来进行寻优，则一共可跑约 50 个种子，建议配置 `n_particles=8`、`iters=4`（种子数为迭代次数的 2 倍左右）。
+> 用户可根据预估时间自行配置种子和迭代次数。单个种子使用时间为拉起服务 + 测试数据。比如用户拉起服务 + 完成测试需 15min，且愿意用 8h 来进行寻优，则一共可跑约 50 个种子，建议配置 `n_particles=8`、`iters=4`（种子数为迭代次数的 2 倍左右）。
 
 ### 测评工具参数
 
@@ -204,9 +204,9 @@ benchmark_run_count = 2
 
 |参数| 说明                                                                                                                               |
 |---|----------------------------------------------------------------------------------------------------------------------------------|
-|`models`| 指定模型任务，可根据[模型配置说明](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/base_tutorials/all_params/models.md)进行配置。 |
-|`mode`| 运行模式。可根据[运行模式说明](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/base_tutorials/all_params/mode.md)进行配置。     |
-|`others`| 拼接其他参数，如 `--num_prompts 1000` 等，参数间使用空格分隔。默认为空。                                                                         |
+|models| 指定模型任务，可根据[模型配置说明](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/base_tutorials/all_params/models.md)进行配置。 |
+|mode| 运行模式。可根据[运行模式说明](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/base_tutorials/all_params/mode.md)进行配置。     |
+|others| 拼接其他参数，如 `--num_prompts 1000` 等，参数间使用空格分隔。默认为空。                                                                         |
 
 </details>
 
@@ -219,13 +219,12 @@ benchmark_run_count = 2
 
 |参数|可选/必选|说明|
 |---|---|---|
-|--mode|可选|寻优流程：`standard` 为现有通用寻优流程，可包含 PSO 搜索和 FineTune，也是默认值；`pd_disagg` 分别执行 Prefill 和 Decode 搜索后推荐配比，仅在显式指定 `--mode pd_disagg` 时启用。不传该参数时保持旧版寻优流程。|
-|`host`|必选|主机 ip，需与 `[vllm.command]` 中的 `host` 保持一致，可设为 `127.0.0.1`。|
-|`port`|必选|端口号，需与 `[vllm.command]` 中的 `port` 保持一致。|
-|`model`|必选|模型路径，需与 `[vllm.command]` 中的 `model` 保持一致。|
-|`served_model_name`|必选|模型名称，需与 `[vllm.command]` 中的 `served_model_name` 保持一致。|
-|`dataset_name`|必选|数据集名称。|
-|`others`|可选|拼接其他参数，注意参数间使用空格分隔，参数内部不能留有空格。如 `--dataset-path /path/to/data --num-prompts 1000`。默认为空。|
+|host|必选|主机 ip，需与 `[vllm.command]` 中的 `host` 保持一致，可设为 `127.0.0.1`。|
+|port|必选|端口号，需与 `[vllm.command]` 中的 `port` 保持一致。|
+|model|必选|模型路径，需与 `[vllm.command]` 中的 model 保持一致。|
+|served_model_name|必选|模型名称，需与 `[vllm.command]` 中的 served_model_name 保持一致。|
+|dataset_name|必选|数据集名称。|
+|others|可选|拼接其他参数，注意参数间使用空格分隔，参数内部不能留有空格。如 `--dataset-path /path/to/data --num-prompts 1000`。默认为空。|
 
 </details>
 
@@ -249,11 +248,11 @@ others = ""
 
 |参数|可选/必选|说明|
 |---|---|---|
-|`host`|必选|主机 ip，需与 `[vllm_benchmark.command]` 中的 `host` 保持一致。|
-|`port`|必选|端口号，需与 `[vllm_benchmark.command]` 中的 `port` 保持一致。|
-|`model`|必选|模型路径。|
-|`served_model_name`|必选|模型名称。|
-|`others`|可选|追加固定参数，参数间使用空格分隔。如 `--tensor-parallel-size 2 --no-enable-prefix-caching`。默认为空。|
+|host|必选|主机 ip，需与 `[vllm_benchmark.command]` 中的 `host` 保持一致。|
+|port|必选|端口号，需与 `[vllm_benchmark.command]` 中的 `port` 保持一致。|
+|model|必选|模型路径。|
+|served_model_name|必选|模型名称。|
+|others|可选|追加固定参数，参数间使用空格分隔。如 `--tensor-parallel-size 2 --no-enable-prefix-caching`。默认为空。|
 
 ### VLLM 自定义参数寻优
 
@@ -332,10 +331,10 @@ value = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 
 |字段名|dtype|说明|
 |---|---|---|
-|`MAX_NUM_BATCHED_TOKENS`|`int`|单批最大 token 数（含 prefill），影响显存与吞吐|
-|`MAX_NUM_SEQS`|`int`|单批最大序列数，即 decode 并发上界|
-|`CONCURRENCY`|`int`|测评并发数，特殊字段，行为见下方说明|
-|`REQUESTRATE`|`float`|测评发送速率，特殊字段，行为见下方说明|
+|MAX_NUM_BATCHED_TOKENS|`int`|单批最大 token 数（含 prefill），影响显存与吞吐|
+|MAX_NUM_SEQS|`int`|单批最大序列数，即 decode 并发上界|
+|CONCURRENCY|`int`|测评并发数，特殊字段，行为见下方说明|
+|REQUESTRATE|`float`|测评发送速率，特殊字段，行为见下方说明|
 
 > **`CONCURRENCY` / `REQUESTRATE` 特殊行为**：这两个字段对 vLLM 与 MindIE 都适用，工具会按 `use_request_rate_calibration` 自动改写：`true` 时把 `CONCURRENCY` 固定为 `max`，先以最大施压速率运行，再按实测吞吐校准 `REQUESTRATE`；`false` 时 `CONCURRENCY` 参与 PSO 搜索，`REQUESTRATE` 固定为最大施压速率。`REQUESTRATE=0` 表示不限速：范围包含 `0` 时最大施压速率为 `0`，否则为数值 `max`。当 `min == max` 时字段被视为常量、不参与搜索。
 
@@ -346,7 +345,7 @@ value = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 
 ### MindIE 服务化参数
 
-使用 MindIE 框架时，需修改 `config.toml` 中的 `[mindie.command]` 参数，可参考 [MindIE server 配置参数说明](https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindieservice/servicedev/mindie_service0285.html)进行修改。服务化参数可直接指定参数的范围，如配置 `max_batch_size` 的寻优搜索空间为 10~400：
+使用 MindIE 框架时，需修改 `config.toml` 中的 `[mindie.command]` 参数，请参见 [MindIE server 配置参数说明](https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindieservice/servicedev/mindie_service0285.html)进行修改。服务化参数可直接指定参数的范围，如配置 max_batch_size 的寻优搜索空间为 10~400：
 
 ```toml
 [[mindie.target_field]]
@@ -373,15 +372,15 @@ dtype_param = "max_batch_size"
 
 |字段名|config_position|dtype|说明|
 |---|---|---|---|
-|`max_batch_size`|`BackendConfig.ScheduleConfig.maxBatchSize`|`int`|最大批大小，吞吐主调节点|
-|`max_prefill_batch_size`|`BackendConfig.ScheduleConfig.maxPrefillBatchSize`|`ratio`|按比例随 `max_batch_size` 推导，比例建议 `0.1~0.7`|
-|`prefill_time_ms_per_req`|`BackendConfig.ScheduleConfig.prefillTimeMsPerReq`|`range`|单请求 prefill 耗时上限（ms），按步长枚举|
-|`decode_time_ms_per_req`|`BackendConfig.ScheduleConfig.decodeTimeMsPerReq`|`range`|单请求 decode 耗时上限（ms），按步长枚举|
-|`support_select_batch`|`BackendConfig.ScheduleConfig.supportSelectBatch`|`bool`|是否启用按耗时选批，开启后 `prefill/decode_time_ms_per_req` 自动置 0|
-|`max_queue_delay_microseconds`|`BackendConfig.ScheduleConfig.maxQueueDelayMicroseconds`|`range`|请求排队最大时延（μs），按步长枚举|
-|`max_preempt_count`|`BackendConfig.ScheduleConfig.maxPreemptCount`|`ratio`|抢占上限，按比例随 `max_batch_size` 推导|
-|`CONCURRENCY`|`env`|`int`|测评并发数，特殊字段，见 VLLM 段说明|
-|`REQUESTRATE`|`env`|`float`|测评发送速率，特殊字段，见 VLLM 段说明|
+|max_batch_size|`BackendConfig.ScheduleConfig.maxBatchSize`|`int`|最大批大小，吞吐主调节点|
+|max_prefill_batch_size|`BackendConfig.ScheduleConfig.maxPrefillBatchSize`|`ratio`|按比例随 `max_batch_size` 推导，比例建议 `0.1~0.7`|
+|prefill_time_ms_per_req|`BackendConfig.ScheduleConfig.prefillTimeMsPerReq`|`range`|单请求 prefill 耗时上限（ms），按步长枚举|
+|decode_time_ms_per_req|`BackendConfig.ScheduleConfig.decodeTimeMsPerReq`|`range`|单请求 decode 耗时上限（ms），按步长枚举|
+|support_select_batch|`BackendConfig.ScheduleConfig.supportSelectBatch`|`bool`|是否启用按耗时选批，开启后 `prefill/decode_time_ms_per_req` 自动置 0|
+|max_queue_delay_microseconds|`BackendConfig.ScheduleConfig.maxQueueDelayMicroseconds`|`range`|请求排队最大时延（μs），按步长枚举|
+|max_preempt_count|`BackendConfig.ScheduleConfig.maxPreemptCount`|`ratio`|抢占上限，按比例随 `max_batch_size` 推导|
+|CONCURRENCY|`env`|`int`|测评并发数，特殊字段，见 VLLM 段说明|
+|REQUESTRATE|`env`|`float`|测评发送速率，特殊字段，见 VLLM 段说明|
 
 </details>
 
@@ -389,13 +388,13 @@ dtype_param = "max_batch_size"
 
 | 字段 | 含义                                                                                                                                                                                          | 示例 |
 |---|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---|
-| `name` | 寻优字段名。环境变量类需大写，工具每轮启动服务前自动写入同名大写环境变量；命令行类由工具自动渲染为同名 `--kebab-case` 参数                                                                                                                                   | `COMPILATION_CONFIG` |
-| `config_position` | 生效位置：`env`（仅环境变量，不拼命令行）、`run`（命令行参数，工具自动追加同名 `--kebab-case` 参数，无需在 `others` 引用）或 MindIE 服务配置文件路径（如 `BackendConfig.ScheduleConfig.maxBatchSize`） | `run` |
-| `dtype` | 取值类型，决定 PSO 采样方式：`int`/`float`/`bool`/`enum`/`range`/`ratio`/`share`/`factories`/`times`/`ternary_factories`/`ternary_times`，各类型含义见 [target_field 支持的 dtype 类型](#target_field-支持的-dtype-类型) | `enum` |
-| `dtype_param` | 依 dtype 而定：`enum` 为候选值列表、`range` 为步长整数、`ratio` 与派生类为依赖字段配置                                                                                                                                  | `["", '{"cudagraph_mode": "FULL_DECODE_ONLY"}']` |
-| `value` | 初始值，用于生成基线数据                                                                                                                                                                                | `'{"cudagraph_mode": "FULL_DECODE_ONLY"}'` |
-| `min` / `max` | 搜索区间上下界（`int`/`float`/`range` 生效）；`min == max` 时字段视为常量、不参与搜索；`enum` 的实际候选由 `dtype_param` 给出，派生类型需将 `min`/`max` 均设为 0                                                                        | — |
-| `constant` | 可选；设值后字段固定为该值、不参与 PSO 搜索（`CONCURRENCY`/`REQUESTRATE` 自动改写时由工具写入）                                                                                                                            | — |
+| name | 寻优字段名。环境变量类需大写，工具每轮启动服务前自动写入同名大写环境变量；命令行类由工具自动渲染为同名 `--kebab-case` 参数                                                                                                                                   | `COMPILATION_CONFIG` |
+| config_position | 生效位置：`env`（仅环境变量，不拼命令行）、`run`（命令行参数，工具自动追加同名 `--kebab-case` 参数，无需在 `others` 引用）或 MindIE 服务配置文件路径（如 `BackendConfig.ScheduleConfig.maxBatchSize`） | `run` |
+| dtype | 取值类型，决定 PSO 采样方式：`int`/`float`/`bool`/`enum`/`range`/`ratio`/`share`/`factories`/`times`/`ternary_factories`/`ternary_times`，各类型含义见 [target_field 支持的 dtype 类型](#target_field-支持的-dtype-类型) | `enum` |
+| dtype_param | 依 dtype 而定：`enum` 为候选值列表、`range` 为步长整数、`ratio` 与派生类为依赖字段配置                                                                                                                                  | `["", '{"cudagraph_mode": "FULL_DECODE_ONLY"}']` |
+| value | 初始值，用于生成基线数据                                                                                                                                                                                | `'{"cudagraph_mode": "FULL_DECODE_ONLY"}'` |
+| min / max | 搜索区间上下界（`int`/`float`/`range` 生效）；`min == max` 时字段视为常量、不参与搜索；`enum` 的实际候选由 `dtype_param` 给出，派生类型需将 `min`/`max` 均设为 0                                                                        | — |
+| constant | 可选；设值后字段固定为该值、不参与 PSO 搜索（`CONCURRENCY`/`REQUESTRATE` 自动改写时由工具写入）                                                                                                                            | — |
 
 #### target_field 支持的 dtype 类型
 
@@ -427,7 +426,7 @@ dtype_param = "max_batch_size"
 
 |参数|必选|说明|
 |------|------|------|
-|`path_prefix`|可选|部署根目录，用来覆盖默认系统 PATH。不设则剥离 msmodeling venv 后直接走系统 PATH，效果同 `OPTIX_DEPLOY_PATH`|
+|path_prefix|可选|部署根目录，用来覆盖默认系统 PATH。不设则剥离 msmodeling venv 后直接走系统 PATH，效果同 `OPTIX_DEPLOY_PATH`。|
 
 ```toml
 # 仅当系统 PATH 找不到 vllm、ais_bench 等时再打开
@@ -439,12 +438,12 @@ dtype_param = "max_batch_size"
 
 仅启用 TTFT 惩罚（`ttft_penalty > 0`、`tpot_penalty = 0`）时，最终判优优先选择 TTFT 低于 SLO 的候选，再在其中选择生成吞吐最高者；如果所有候选均超出 TTFT SLO，则选择 TTFT 最低者。关闭 FineTune 时，工具在复测后停止自己管理的服务；`manage_simulator_lifecycle=false` 的外部服务由调用方管理。
 
-PSO 阶段结束后，工具会从结果中选出若干组候选进入精调（fine-tune）阶段，`pso_top_k` 控制选取数量，结果存储与精调配置位于 `config.toml` 中的 `[data_storage]`：
+PSO 阶段结束后，工具会从结果中选出若干组候选进入精调（fine-tune）阶段，pso_top_k 控制选取数量，结果存储与精调配置位于 `config.toml` 中的 `[data_storage]`：
 
 |参数|可选/必选| 说明                                                                    |
 |---|---|-----------------------------------------------------------------------|
-|`store_dir`|可选| 结果 CSV 存储目录，默认 `store`。                                               |
-|`pso_top_k`|可选| 从 PSO 结果中选取的候选组数，默认为 0，关闭 FineTune，但仍复测最佳 PSO 候选。选取逻辑：取 fitness 最小的 top-k；深度精调场景建议 `3~5`。 |
+|store_dir|可选| 结果 CSV 存储目录，默认 `store`。                                               |
+|pso_top_k|可选| 从 PSO 结果中选取的候选组数，默认为 0，关闭 FineTune，但仍复测最佳 PSO 候选。选取逻辑：取 fitness 最小的 top-k；深度精调场景建议 `3~5`。 |
 
 ```toml
 [data_storage]
@@ -455,7 +454,7 @@ pso_top_k = 0
 
 Benchmark 早停用于提前结束性能明显差于历史完整结果的普通 PSO 候选，减少服务化实测寻优时间。该功能默认关闭，目前仅支持 `-e vllm`。
 
-早停只作用于普通 PSO evaluation。baseline、request-rate calibration、refinement 和最优候选复测不会被提前终止，以保证基准和最终结果完整。
+早停只作用于普通 PSO evaluation，baseline、request-rate calibration、refinement 和最优候选复测不会被提前终止，以保证基准和最终结果完整。
 
 首次启用时，建议先使用 `action = "report"` 验证策略：
 
@@ -468,9 +467,9 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 |参数|可选/必选|默认值|说明|
 |---|---|---|---|
-|`enabled`|可选|`false`|是否启用早停。|
-|`action`|可选|`"terminate"`|`report` 仅记录本应早停的时刻，不终止当前 Case；`terminate` 实际停止当前 benchmark 和服务。|
-|`metrics_url`|可选|`"http://127.0.0.1:8000/metrics"`|vLLM Prometheus metrics 地址，应与实际服务监听地址和端口一致。|
+|enabled|可选|`false`|是否启用早停。|
+|action|可选|`"terminate"`|`report` 仅记录本应早停的时刻，不终止当前 Case；`terminate` 实际停止当前 benchmark 和服务。|
+|metrics_url|可选|`"http://127.0.0.1:8000/metrics"`|vLLM Prometheus metrics 地址，应与实际服务监听地址和端口一致。|
 
 启用后，系统先从 baseline 或其他完整 Case 建立 reference。后续普通 PSO 候选经过 warmup 后，若连续多个有效窗口显著差于 reference，系统生成早停决定。
 
@@ -497,11 +496,11 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 |参数|可选/必选|说明|
 |---|---|---|
-|`log_snippet_length`|可选|日志片段长度，用于显示错误详情。取值范围：50-1000，默认为 200。|
-|`service_errors.fatal_patterns`|可选|服务化框架致命错误模式列表，默认为空。|
-|`service_errors.retryable_patterns`|可选|服务化框架可重试错误模式列表，默认为空。|
-|`benchmark_errors.fatal_patterns`|可选|测评工具致命错误模式列表，默认为空。|
-|`benchmark_errors.retryable_patterns`|可选|测评工具可重试错误模式列表，默认为空。|
+|log_snippet_length|可选|日志片段长度，用于显示错误详情。取值范围：50-1000，默认为 200。|
+|service_errors.fatal_patterns|可选|服务化框架致命错误模式列表，默认为空。|
+|service_errors.retryable_patterns|可选|服务化框架可重试错误模式列表，默认为空。|
+|benchmark_errors.fatal_patterns|可选|测评工具致命错误模式列表，默认为空。|
+|benchmark_errors.retryable_patterns|可选|测评工具可重试错误模式列表，默认为空。|
 
 ```toml
 [health_check]
@@ -543,9 +542,9 @@ msmodeling optix [options]
 ### 注意事项
 
 - 启动寻优前，确认 `vllm` 或 `mindie` 以及 `ais_bench` 或 `vllm_benchmark` 已在系统部署环境里能正常运行，且未部署在 msmodeling 虚拟环境中。
-- 配置文件如 `config.toml` 中的模型路径、端口、数据集路径和服务启动参数需与实际部署环境保持一致，详见[配置文件说明](#7-配置文件说明)。
+- 配置文件如 `config.toml` 中的模型路径、端口、数据集路径和服务启动参数需与实际部署环境保持一致，请参见[配置文件说明](#7-配置文件说明)。
 - 服务化实测寻优会反复拉起服务化框架并执行测评，耗时通常较长（4-10h），建议在独占或资源稳定的环境中运行。
-- 环境隔离异常时，日志前缀 `[optix/env]` 会给出原因与修复建议，详见[环境变量与排障](#环境变量与排障)。
+- 环境隔离异常时，日志前缀 `[optix/env]` 会给出原因与修复建议，请参见[环境变量与排障](#环境变量与排障)。
 
 ### 参数说明
 
@@ -562,13 +561,13 @@ msmodeling optix [options]
 <details open>
 <summary>vLLM</summary>
 
-vLLM场景下使用ais_bench测评工具可参考
+vLLM场景下使用ais_bench测评工具请参见：
 
 ```bash
 msmodeling optix -e vllm
 ```
 
-vLLM场景下使用vllm_benchmark测评工具可参考
+vLLM场景下使用vllm_benchmark测评工具请参见：
 
 ```bash
 msmodeling optix -e vllm -b vllm_benchmark
@@ -579,7 +578,7 @@ msmodeling optix -e vllm -b vllm_benchmark
 <details>
 <summary>MindIE</summary>
 
-mindIE场景下使用ais_bench测评工具可参考
+MindIE场景下使用ais_bench测评工具请参见：
 
 ```bash
 msmodeling optix -e mindie
@@ -606,41 +605,41 @@ msmodeling optix -c my_config.toml
 
 OptiX 支持配置 `pd_disagg.full_service`，通过现有 `vllm_pd` 插件自动串联单侧搜索、配比推荐、完整服务部署和负载微调，见[一个命令运行完整流程](../use_cases/optix_pso_pd_disaggregation.md#一个命令运行完整流程)。
 
-分步使用时，OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并推荐 P/D 实例配比：先通过 `--mode pd_disagg` 分别搜索 P/D 参数，再由用户部署完整 PD 服务，最后通过普通 `standard` 模式微调并发和请求速率。
+分步使用时，OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并推荐 P/D 实例配比：先通过 `--mode pd_disagg` 分别搜索 P/D 参数，再由用户部署完整 PD 服务，最后通过普通 `standard` 模式精调并发和请求速率。
 
 首次使用可按[PD 分离寻优新手操作指南](../quick_start/optix_pso_pd_disaggregation.md)中的具体例子复制配置并运行。完整参数解释、配比解读和进阶配置见[使用案例：OptiX PD 分离两步寻优](../use_cases/optix_pso_pd_disaggregation.md)。其他 PD 分离或 PD 混部寻优可使用[插件支持](#3-插件支持)中列出的现有插件。
 
 ## 9. 结果文件说明
 
-输出 CSV 中的每一行对应一组参数。第一列 `case_id` 用于标识 Case，后续五列为性能指标。用户可以根据需求筛选满足要求的性能行，将 VLLM/MindIE 参数以及 vllm_benchmark/AISBench 的参数改为 CSV 中的数据即可。
+输出 CSV 中的每一行对应一组参数。第一列 case_id 用于标识 Case，后续五列为性能指标。用户可以根据需求筛选满足要求的性能行，将 VLLM/MindIE 参数以及 vllm_benchmark/AISBench 的参数改为 CSV 中的数据即可。
 
 |字段|说明|
 |---|---|
-|`case_id`|关联主结果和 metrics 采样轨迹的 Case 标识。|
-|`generate_speed(tokens/s)`|输出 token 吞吐，单位为 token/秒。|
-|`time_to_first_token(s)`|TTFT 时延，单位为秒。|
-|`time_per_output_token(s)`|TPOT 时延，单位为秒。|
-|`success_rate`|请求成功率，无量纲比例，取值为 0～1。|
-|`throughput(requests/s)`|测试吞吐，单位为请求数/秒。|
-|`CONCURRENCY`|并发数。|
-|`REQUESTRATE(requests/s)`|发送速率，单位为请求数/秒。|
-|`error`|记录这次参数没有正常执行的原因，在发送错误时记录。|
-|`backup`|数据记录地址，当开启 `--backup` 时记录。|
-|`real_evaluation`|标记数据是否由真实测试结果得到。`false` 代表该组数据由 GP 模型预测得到。|
-|`fitness`|寻优算法优化值，该值越小代表该组参数效果越好。|
-|`num_prompts`|记录这次寻优测评工具发送的请求数。|
-|`would_early_exit`|是否满足早停条件；`report` 模式下也可能为 `true`。|
-|`early_exit`|当前 Case 是否被实际提前终止；仅 `terminate` 模式可能为 `true`。|
-|`early_exit_reason`|触发早停的原因。|
-|`early_exit_decision_elapsed_seconds(s)`|从 Case 开始到形成早停决定的时间，单位为秒。|
-|`estimated_time_saved_seconds(s)`|`report` 模式下估算的可节省时间，单位为秒。|
-|`estimated_time_saved_ratio`|估算可节省时间占完整 Case 时长的比例。|
-|`result_source`|结果来源；实际早停结果为 `early_exit_metrics`。|
-|`usable_as_best`|该结果能否参与最优结果和 reference 选择；仅实际提前终止的结果为 `false`。`report` 模式下满足条件的 Case 会完整运行，该字段仍为 `true`。|
+|case_id|关联主结果和 metrics 采样轨迹的 Case 标识。|
+|generate_speed(tokens/s)|输出 token 吞吐，单位为 token/s。|
+|time_to_first_token(s)|TTFT 时延，单位为秒。|
+|time_per_output_token(s)|TPOT 时延，单位为秒。|
+|success_rate|请求成功率，无量纲比例，取值为 0～1。|
+|throughput(requests/s)|测试吞吐，单位为请求数/秒。|
+|CONCURRENCY|并发数。|
+|REQUESTRATE(requests/s)|发送速率，单位为请求数/秒。|
+|error|记录这次参数没有正常执行的原因，在发生错误时记录。|
+|backup|数据记录地址，当开启 `--backup` 时记录。|
+|real_evaluation|标记数据是否由真实测试结果得到。`false` 代表该组数据由 GP 模型预测得到。|
+|fitness|寻优算法优化值，该值越小代表该组参数效果越好。|
+|num_prompts|记录这次寻优测评工具发送的请求数。|
+|would_early_exit|是否满足早停条件；`report` 模式下也可能为 `true`。|
+|early_exit|当前 Case 是否被实际提前终止；仅 `terminate` 模式可能为 `true`。|
+|early_exit_reason|触发早停的原因。|
+|early_exit_decision_elapsed_seconds(s)|从 Case 开始到形成早停决定的时间，单位为秒。|
+|estimated_time_saved_seconds(s)|`report` 模式下估算的可节省时间，单位为秒。|
+|estimated_time_saved_ratio|估算可节省时间占完整 Case 时长的比例。|
+|result_source|结果来源；实际早停结果为 `early_exit_metrics`。|
+|usable_as_best|该结果能否参与最优结果和 reference 选择；仅实际提前终止的结果为 `false`。`report` 模式下满足条件的 Case 会完整运行，该字段仍为 `true`。|
 
 上表未列出的结果列还包括早停内部采样和预热元数据（如 `metrics_window_*` 和 `warmup_*`）；未启用早停时，这些字段为空。随后为对应的 VLLM 或 MindIE 的 `config.toml` 参数。
 
-当 `action = "report"` 时，还会生成 `metrics_samples_*.csv`。可以通过 `case_id` 将采样轨迹与 `data_storage_*.csv` 中的主结果关联。实际早停结果不会参与最优候选、reference 或 refinement 选择。
+当 `action = "report"` 时，还会生成 `metrics_samples_*.csv`，可以通过 `case_id` 将采样轨迹与 `data_storage_*.csv` 中的主结果关联。实际早停结果不会参与最优候选、reference 或 refinement 选择。
 
 ## 10. 附录
 
@@ -650,8 +649,8 @@ OptiX 支持配置 `pd_disagg.full_service`，通过现有 `vllm_pd` 插件自�
 
 | 变量 | 说明 |
 |------|------|
-| `OPTIX_DEPLOY_PATH` | 可选。部署环境根目录，其 `bin/` 下应有 `vllm`、`ais_bench` 等。优先级高于 `config.toml` 的 `[deploy] path_prefix`；不设则用系统 PATH |
-| `MIES_INSTALL_PATH` | MindIE 安装根目录，子进程会保留，不用为隔离而改 |
+| OPTIX_DEPLOY_PATH | 可选。部署环境根目录，其 `bin/` 下应有 `vllm`、`ais_bench` 等。优先级高于 `config.toml` 的 `[deploy] path_prefix`；不设则用系统 PATH。 |
+| MIES_INSTALL_PATH | MindIE 安装根目录，子进程会保留，不用为隔离而改 |
 
 优先级从高到低：`OPTIX_DEPLOY_PATH`、`config.toml` 的 `[deploy] path_prefix`、仅剥离 msmodeling venv 后走系统 PATH。
 
@@ -692,9 +691,9 @@ export OPTIX_LOG_LEVEL=DEBUG
 
 |级别|可见内容|
 |---|---|
-|`INFO`（默认）|里程碑：baseline 通过、服务就绪、迭代摘要、最优结果；子进程启动为多行 `command:` / `log:`|
-|`DEBUG`|参数与配置细节、子进程 I/O；每行含 `file:line`；未捕获异常含完整堆栈|
-|`TRACE`|PSO 粒子级细节（fitness、粒子位置、单次评测参数）；与 DEBUG 相同含 `file:line`|
+|INFO（默认）|里程碑：baseline 通过、服务就绪、迭代摘要、最优结果；子进程启动为多行 `command:` / `log:`|
+|DEBUG|参数与配置细节、子进程 I/O；每行含 `file:line`；未捕获异常含完整堆栈|
+|TRACE|PSO 粒子级细节（fitness、粒子位置、单次评测参数）；与 DEBUG 相同含 `file:line`|
 
 VLLM/MindIE 及测评日志写入结果目录或 `/tmp`。启动日志为多行可读格式：
 

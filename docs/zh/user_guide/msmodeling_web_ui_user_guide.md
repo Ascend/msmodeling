@@ -25,7 +25,7 @@ python web_ui/main.py
 | 第一次启动 Web UI | [3. Web UI 快速上手](#web-ui-quick-start) |
 | 配置 LLM / VL 仿真 | [4. LLM / VL 仿真使用指南](#llm-vl-simulation) |
 | 配置视频生成仿真 | [5. Video Generation 仿真使用指南](#video-generation-simulation) |
-| 使用吞吐优化器 | [6. Optimizer 吞吐寻优使用指南](#optimizer-guide) |
+| 使用 Optimizer 吞吐寻优 | [6. Optimizer 吞吐寻优使用指南](#optimizer-guide) |
 | 解读结果与导出数据 | [7. 结果图和明细表怎么看](#results-guide) |
 
 ---
@@ -93,7 +93,7 @@ Web UI 采用前后端分离架构。
 cd web_ui/frontend && npm install
 ```
 
-同时确保已安装 Python 依赖（详见 [安装指南](../install_guide/msmodeling_install_guide.md)）：
+同时确保已安装 Python 依赖（详见 [msModeling 安装指南](../install_guide/msmodeling_install_guide.md)）：
 
 ```bash
 uv sync  # 或 pip install -e .
@@ -148,7 +148,7 @@ Web UI 为单页应用（SPA），顶部导航栏提供以下功能：
 3. 点击 **▶ 运行** 按钮提交任务。提交成功后会弹出 Toast 通知（含任务 ID）。
 4. 结果面板自动切换为运行中状态，显示旋转图标和进度文本，可随时查看日志或取消任务。
 5. 任务完成后，结果面板展示汇总结论、散点图/曲线图、显存分析、算子详情等。
-6. 如果设置了多值字段（如并发列表、TP 列表），系统自动展开为多个 case，结果区以多用例视图分组展示。
+6. 如果设置了多值字段（如并发列表、TP 列表），系统自动展开为多个 case，结果面板以多用例视图分组展示。
 7. 点击顶部 **历史记录** 可查看所有历史任务，点击可直接查看结果。
 
 > **提示**：任务运行中不可切换 Tab（会弹出警告提示），需等待完成或取消后再切换。
@@ -366,20 +366,20 @@ python -m cli.inference.video_generate <model_id> [options]
 
 | 参数 | 说明 |
 | --- | --- |
-| `--batch-size` | 视频生成 batch |
-| `--seq-len` | 文本 prompt token 长度 |
-| `--height / --width` | 视频分辨率 |
-| `--frame-num` | 帧数 |
-| `--sample-step` | denoise step 数 |
-| `--dtype` | `float16`、`float32`、`bfloat16` |
-| `--num-devices` | 总卡数 |
-| `--ulysses-size` | Ulysses 序列并行大小；非 CFG 并行时必须等于 `--num-devices`，CFG 并行时 `--num-devices` 必须为该值的两倍 |
-| `--use-cfg` | 启用 CFG |
-| `--cfg-parallel` | 使用 CFG 并行 |
-| `--dit-cache` | 启用 DiT block cache |
-| `--cache-step-range` | DiT Cache 生效 step 范围，格式 `start,end` |
-| `--cache-step-interval` | 每 N step 刷新一次 cache，`1` 等价于不复用 |
-| `--cache-block-range` | block cache 范围，格式 `start,end` |
+| --batch-size | 视频生成 batch |
+| --seq-len | 文本 prompt token 长度 |
+| --height / --width | 视频分辨率 |
+| --frame-num | 帧数 |
+| --sample-step | denoise step 数 |
+| --dtype | `float16`、`float32`、`bfloat16` |
+| --num-devices | 总卡数 |
+| --ulysses-size | Ulysses 序列并行大小；非 CFG 并行时必须等于 `--num-devices`，CFG 并行时 `--num-devices` 必须为该值的两倍 |
+| --use-cfg | 启用 CFG |
+| --cfg-parallel | 使用 CFG 并行 |
+| --dit-cache | 启用 DiT block cache |
+| --cache-step-range | DiT Cache 生效 step 范围，格式 `start,end` |
+| --cache-step-interval | 每 N step 刷新一次 cache，`1` 等价于不复用 |
+| --cache-block-range | block cache 范围，格式 `start,end` |
 
 ### 5.2 最小视频仿真示例
 
@@ -499,9 +499,9 @@ Web UI 中部署模式名称为：
 
 | Web UI 名称 | CLI 参数 | 适用场景 |
 | --- | --- | --- |
-| `PD 混部` | 默认，不加 `--disagg`，不加 `--enable-optimize-prefill-decode-ratio` | Prefill 和 Decode 在同一类实例中混合部署，先做基线和多芯片横向对比 |
-| `PD 分离` | 加 `--disagg` | Prefill 和 Decode 分离分析，分别评估 TTFT 或 TPOT 约束下的能力 |
-| `PD 配比` | 加 `--enable-optimize-prefill-decode-ratio`，并指定 P/D 单实例卡数 | 在 PD 分离架构下，寻找 Prefill 与 Decode 实例配比 |
+| PD 混部 | 默认，不加 `--disagg`，不加 `--enable-optimize-prefill-decode-ratio` | Prefill 和 Decode 在同一类实例中混合部署，先做基线和多芯片横向对比 |
+| PD 分离 | 加 `--disagg` | Prefill 和 Decode 分离分析，分别评估 TTFT 或 TPOT 约束下的能力 |
+| PD 配比 | 加 `--enable-optimize-prefill-decode-ratio`，并指定 P/D 单实例卡数 | 在 PD 分离架构下，寻找 Prefill 与 Decode 实例配比 |
 
 ### 6.2 PD 混部：离线吞吐寻优
 
@@ -572,8 +572,8 @@ Web UI 中 `TP并行大小列表` 可填写：
 
 | 写法 | 含义 |
 | --- | --- |
-| `--batch-range 256` | min 默认为 1，max 为 256 |
-| `--batch-range 1 256` | min 为 1，max 为 256 |
+| --batch-range 256 | min 默认为 1，max 为 256 |
+| --batch-range 1 256 | min 为 1，max 为 256 |
 
 ### 6.5 PD 分离：Prefill 侧 TTFT 分析
 
@@ -648,14 +648,14 @@ Balanced QPS = min(Prefill QPS, Decode QPS)
 
 | 字段 | 说明 |
 | --- | --- |
-| `Best Throughput` | 当前约束下最优 token/s |
-| `TTFT` | Time To First Token，首 token 延迟 |
-| `TPOT` | Time Per Output Token，单输出 token 延迟 |
-| `concurrency` | 最优配置对应的并发数 |
-| `parallel` | 并行配置，如 `tp4pp1dp2` |
-| `batch_size` | 最优 batch |
-| `pd_ratio` | PD 配比模式下的实例配比 |
-| `balanced_qps` | PD 配比模式下 P/D 平衡后的系统 QPS |
+| Best Throughput | 当前约束下最优 token/s |
+| TTFT | Time To First Token，首 token 延迟 |
+| TPOT | Time Per Output Token，单输出 token 延迟 |
+| concurrency | 最优配置对应的并发数 |
+| parallel | 并行配置，如 `tp4pp1dp2` |
+| batch_size | 最优 batch |
+| pd_ratio | PD 配比模式下的实例配比 |
+| balanced_qps | PD 配比模式下 P/D 平衡后的系统 QPS |
 
 Web UI 还会展示：
 
@@ -678,7 +678,7 @@ Web UI 的结果展示采用模块化组件，不同模块有独立的结果视�
 结果面板从上到下依次展示：
 
 1. **摘要指标卡**：batch_size / execution_time / peak_usage / total_device 等关键数值一目了然。
-2. **仿真程序耗时**：独立显示模拟器 wall-clock 耗时（含编译，非模型执行时间）。
+2. **仿真程序耗时**：独立显示仿真器 wall-clock 耗时（含编译，非模型执行时间）。
 3. **TPS/设备柱状图**：多芯片对比时每设备一条柱。
 4. **显存分布图**：total_device / model_weight / kv_cache / peak_usage / available 的可视化分解。
 5. **算子瓶颈分布（OpBound）**：紧凑文本显示 memory bound / communication bound / compute bound 占比。
@@ -724,7 +724,7 @@ Optimizer 的结果根据部署模式不同展示不同视图：
 **散点图（OptimizerCurves）**：
 
 - 数据来源为全量探索点（raw records），按并行策略着色
-- 自动过滤内存溢出点（OOM）和重复行
+- 自动过滤显存溢出点（OOM）和重复行
 - 模式感知：聚合 2 张图 / 分离 4 张图 / PD 配比 2 张图
 - 亮色 / 暗色主题自动适配
 

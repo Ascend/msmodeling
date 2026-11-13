@@ -219,7 +219,6 @@ When you use the vllm_benchmark benchmark tool, modify the `[vllm_benchmark.comm
 
 | Parameter | Optional/Required | Description |
 | --- | --- | --- |
-| --mode | Optional | Optimization process. `standard` is the existing general optimization process, which can include PSO search and FineTune, and is also the default value. `pd_disagg` searches Prefill and Decode separately and then recommends a ratio. It is enabled only when you explicitly specify `--mode pd_disagg`. If you do not pass this parameter, the legacy optimization process is used. |
 | host | Required | Host IP address. It must be consistent with the `host` in `[vllm.command]`. You can set it to `127.0.0.1`. |
 | port | Required | Port number. It must be consistent with the `port` in `[vllm.command]`. |
 | model | Required | Model path. It must be consistent with the `model` in `[vllm.command]`. |
