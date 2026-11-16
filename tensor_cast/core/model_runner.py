@@ -41,11 +41,9 @@ from ..performance_model.empirical import (
 )
 from ..performance_model.memory_tracker import MemoryTracker
 from ..performance_model.profiling_database import InterpolatingDataSource, ProfilingDataSource
-from ..performance_model.utils import bytes_of_tensor
 from ..pipeline_parallel import PipelineModel, PipelineProfile, PipelineRunResult, PipelineRunner
 from ..runtime import Runtime
-from .input_generator import dcp_kv_token_capacity_factor
-from .input_generator import kv_cache_excluded_layer_indices
+from .input_generator import collect_cache_memory, dcp_kv_token_capacity_factor
 from .input_generator import (
     generate_inputs_varlen,
     get_multimodal_h2d_num_bytes,
@@ -156,6 +154,8 @@ class ModelRunner:
 
         # ---------- 4. static_memory ----------
         self.total_device_memory_gb = self.device_profile.memory_size_bytes / 1024**3
+        # ``language_model_only`` omits multimodal modules during model
+        # construction, so ``weight_size`` already matches the deployment.
         self.model_weight_size_gb = self.model.weight_size / 1024**3
         text_config = getattr(self.model, "text_config", None)
         engram_rows = tuple(getattr(text_config, "engram_num_embeddings", ()))
@@ -280,51 +280,6 @@ class ModelRunner:
                 raise ValueError(f"Unsupported performance model: {perf_model_type}")
         return perf_models
 
-    def _check_peak_memory_usage_gb(
-        self,
-        peak_memory_usage_gb: float,
-        kv_cache_size_gb: float,
-        requests: Optional[List[RequestInfo]],
-        intermediate_gb: Optional[float] = None,
-        *,
-        non_kv_resident_gb: float = 0.0,
-    ) -> tuple[float, bool]:
-        """
-        Check peak memory usage against device limits.
-
-        Args:
-            peak_memory_usage_gb: Current peak memory usage in GB
-            kv_cache_size_gb: Size of KV cache in GB
-            requests: List of RequestInfo objects
-            intermediate_gb: Raw intermediate peak from the memory tracker
-            non_kv_resident_gb: Traced derived resident memory excluding KV
-
-        Returns:
-            tuple[float, bool]: (adjusted peak memory usage in GB, whether the
-            heterogeneous-prefill calibration rebuilt the peak). Callers must
-            keep the reported account breakdown consistent with a rebuilt
-            peak (see run_inference).
-        """
-        device_memory_available_gb = (
-            self.total_device_memory_gb - peak_memory_usage_gb - self.user_input.reserved_memory_gb
-        )
-        query_lens = [request.query_len for request in requests if not request.is_decode]
-
-        if device_memory_available_gb < 0 and len(set(query_lens)) > 1:
-            resident_gb = self.model_weight_size_gb + kv_cache_size_gb + non_kv_resident_gb
-            # Use intermediate bytes from the three-account model when available;
-            # fall back to the legacy subtraction otherwise.
-            if intermediate_gb is None:
-                intermediate_gb = peak_memory_usage_gb - kv_cache_size_gb - self.model_weight_size_gb
-            if intermediate_gb <= 0:
-                return resident_gb, True
-            # Empirical calibration for heterogeneous multi-sequence Prefill batches.
-            peak_memory_usage_gb = resident_gb + 0.1 * intermediate_gb
-            logger.warning("Adjusting peak memory usage")
-            return peak_memory_usage_gb, True
-
-        return peak_memory_usage_gb, False
-
     # Prefill layerwise offload shape defaults (RFC §2.4). B=2 shared physical
     # buffers is the upstream-measured anchor (2x top-k hot buffer reaches an
     # 80-90 percent hit rate); I=0 assumes every layer is cache-bearing --
@@ -380,22 +335,21 @@ class ModelRunner:
 
     def _apply_decode_kv_offload_accounting(
         self,
-        peak_memory_usage_gb: float,
         kv_cache_bytes: int,
         indexer_cache_bytes: int,
         main_kv_per_token: int,
         batch_size: int,
         is_decode: bool,
-    ) -> tuple[float, float, str, float, float]:
-        """Peak/KV accounting for decode sparse KV offload.
+    ) -> tuple[float, str, float, float]:
+        """Device KV and transfer accounting for decode sparse KV offload.
 
         (Wiki RFC ``rfc_kv_cache_offloading_en.md``). When decode offload is enabled
-        and this is a decode step, the main KV lives on host: drop it from the
-        device peak, add the top-k hot buffer, and compute the per-step miss-row
+        and this is a decode step, the main KV lives on host: replace it with the
+        top-k hot buffer and compute the per-step miss-row
         H2D transfer time. Otherwise return the inputs unchanged with
         ``offload_mode="none"`` so non-offload runs are byte-identical.
 
-        Returns ``(peak_gb, kv_cache_size_gb, offload_mode, host_kv_pool_gb,
+        Returns ``(kv_cache_size_gb, offload_mode, host_kv_pool_gb,
         offload_transfer_time_ms)``.
         """
         kv_cache_size_gb = (kv_cache_bytes + indexer_cache_bytes) / 1024**3
@@ -404,7 +358,6 @@ class ModelRunner:
         offload_transfer_time_ms = 0.0
         if not (getattr(self.user_input, "enable_decode_kv_offload", False) and is_decode):
             return (
-                peak_memory_usage_gb,
                 kv_cache_size_gb,
                 offload_mode,
                 host_kv_pool_gb,
@@ -462,9 +415,8 @@ class ModelRunner:
             buffer_multiplier=user_input.decode_offload_buffer_multiplier,
             num_seqs=batch_size,
         )
-        # Main KV is offloaded to host: remove it from the device peak and add
-        # the hot buffer; the device-resident KV becomes indexer + hot buffer.
-        peak_memory_usage_gb = peak_memory_usage_gb - kv_cache_bytes / 1024**3 + hot_bytes / 1024**3
+        # Main KV is offloaded to host; the device-resident KV becomes indexer
+        # plus the hot buffer. The caller builds the total peak from this value.
         kv_cache_size_gb = (indexer_cache_bytes + hot_bytes) / 1024**3
         host_kv_pool_gb = kv_cache_bytes / 1024**3
         host_limit_gb = getattr(user_input, "host_memory_available_gb", 0.0)
@@ -487,7 +439,6 @@ class ModelRunner:
         )
         offload_mode = "decode"
         return (
-            peak_memory_usage_gb,
             kv_cache_size_gb,
             offload_mode,
             host_kv_pool_gb,
@@ -496,22 +447,20 @@ class ModelRunner:
 
     def _apply_prefill_kv_offload_accounting(
         self,
-        peak_memory_usage_gb: float,
         kv_cache_bytes: int,
         indexer_cache_bytes: int,
         main_kv_per_token: int,
         batch_size: int,
         is_decode: bool,
         num_layers: int,
-    ) -> tuple[float, float, str, float, float]:
-        """Peak/KV/transfer accounting for prefill layerwise KV offload.
+    ) -> tuple[float, str, float, float]:
+        """Device KV and transfer accounting for prefill layerwise KV offload.
 
         (Wiki RFC ``rfc_kv_cache_offloading_en.md``). On a prefill step with offload
         ON, only ``ratio = (I + min(B, N-I)) / N`` of the main KV stays on device
-        (B shared physical buffers round-robin across N layers); the rest is on
-        host. Drop the offloaded share from device peak so the optimizer's OOM
-        search finds a larger prefill batch (the benefit). The transfer is a
-        d2h+h2d round trip of the full main KV plus one host-link latency term;
+        (B shared physical buffers round-robin across N layers); the rest is on host.
+        The caller later builds the total peak from this device-resident KV value.
+        The transfer is a d2h+h2d round trip of the full main KV plus one host-link latency term;
         the first-version cost model is the aggregate ``max(compute, transfer)``
         folded into TTFT -- transfers hide when prefill is compute-bound and
         dominate when the host link is the bottleneck. This aggregate model
@@ -520,7 +469,7 @@ class ModelRunner:
         pessimistic upper bound (per-layer makespan refinement tracked as RFC
         open enhancements). OFF or decode -> unchanged, "none".
 
-        Returns ``(peak_gb, kv_cache_size_gb, offload_mode, host_kv_pool_gb,
+        Returns ``(kv_cache_size_gb, offload_mode, host_kv_pool_gb,
         offload_transfer_time_ms)``.
         """
         kv_cache_size_gb = (kv_cache_bytes + indexer_cache_bytes) / 1024**3
@@ -529,7 +478,6 @@ class ModelRunner:
         offload_transfer_time_ms = 0.0
         if not (getattr(self.user_input, "enable_prefill_kv_offload", False) and not is_decode):
             return (
-                peak_memory_usage_gb,
                 kv_cache_size_gb,
                 offload_mode,
                 host_kv_pool_gb,
@@ -550,7 +498,6 @@ class ModelRunner:
         # counts toward the host pool and the round-trip transfer -- a ratio of
         # 1 (nothing to offload) must be a no-op on both.
         offloaded_gb = kv_gb * (1 - ratio)
-        peak_memory_usage_gb = peak_memory_usage_gb - offloaded_gb
         kv_cache_size_gb = ratio * kv_gb + indexer_gb
         host_kv_pool_gb = offloaded_gb
         host_limit_gb = getattr(self.user_input, "host_memory_available_gb", 0.0)
@@ -579,7 +526,6 @@ class ModelRunner:
             ) * 1000.0
         offload_mode = "prefill"
         return (
-            peak_memory_usage_gb,
             kv_cache_size_gb,
             offload_mode,
             host_kv_pool_gb,
@@ -588,14 +534,13 @@ class ModelRunner:
 
     def _apply_kv_offload_accounting(
         self,
-        peak_memory_usage_gb: float,
         kv_cache_bytes: int,
         indexer_cache_bytes: int,
         main_kv_per_token: int,
         batch_size: int,
         is_decode: bool,
         num_layers: int,
-    ) -> tuple[float, float, str, float, float]:
+    ) -> tuple[float, str, float, float]:
         """Dispatch decode/prefill KV offload accounting by phase.
 
         Only the phase matching the run is applied; the other path is a no-op,
@@ -606,7 +551,6 @@ class ModelRunner:
         ModelRunner._validate_kv_offload_model(self)
         if is_decode:
             return self._apply_decode_kv_offload_accounting(
-                peak_memory_usage_gb,
                 kv_cache_bytes,
                 indexer_cache_bytes,
                 main_kv_per_token,
@@ -614,7 +558,6 @@ class ModelRunner:
                 is_decode,
             )
         return self._apply_prefill_kv_offload_accounting(
-            peak_memory_usage_gb,
             kv_cache_bytes,
             indexer_cache_bytes,
             main_kv_per_token,
@@ -743,18 +686,20 @@ class ModelRunner:
                 profiling_miss_reasons=profiling_miss_reasons,
             )
 
+        cache_inventory = collect_cache_memory(self.model, input_kwargs)
+        tracker = MemoryTracker(self.device_profile)
+        tracker.register_model_memory(self.model, cache_inventory)
         with (
             Runtime(
                 self.perf_models,
                 self.device_profile,
-                memory_tracker=MemoryTracker(self.device_profile),
+                memory_tracker=tracker,
             ) as runtime,
             torch.no_grad(),
         ):
             if graph_provider is not None:
                 runtime.op_invoke_infos = graph_provider(input_kwargs)
             else:
-                runtime.memory_tracker.register_model_params(self.model)
                 static_forward = getattr(self, "_static_meta_forward", None)
                 if static_forward is None:
                     output = self.model.forward(**input_kwargs)
@@ -770,7 +715,10 @@ class ModelRunner:
                         output = self.model.forward(**input_kwargs)
                 primary = _primary_model_output(output)
                 if with_sampler and not _spec_decode_skips_runner_sampler(self.model, input_kwargs):
-                    _ = self.sampler(primary, input_kwargs["sampling_metadata"])
+                    returned = self.sampler(primary, input_kwargs["sampling_metadata"])
+                else:
+                    returned = primary
+                tracker.register_model_outputs((primary, returned))
         run_end = time.perf_counter()
 
         # Log empirical model stats if using profiling mode
@@ -822,46 +770,24 @@ class ModelRunner:
             if exec_time and exec_time > 0:
                 tps_per_model[model_name] = self._calculate_single_card_tps(exec_time)
 
-        peak_memory_usage_gb = runtime.memory_tracker.peak_mem_usage() / 1024**3
-
         # linear_attention 层占位张量不计入 KV cache 字节（判定集中维护于
         # kv_cache_excluded_layer_indices，确保 kv_cache_bytes 与 kv_cache_per_token 口径一致）。
-        excluded_layers = kv_cache_excluded_layer_indices(self.model)
         # V4.1 CSA2 reuse/reindex layers alias the physical cache owned by a
         # source layer. Count each tensor object once while retaining the
         # per-layer lookup keys required by the attention wrappers.
-        seen_kv_cache_ids = set()
-        per_layer_kv_bytes = {}
-        for layer_idx, kv_cache in input_kwargs["kv_cache_by_layers"].items():
-            if layer_idx in excluded_layers or id(kv_cache) in seen_kv_cache_ids:
-                continue
-            seen_kv_cache_ids.add(id(kv_cache))
-            per_layer_kv_bytes[layer_idx] = bytes_of_tensor(kv_cache)
+        per_layer_kv_bytes = {
+            int(entry.owner_key.split(":", 1)[1]): entry.token_pool_bytes
+            for entry in cache_inventory.entries
+            if entry.owner_key.startswith("kv_cache_by_layers:") and entry.token_pool_bytes
+        }
         kv_cache_bytes = sum(per_layer_kv_bytes.values())
-        seen_indexer_cache_ids = set()
-        indexer_cache_bytes = 0
-        for kv_cache in input_kwargs.get("indexer_cache_by_layers", {}).values():
-            if id(kv_cache) in seen_indexer_cache_ids:
-                continue
-            seen_indexer_cache_ids.add(id(kv_cache))
-            indexer_cache_bytes += bytes_of_tensor(kv_cache)
-        for scale_cache in input_kwargs.get("indexer_scale_cache_by_layers", {}).values():
-            if id(scale_cache) in seen_indexer_cache_ids:
-                continue
-            seen_indexer_cache_ids.add(id(scale_cache))
-            indexer_cache_bytes += bytes_of_tensor(scale_cache)
-        seen_compressed_cache_ids = set()
-        compressed_cache_bytes = 0
-        for kv_cache in input_kwargs.get("compressed_kv_cache_by_source", {}).values():
-            if id(kv_cache) in seen_compressed_cache_ids:
-                continue
-            seen_compressed_cache_ids.add(id(kv_cache))
-            compressed_cache_bytes += bytes_of_tensor(kv_cache)
-        for scale_cache in input_kwargs.get("compressed_kv_scale_cache_by_source", {}).values():
-            if id(scale_cache) in seen_compressed_cache_ids:
-                continue
-            seen_compressed_cache_ids.add(id(scale_cache))
-            compressed_cache_bytes += bytes_of_tensor(scale_cache)
+        indexer_cache_bytes = sum(
+            entry.token_pool_bytes for entry in cache_inventory.entries if entry.owner_key.startswith("indexer_")
+        )
+        compressed_cache_bytes = sum(
+            entry.token_pool_bytes for entry in cache_inventory.entries if entry.owner_key.startswith("compressed_")
+        )
+        fixed_cache_bytes = cache_inventory.fixed_bytes
         is_decode_step = bool(requests) and all(getattr(r, "is_decode", False) for r in requests)
         # Hot-buffer sizing must follow the requests' concurrency: the optimizer
         # encodes the searched batch in requests[0].concurrency (the
@@ -875,13 +801,11 @@ class ModelRunner:
             getattr(self.user_input, "enable_prefill_kv_offload", False),
         )
         (
-            peak_memory_usage_gb,
             kv_cache_size_gb,
             offload_mode,
             host_kv_pool_gb,
             offload_transfer_time_ms,
         ) = self._apply_kv_offload_accounting(
-            peak_memory_usage_gb,
             kv_cache_bytes,
             indexer_cache_bytes,
             int(input_kwargs["kv_cache_per_token"]),
@@ -890,7 +814,7 @@ class ModelRunner:
             cache_layer_count,
         )
         # CSA2 compressed payloads and scales remain device-resident.
-        kv_cache_size_gb += compressed_cache_bytes / 1024**3
+        kv_cache_size_gb += (compressed_cache_bytes + fixed_cache_bytes) / 1024**3
         kv_cache_per_token_gb = (
             input_kwargs["kv_cache_per_token"]
             + input_kwargs.get("indexer_cache_per_token", 0)
@@ -902,132 +826,16 @@ class ModelRunner:
         # per-token cost above stays the true physical cost; the capacity gain is
         # surfaced as a multiplier that warmup() applies to ``num_blocks``.
         kv_cache_token_capacity_factor = dcp_kv_token_capacity_factor(self.model)
-        if graph_provider is not None:
-            # Template tensors are reconstructed without model parameter identities,
-            # so the aggregate tracker peak contains only the weights represented by
-            # the expanded graph (which can be just one RegionMarker layer).  Do not
-            # infer activation by subtracting the full resident model weight from
-            # that partial peak: it can make the activation negative and clamp it to
-            # zero.  The tracker still sees the graph's intermediate lifetimes, so
-            # use its explicit activation account and rebuild the physical peak from
-            # the full model weight + resident cache + activation.  Keep any extra
-            # aggregate bytes beyond those accounts as an opaque resident remainder.
-            raw_peak_memory_usage_gb = peak_memory_usage_gb
-            resident_baseline_gb = self.model_weight_size_gb + kv_cache_size_gb
-            intermediate_gb = runtime.memory_tracker.peak_intermediate_bytes() / 1024**3
-            template_non_kv_resident_gb = max(
-                0.0,
-                raw_peak_memory_usage_gb - resident_baseline_gb - intermediate_gb,
+        summary = tracker.get_forward_memory_summary()
+        model_weight_size_gb = self.model_weight_size_gb
+        model_activation_size_gb = summary.activation_peak_bytes / 1024**3
+        peak_memory_usage_gb = (
+            summary.peak_memory_bytes(
+                round(model_weight_size_gb * 1024**3),
+                round(kv_cache_size_gb * 1024**3),
             )
-            peak_memory_usage_gb = max(
-                raw_peak_memory_usage_gb,
-                resident_baseline_gb + intermediate_gb,
-            )
-            peak_memory_usage_gb, peak_calibrated = self._check_peak_memory_usage_gb(
-                peak_memory_usage_gb,
-                kv_cache_size_gb,
-                requests,
-                intermediate_gb,
-                non_kv_resident_gb=template_non_kv_resident_gb,
-            )
-            model_activation_size_gb = intermediate_gb
-            if peak_calibrated:
-                model_activation_size_gb = max(
-                    0.0,
-                    peak_memory_usage_gb - resident_baseline_gb - template_non_kv_resident_gb,
-                )
-            param_matched_size_gb = float("nan")
-            derived_resident_size_gb = float("nan")
-            non_kv_resident_size_gb = None
-            unexecuted_resident_size_gb = 0.0
-            represented_weight_size_gb = 0.0
-        else:
-            # Fourth account (Issue #463 follow-up): registered weights never
-            # consumed by any traced op (decode-never-sampled lm_head, bypassed
-            # shared experts, draft heads, rotary caches) stay resident in real
-            # deployment but are absent from the traced peak.  Add them back so
-            # ``total - peak`` (device_memory_available_gb, KV-pool budgeting)
-            # is not optimistic.  Weights consumed by the tracer (including
-            # quantizer-materialized replacements) are excluded by the tracker.
-            # The add-back must happen BEFORE _check_peak_memory_usage_gb below:
-            # its heterogeneous-prefill adjustment rebuilds peak from the FULL
-            # weight account (self.model_weight_size_gb already contains the
-            # unexecuted weights), so adding them again afterwards would double
-            # count them.
-            unexecuted_named_tensors = list(self.model.named_parameters()) + list(self.model.named_buffers())
-            unexecuted_resident_size_gb = (
-                runtime.memory_tracker.unexecuted_param_bytes(unexecuted_named_tensors) / 1024**3
-            )
-            peak_memory_usage_gb += unexecuted_resident_size_gb
-            # Fifth account (PR #906 review, peak/weight physical consistency):
-            # ``TransformerModel.weight_size`` extrapolates representative layers
-            # (RegionMarkerWrapper) — (repeat_count - 1) x representative weight —
-            # so the weight account counts bytes that are never materialized in
-            # the simulation and therefore appear in neither the traced peak nor
-            # the registered-tensor accounts above.  In a real deployment every
-            # represented layer has its own resident copy, so add the extrapolated
-            # bytes back; without them peak < model_weight_size_gb (physically
-            # impossible on a single device) and device_memory_available_gb is
-            # over-estimated.  Same quantized caliber as weight_size (qweight
-            # buffers are registered at build time) and additive with the traced
-            # accounts: region replay reuses the representative tensors instead of
-            # materializing per-repeat copies.
-            from ..transformers.model import TransformerModel
-
-            represented_extra_weight_bytes = TransformerModel.get_represented_extra_weight_size(self.model)
-            represented_weight_size_gb = represented_extra_weight_bytes / 1024**3
-            peak_memory_usage_gb += represented_weight_size_gb
-            raw_peak_memory_usage_gb = peak_memory_usage_gb
-            intermediate_gb = runtime.memory_tracker.peak_intermediate_bytes() / 1024**3
-            derived_resident_size_gb = runtime.memory_tracker.peak_derived_resident_bytes() / 1024**3
-            # The tracker sees KV before offload. Do not re-add offloaded pages
-            # as non-KV resident memory when calibrating the device peak.
-            traced_kv_gb = (kv_cache_bytes + indexer_cache_bytes + compressed_cache_bytes) / 1024**3
-            non_kv_resident_size_gb = max(0.0, derived_resident_size_gb - traced_kv_gb)
-            peak_memory_usage_gb, peak_calibrated = self._check_peak_memory_usage_gb(
-                peak_memory_usage_gb,
-                kv_cache_size_gb,
-                requests,
-                intermediate_gb,
-                non_kv_resident_gb=non_kv_resident_size_gb,
-            )
-            # Physical-consistency invariant (PR #906 review): with the fourth and
-            # fifth accounts added back, the traced peak should never fall below
-            # the resident weight on a single device.  A violation means a
-            # memory-account gap (e.g. a wrapper type invisible to both the
-            # tracker and the weight extrapolation).  Warn instead of raising so
-            # simulations still complete, while the log surfaces the optimistic
-            # device_memory_available_gb.
-            if peak_memory_usage_gb + 1e-6 < self.model_weight_size_gb:
-                logger.warning(
-                    "Peak memory usage (%.3f GB) is below the resident model weight (%.3f GB); "
-                    "the memory accounts do not close and device_memory_available_gb may be "
-                    "over-estimated.",
-                    peak_memory_usage_gb,
-                    self.model_weight_size_gb,
-                )
-            # Three-account activation (Issue #463): activation = peak intermediate
-            # bytes, not ``peak - weight - KV``.  The old formula mixed traced-tensor
-            # peak with all-registered-params weight, causing negative residuals.
-            model_activation_size_gb = intermediate_gb
-            param_matched_size_gb = runtime.memory_tracker.peak_param_bytes() / 1024**3
-            if peak_calibrated:
-                # The heterogeneous-prefill calibration rebuilt the peak above
-                # (0.1x empirical intermediate + resident memory), so deriving the
-                # reported activation from the full intermediate peak would break
-                # peak = param + derived + activation + unexecuted + represented on
-                # this path (review: keep the reported breakdown consistent with a
-                # rebuilt peak, mirroring the legacy residual-derivation behavior).
-                # The rebuilt weight already contains the extrapolated represented
-                # weight, hence the fifth subtraction term.
-                model_activation_size_gb = max(
-                    0.0,
-                    peak_memory_usage_gb
-                    - param_matched_size_gb
-                    - derived_resident_size_gb
-                    - unexecuted_resident_size_gb
-                    - represented_weight_size_gb,
-                )
+            / 1024**3
+        )
         device_memory_available_gb = (
             self.total_device_memory_gb - peak_memory_usage_gb - self.user_input.reserved_memory_gb
         )
@@ -1040,7 +848,7 @@ class ModelRunner:
 
         return ModelRunnerMetrics(
             total_device_memory_gb=self.total_device_memory_gb,
-            model_weight_size_gb=self.model_weight_size_gb,
+            model_weight_size_gb=model_weight_size_gb,
             engram_host_resident_size_gb=self.engram_host_resident_size_gb,
             engram_host_resident_per_rank_gb=self.engram_host_resident_per_rank_gb,
             host_to_device_bytes=host_to_device_bytes,
@@ -1048,18 +856,13 @@ class ModelRunner:
             multimodal_input_h2d_bytes=multimodal_input_h2d_bytes,
             multimodal_input_h2d_time_s=multimodal_input_h2d_time_s,
             peak_memory_usage_gb=peak_memory_usage_gb,
-            raw_peak_memory_usage_gb=raw_peak_memory_usage_gb,
-            non_kv_resident_size_gb=non_kv_resident_size_gb,
             kv_cache_size_gb=kv_cache_size_gb,
+            fixed_cache_size_gb=fixed_cache_bytes / 1024**3,
             kv_cache_per_token_gb=kv_cache_per_token_gb,
             kv_cache_token_capacity_factor=kv_cache_token_capacity_factor,
             indexer_cache_size_gb=indexer_cache_bytes / 1024**3,
             indexer_cache_per_token_gb=input_kwargs.get("indexer_cache_per_token", 0) / 1024**3,
             model_activation_size_gb=model_activation_size_gb,
-            param_matched_size_gb=param_matched_size_gb,
-            derived_resident_size_gb=derived_resident_size_gb,
-            unexecuted_resident_size_gb=unexecuted_resident_size_gb,
-            represented_weight_size_gb=represented_weight_size_gb,
             reserved_memory_gb=self.user_input.reserved_memory_gb,
             device_memory_available_gb=device_memory_available_gb,
             execution_time_s=all_execution_time_s,
@@ -1107,42 +910,8 @@ class ModelRunner:
         kv_cache_per_token_gb = (
             pipeline_result.kv_cache_per_token_bytes + pipeline_result.indexer_cache_per_token_bytes
         ) / 1024**3
-        if pipeline_result.model_activation_size_bytes is not None:
-            # PP path: activation was computed in _build_run_result for the
-            # selected summary stage from its stage-local intermediate peak.
-            model_activation_size_gb = pipeline_result.model_activation_size_bytes / 1024**3
-        else:
-            # Fallback when PP didn't provide activation bytes: use the legacy
-            # subtraction.  A negative residual means the accounts are
-            # inconsistent, so restore the weight+kv baseline — keeping the raw
-            # (smaller) peak would over-estimate device_memory_available_gb and
-            # violate the peak >= weight + kv invariant (Issue #463).
-            model_activation_size_gb = peak_memory_usage_gb - kv_cache_size_gb - model_weight_size_gb
-            if model_activation_size_gb < 0:
-                logger.warning(
-                    "Negative activation memory estimate in PP fallback "
-                    "(peak=%.6f GB, weight=%.6f GB, kv=%.6f GB); "
-                    "restoring the weight+kv peak baseline so the "
-                    "peak >= weight + kv invariant (Issue #463) holds and "
-                    "device_memory_available_gb is not over-estimated.",
-                    peak_memory_usage_gb,
-                    model_weight_size_gb,
-                    kv_cache_size_gb,
-                )
-                model_activation_size_gb = 0.0
-                peak_memory_usage_gb = model_weight_size_gb + kv_cache_size_gb
-        # Physical-consistency invariant (PR #906 review), mirroring the direct
-        # path: the stage-level add-backs should keep the summary-stage peak at
-        # or above the stage weight.  Only checked when the PP result carried a
-        # real stage weight; the 0-byte fallback above compares peak against the
-        # full-model weight, which a stage-local peak legitimately undercuts.
-        if pipeline_result.model_weight_size_bytes > 0 and peak_memory_usage_gb + 1e-6 < model_weight_size_gb:
-            logger.warning(
-                "PP peak memory usage (%.3f GB) is below the summary-stage resident weight (%.3f GB); "
-                "the memory accounts do not close and device_memory_available_gb may be over-estimated.",
-                peak_memory_usage_gb,
-                model_weight_size_gb,
-            )
+        # The selected stage reports activation directly from its tracker.
+        model_activation_size_gb = pipeline_result.model_activation_size_bytes / 1024**3
         device_memory_available_gb = (
             self.total_device_memory_gb - peak_memory_usage_gb - self.user_input.reserved_memory_gb
         )
@@ -1157,18 +926,11 @@ class ModelRunner:
             multimodal_input_h2d_time_s=multimodal_input_h2d_time_s,
             peak_memory_usage_gb=peak_memory_usage_gb,
             kv_cache_size_gb=kv_cache_size_gb,
+            fixed_cache_size_gb=pipeline_result.fixed_cache_bytes / 1024**3,
             kv_cache_per_token_gb=kv_cache_per_token_gb,
             indexer_cache_size_gb=indexer_cache_bytes / 1024**3,
             indexer_cache_per_token_gb=pipeline_result.indexer_cache_per_token_bytes / 1024**3,
             model_activation_size_gb=model_activation_size_gb,
-            # Three-account propagation on the PP path (PR #906 review): the
-            # summary stage's accounts flow through PipelineRunResult; peak
-            # already includes the unexecuted and represented add-backs done
-            # at stage level.
-            param_matched_size_gb=pipeline_result.param_matched_size_bytes / 1024**3,
-            derived_resident_size_gb=pipeline_result.derived_resident_size_bytes / 1024**3,
-            unexecuted_resident_size_gb=pipeline_result.unexecuted_resident_size_bytes / 1024**3,
-            represented_weight_size_gb=pipeline_result.represented_weight_size_bytes / 1024**3,
             reserved_memory_gb=self.user_input.reserved_memory_gb,
             device_memory_available_gb=device_memory_available_gb,
             execution_time_s=all_execution_time_s,
@@ -1254,22 +1016,6 @@ class ModelRunnerMetrics:
     """TPS per performance model, keyed by model name."""
     run_time_s: float
     batch_size: int
-    # Memory peak breakdown (Issue #463 / PR #906).
-    # Placed after non-default fields to satisfy dataclass ordering.
-    param_matched_size_gb: float = 0.0
-    """Peak bytes of registered params/buffers actually consumed in the trace."""
-    derived_resident_size_gb: float = 0.0
-    """Peak bytes of non-registered model inputs (KV cache, look-up tables)."""
-    unexecuted_resident_size_gb: float = 0.0
-    """Bytes of registered params/buffers never consumed by any traced op but
-    resident in real deployment (fourth account, Issue #463 follow-up).  Added
-    to ``peak_memory_usage_gb`` so available-memory planning is not optimistic."""
-    represented_weight_size_gb: float = 0.0
-    """Bytes of RegionMarkerWrapper-extrapolated weight (fifth account, PR #906
-    review): ``weight_size`` counts (repeat_count - 1) representative-layer
-    copies that the simulation replays instead of materializing, so they are
-    added to ``peak_memory_usage_gb`` to keep peak >= weight physically
-    consistent on a single device."""
     # Engram host-resident tables (DeepSeek V4.1 Flash, upstream).
     engram_host_resident_size_gb: float = 0.0
     engram_host_resident_per_rank_gb: float = 0.0
@@ -1281,6 +1027,8 @@ class ModelRunnerMetrics:
     """Per-card KV token capacity multiplier from DCP (1 when DCP is off, and when the
     token shard buys no real per-card saving). warmup() multiplies ``num_blocks`` by
     this; see ``dcp_kv_token_capacity_factor``."""
+    fixed_cache_size_gb: float = 0.0
+    """Subset of KV cache that cannot be reclaimed for token blocks."""
     indexer_cache_size_gb: float = 0.0
     indexer_cache_per_token_gb: float = 0.0
     table_result: str = ""
@@ -1297,10 +1045,6 @@ class ModelRunnerMetrics:
     offload_mode: str = "none"  # "none" | "decode" | "prefill"
     host_kv_pool_gb: float = 0.0
     offload_transfer_time_ms: float = 0.0
-    raw_peak_memory_usage_gb: Optional[float] = None
-    """Peak before device-specific heterogeneous prefill calibration."""
-    non_kv_resident_size_gb: Optional[float] = None
-    """Derived resident memory excluding the KV bytes present in the trace."""
 
     def print_info(self):
         print(f"Number of Queries per DP rank: {self.batch_size}")
@@ -1332,27 +1076,6 @@ class ModelRunnerMetrics:
         print(f"Total device memory: {self.total_device_memory_gb:.3f} GB")
         print(f"  Model weight size: {self.model_weight_size_gb:.3f} GB")
         print(f"  Peak memory usage: {self.peak_memory_usage_gb:.3f} GB")
-        # KDA state (K3-only, injected post-hoc on the metrics instance) sits
-        # outside the tracker accounts and is displayed separately from KV.
-        kda_state_gb = getattr(self, "kda_state_size_gb", 0.0)
-        kv_input_gb = max(self.kv_cache_size_gb - kda_state_gb, 0.0)
-        if self.param_matched_size_gb > 0 or self.derived_resident_size_gb > 0:
-            peak_components_gb = (
-                self.param_matched_size_gb,
-                self.derived_resident_size_gb,
-                self.model_activation_size_gb,
-                self.unexecuted_resident_size_gb,
-                self.represented_weight_size_gb,
-                kda_state_gb,
-            )
-            logger.info(
-                "Peak memory breakdown (GB): P=%.6f, "
-                "param_matched=%.6f + derived_resident=%.6f + activation=%.6f + "
-                "unexecuted_resident=%.6f + represented_weight=%.6f + kda_state=%.6f = %.6f",
-                self.peak_memory_usage_gb,
-                *peak_components_gb,
-                sum(peak_components_gb),
-            )
         if self.engram_host_resident_size_gb > 0:
             print(f"  Engram host-resident tables: {self.engram_host_resident_size_gb:.3f} GB")
             print(f"    Per-rank row shard: {self.engram_host_resident_per_rank_gb:.3f} GB")
@@ -1365,14 +1088,17 @@ class ModelRunnerMetrics:
                 print("  Multimodal input time: unavailable (host bandwidth not configured)")
             else:
                 print(f"  Multimodal input time: {self.multimodal_input_h2d_time_s * 1e3:.3f} ms")
-        print(f"  KV cache: {kv_input_gb:.3f} GB")
+        attention_kv_cache_size_gb = max(
+            self.kv_cache_size_gb - self.indexer_cache_size_gb - self.fixed_cache_size_gb,
+            0.0,
+        )
+        print(f"  Total KV cache: {self.kv_cache_size_gb:.3f} GB")
+        print(f"    Attention KV cache: {attention_kv_cache_size_gb:.3f} GB")
+        print(f"    Indexer KV cache: {self.indexer_cache_size_gb:.3f} GB")
+        print(f"    KDA cache: {self.fixed_cache_size_gb:.3f} GB")
         if self.indexer_cache_size_gb > 0:
-            print(f"    Main KV cache: {kv_input_gb - self.indexer_cache_size_gb:.3f} GB")
-            print(f"    Indexer cache: {self.indexer_cache_size_gb:.3f} GB")
             print(f"    Indexer cache per token: {self.indexer_cache_per_token_gb:.6f} GB")
         print(f"  Model activation size: {self.model_activation_size_gb:.3f} GB")
-        if kda_state_gb > 0:
-            print(f"    KDA state (recurrent+conv, outside trace): {kda_state_gb:.6f} GB")
         print(f"  Reserved memory: {self.reserved_memory_gb:.3f} GB")
         print(f"  Memory available: {self.device_memory_available_gb:.3f} GB")
         if self.stage_memory_breakdown:

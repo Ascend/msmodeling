@@ -496,8 +496,6 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             _profiling_result_kind(profiling_source_times_s),
             _format_profiling_misses(profiling_miss_reasons),
             memory_info["model_weight_size_gb"] if memory_info else float("nan"),
-            memory_info["param_matched_size_gb"] if memory_info else float("nan"),
-            memory_info["derived_resident_size_gb"] if memory_info else float("nan"),
             memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
             memory_info["model_activation_size_gb"] if memory_info else float("nan"),
             memory_info["device_memory_available_gb"] if memory_info else float("nan"),
@@ -542,7 +540,6 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             ttft,
             tpot,
             summary,
-            kv_cache_size_gb=(memory_info or {}).get("kv_cache_size_gb", 0.0),
         )
 
         return summary
@@ -663,8 +660,6 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         memory_info = {
             "total_device_memory_gb": self.model_runner.total_device_memory_gb,
             "model_weight_size_gb": float("nan"),
-            "param_matched_size_gb": float("nan"),
-            "derived_resident_size_gb": float("nan"),
             "kv_cache_size_gb": float("nan"),
             "model_activation_size_gb": float("nan"),
             "reserved_memory_gb": float(self.model_runner.user_input.reserved_memory_gb or 0.0),
@@ -701,8 +696,6 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             _profiling_result_kind(profiling_source_times_s),
             _format_profiling_misses(profiling_miss_reasons),
             memory_info["model_weight_size_gb"],
-            memory_info["param_matched_size_gb"],
-            memory_info["derived_resident_size_gb"],
             memory_info["kv_cache_size_gb"],
             memory_info["model_activation_size_gb"],
             memory_info["device_memory_available_gb"],
@@ -714,9 +707,6 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         if wave.memory_exceeded:
             early_stop_reason = EARLY_STOP_DECODE_OOM if decode_flag else EARLY_STOP_PREFILL_OOM
         summary.set_early_stop_flag(device_memory_available_gb, tpot, ttft, reason=early_stop_reason)
-        # PP hand-built dicts carry NaN KV placeholders; NaN is sanitized to
-        # 0.0 inside _compute_per_request_memory_gb (same tolerance as the
-        # agg path's property reads).
         self._maybe_set_search_info(
             optimizer_data,
             device_memory_available_gb,
@@ -724,6 +714,5 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             ttft,
             tpot,
             summary,
-            kv_cache_size_gb=(memory_info or {}).get("kv_cache_size_gb", 0.0),
         )
         return summary

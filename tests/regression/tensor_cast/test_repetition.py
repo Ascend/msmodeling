@@ -372,7 +372,6 @@ class RepetitionTestCase(RepetitionTestMixin, unittest.TestCase):
         self.assertEqual(len(model_with_repeats.unwrap().layers), 3)
         self.check_representative_layers(model_with_repeats.unwrap().layers, [3])
         self.check_copy_layers_hidden(model_with_repeats.unwrap().layers)
-        represented_weight_bytes = TransformerModel.get_represented_extra_weight_size(model_with_repeats)
         if do_compile:
             model = torch.compile(model, backend=get_backend(), dynamic=True, fullgraph=True)
             model_with_repeats = torch.compile(model_with_repeats, backend=get_backend(), dynamic=True, fullgraph=True)
@@ -384,7 +383,6 @@ class RepetitionTestCase(RepetitionTestMixin, unittest.TestCase):
             Runtime(perf_model, device_profile, MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
-            runtime.memory_tracker.register_model_params(model)
             outputs = model.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (2, num_tokens, model.vocab_size))
 
@@ -392,7 +390,6 @@ class RepetitionTestCase(RepetitionTestMixin, unittest.TestCase):
             Runtime(perf_model, device_profile, MemoryTracker(device_profile)) as runtime_with_repeats,
             torch.no_grad(),
         ):
-            runtime_with_repeats.memory_tracker.register_model_params(model_with_repeats)
             outputs = model_with_repeats.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (2, num_tokens, model_with_repeats.vocab_size))
 
@@ -412,19 +409,14 @@ class RepetitionTestCase(RepetitionTestMixin, unittest.TestCase):
             runtime_cost_with_repeats_s,
             rtol=0.01 if do_compile else 0,
         )
-        tracker = runtime.memory_tracker
-        repeat_tracker = runtime_with_repeats.memory_tracker
-        peak_mem_usage = tracker.peak_mem_usage() + tracker.unexecuted_param_bytes(
-            list(model.named_parameters()) + list(model.named_buffers())
-        )
-        # Replaying a layer shares the representative weight tensors. Include
-        # the other layers' deployment weights, as ModelRunner does.
+        # This direct tracker test does not register model weights, so the raw
+        # graph-input working set includes transformed parameters and is not a
+        # comparable memory total across the two model representations. The
+        # forward-created activation peak is the representation-independent
+        # accounting result that repetition must preserve.
+        peak_mem_usage = runtime.memory_tracker.get_forward_memory_summary().activation_peak_bytes
         peak_mem_usage_with_repeats = (
-            repeat_tracker.peak_mem_usage()
-            + repeat_tracker.unexecuted_param_bytes(
-                list(model_with_repeats.named_parameters()) + list(model_with_repeats.named_buffers())
-            )
-            + represented_weight_bytes
+            runtime_with_repeats.memory_tracker.get_forward_memory_summary().activation_peak_bytes
         )
         assert_close(
             self,

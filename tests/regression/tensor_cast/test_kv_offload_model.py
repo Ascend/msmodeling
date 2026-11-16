@@ -164,13 +164,11 @@ def _stub_runner(**user_overrides):
 
 
 def _apply_decode(runner, kv_bytes=1024**3, indexer_bytes=1024**2, mkpt=90_000, batch=1):
-    return ModelRunner._apply_decode_kv_offload_accounting(runner, 100.0, kv_bytes, indexer_bytes, mkpt, batch, True)
+    return ModelRunner._apply_decode_kv_offload_accounting(runner, kv_bytes, indexer_bytes, mkpt, batch, True)
 
 
 def _apply_prefill(runner, kv_bytes=1024**3, indexer_bytes=1024**2, mkpt=90_000, batch=1, layers=78):
-    return ModelRunner._apply_prefill_kv_offload_accounting(
-        runner, 100.0, kv_bytes, indexer_bytes, mkpt, batch, False, layers
-    )
+    return ModelRunner._apply_prefill_kv_offload_accounting(runner, kv_bytes, indexer_bytes, mkpt, batch, False, layers)
 
 
 def test_decode_offload_rejects_model_without_sparse_window():
@@ -218,23 +216,21 @@ def test_decode_offload_rejects_host_pool_over_capacity():
 
 def test_decode_offload_allows_host_pool_within_capacity():
     runner = _stub_runner(host_memory_available_gb=4.0)
-    peak, kv_gb, mode, pool, transfer = _apply_decode(runner, kv_bytes=2 * 1024**3)
+    kv_gb, mode, pool, transfer = _apply_decode(runner, kv_bytes=2 * 1024**3)
     assert mode == "decode"
     assert pool == pytest.approx(2.0)
-    assert peak > 0
 
 
 def test_decode_offload_happy_path_exact_values():
     runner = _stub_runner()
     kv_bytes, indexer_bytes, mkpt, batch = 2**30, 1024**2, 90_000, 4
-    peak, kv_gb, mode, pool, transfer = _apply_decode(
+    kv_gb, mode, pool, transfer = _apply_decode(
         runner, kv_bytes=kv_bytes, indexer_bytes=indexer_bytes, mkpt=mkpt, batch=batch
     )
     assert mode == "decode"
     hot = batch * 2048 * 2.0 * mkpt
     assert pool == kv_bytes / 1024**3
     assert kv_gb == (indexer_bytes + hot) / 1024**3
-    assert peak == 100.0 - kv_bytes / 1024**3 + hot / 1024**3
     # miss rows = ceil(2048*0.15) = 308; payload = 4 * (308+1) * 90_000
     payload = batch * (308 + 1) * mkpt
     assert transfer == pytest.approx((5e-6 + payload / (32e9 * 0.8)) * 1000.0, rel=1e-9)
@@ -243,11 +239,10 @@ def test_decode_offload_happy_path_exact_values():
 def test_prefill_offload_ratio_one_is_noop():
     # B covers every layer -> nothing to offload: no host pool, no transfer.
     runner = _stub_runner(enable_prefill_kv_offload=True)
-    peak, kv_gb, mode, pool, transfer = _apply_prefill(runner, layers=2, kv_bytes=1024**3)
+    kv_gb, mode, pool, transfer = _apply_prefill(runner, layers=2, kv_bytes=1024**3)
     assert mode == "prefill"
     assert pool == 0.0
     assert transfer == 0.0
-    assert peak == 100.0
     assert kv_gb == (1024**3 + 1024**2) / 1024**3
 
 
@@ -255,13 +250,12 @@ def test_prefill_offload_host_pool_and_transfer_cover_offloaded_share_only():
     # 78 layers, B=2 (code default) -> ratio 2/78; only (1-ratio) offloaded.
     runner = _stub_runner(enable_prefill_kv_offload=True)
     kv_bytes = 1024**3
-    peak, kv_gb, mode, pool, transfer = _apply_prefill(runner, kv_bytes=kv_bytes, layers=78)
+    kv_gb, mode, pool, transfer = _apply_prefill(runner, kv_bytes=kv_bytes, layers=78)
     ratio = 2 / 78
     assert mode == "prefill"
     assert pool == kv_bytes / 1024**3 * (1 - ratio)
     expected = (5e-6 + (2 * kv_bytes * (1 - ratio)) / (32e9 * 0.8)) * 1000.0
     assert transfer == pytest.approx(expected, rel=1e-9)
-    assert peak == 100.0 - kv_bytes / 1024**3 * (1 - ratio)
 
 
 def test_prefill_offload_rejects_unconfigured_host_link():
@@ -284,7 +278,7 @@ def test_prefill_offload_transfer_includes_host_latency():
     # decode path estimator (review: prefill transfer omitted host_latency_s).
     runner = _stub_runner(enable_prefill_kv_offload=True)
     kv_bytes = 1024**3
-    peak, kv_gb, mode, pool, transfer = _apply_prefill(runner, kv_bytes=kv_bytes, layers=78)
+    kv_gb, mode, pool, transfer = _apply_prefill(runner, kv_bytes=kv_bytes, layers=78)
     ratio = 2 / 78
     expected = (5e-6 + (2 * kv_bytes * (1 - ratio)) / (32e9 * 0.8)) * 1000.0
     assert transfer == pytest.approx(expected, rel=1e-9)

@@ -77,12 +77,9 @@ def test_apply_decode_kv_offload_accounting_off_is_noop():
 
     kv = int(2 * 1024**3)
     idx = int(0.1 * 1024**3)
-    peak, kv_size, mode, host_pool, transfer = runner._apply_decode_kv_offload_accounting(
-        10.0, kv, idx, 124928, 4, True
-    )
+    kv_size, mode, host_pool, transfer = runner._apply_decode_kv_offload_accounting(kv, idx, 124928, 4, True)
     assert mode == "none"
     assert transfer == 0.0 and host_pool == 0.0
-    assert peak == 10.0
     assert kv_size == pytest.approx((kv + idx) / 1024**3)
 
 
@@ -111,14 +108,10 @@ def test_apply_decode_kv_offload_accounting_on_decode():
     kv = int(2 * 1024**3)
     idx = int(0.1 * 1024**3)
     mkpt = 124928
-    peak_in = 10.0
     batch = 4
-    peak, kv_size, mode, host_pool, transfer = runner._apply_decode_kv_offload_accounting(
-        peak_in, kv, idx, mkpt, batch, True
-    )
+    kv_size, mode, host_pool, transfer = runner._apply_decode_kv_offload_accounting(kv, idx, mkpt, batch, True)
     assert mode == "decode"
     hot = decode_hot_buffer_bytes(mkpt, topk=2048, buffer_multiplier=2.0, num_seqs=batch)
-    assert peak == pytest.approx(peak_in - kv / 1024**3 + hot / 1024**3)
     assert kv_size == pytest.approx((idx + hot) / 1024**3)
     assert host_pool == pytest.approx(kv / 1024**3)
     expected_transfer = decode_offload_miss_transfer_time_ms(
@@ -150,11 +143,10 @@ def test_apply_decode_kv_offload_accounting_on_but_prefill_skipped():
     runner.device_profile = TEST_DEVICE
     runner.model = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=2048)))
 
-    peak, kv_size, mode, host_pool, transfer = runner._apply_decode_kv_offload_accounting(
-        10.0, int(2 * 1024**3), 0, 124928, 4, False
+    kv_size, mode, host_pool, transfer = runner._apply_decode_kv_offload_accounting(
+        int(2 * 1024**3), 0, 124928, 4, False
     )
     assert mode == "none" and transfer == 0.0 and host_pool == 0.0
-    assert peak == 10.0
 
 
 def test_apply_prefill_kv_offload_accounting_off_is_noop():
@@ -167,11 +159,8 @@ def test_apply_prefill_kv_offload_accounting_off_is_noop():
 
     kv = int(2 * 1024**3)
     idx = int(0.1 * 1024**3)
-    peak, kv_size, mode, host_pool, transfer = runner._apply_prefill_kv_offload_accounting(
-        10.0, kv, idx, 124928, 4, False, 80
-    )
+    kv_size, mode, host_pool, transfer = runner._apply_prefill_kv_offload_accounting(kv, idx, 124928, 4, False, 80)
     assert mode == "none" and transfer == 0.0 and host_pool == 0.0
-    assert peak == 10.0
     assert kv_size == pytest.approx((kv + idx) / 1024**3)
 
 
@@ -192,15 +181,13 @@ def test_apply_prefill_kv_offload_accounting_on_prefill():
     kv = int(2 * 1024**3)
     idx = int(0.1 * 1024**3)
     n_layers = 80
-    peak_in = 10.0
-    peak, kv_size, mode, host_pool, transfer = runner._apply_prefill_kv_offload_accounting(
-        peak_in, kv, idx, 124928, 4, False, n_layers
+    kv_size, mode, host_pool, transfer = runner._apply_prefill_kv_offload_accounting(
+        kv, idx, 124928, 4, False, n_layers
     )
     assert mode == "prefill"
     ratio = prefill_layerwise_footprint_ratio(n_layers, 0, 2)
     kv_gb = kv / 1024**3
     idx_gb = idx / 1024**3
-    assert peak == pytest.approx(peak_in - kv_gb * (1 - ratio))
     assert kv_size == pytest.approx(ratio * kv_gb + idx_gb)
     assert host_pool == pytest.approx(kv_gb * (1 - ratio))
     bw = TEST_DEVICE.host_bandwidth_bytes_ps * TEST_DEVICE.host_transfer_efficiency
@@ -222,8 +209,7 @@ def test_apply_prefill_kv_offload_accounting_on_but_decode_skipped():
     runner.user_input = ui
     runner.device_profile = TEST_DEVICE
 
-    peak, kv_size, mode, host_pool, transfer = runner._apply_prefill_kv_offload_accounting(
-        10.0,
+    kv_size, mode, host_pool, transfer = runner._apply_prefill_kv_offload_accounting(
         int(2 * 1024**3),
         0,
         124928,
@@ -232,7 +218,6 @@ def test_apply_prefill_kv_offload_accounting_on_but_decode_skipped():
         80,  # is_decode=True -> skip
     )
     assert mode == "none" and transfer == 0.0 and host_pool == 0.0
-    assert peak == 10.0
 
 
 def test_atlas_a_series_host_link_configuration():

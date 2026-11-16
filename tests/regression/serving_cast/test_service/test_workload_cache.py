@@ -16,7 +16,6 @@
 
 import pickle
 import threading
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
@@ -408,7 +407,7 @@ class TestWorkloadCache(TestCase):
         trace.replay.assert_called_once_with(runtime)
 
     @patch("serving_cast.service.workload_cache.Runtime")
-    def test_replay_recalibrates_raw_peak_for_target_device(self, runtime_cls):
+    def test_replay_keeps_direct_peak_across_target_devices(self, runtime_cls):
         runner = WorkloadReuseModelRunner.__new__(WorkloadReuseModelRunner)
         runner.perf_models = []
         runner.device_profile = MagicMock()
@@ -421,6 +420,10 @@ class TestWorkloadCache(TestCase):
         )
         runtime_cls.return_value.total_execution_time_s.return_value = {}
         runtime_cls.return_value.memory_tracker.peak_mem_usage.return_value = 0
+        summary = runtime_cls.return_value.memory_tracker.get_forward_memory_summary.return_value
+        summary.activation_peak_bytes = 10 * 1024**3
+        summary.request_input_bytes = 0
+        summary.peak_memory_bytes.return_value = 17 * 1024**3
         runtime_cls.return_value.event_list = []
         workload = RuntimeWorkload(
             MagicMock(),
@@ -430,29 +433,19 @@ class TestWorkloadCache(TestCase):
             0.0,
             0.0,
             2,
-            param_matched_size_gb=5.0,
-            derived_resident_size_gb=4.0,
-            intermediate_peak_size_gb=10.0,
-            raw_peak_memory_usage_gb=19.0,
         )
         requests = [RequestInfo(1, 1, is_decode=False), RequestInfo(2, 2, is_decode=False)]
 
         runner.total_device_memory_gb = 16.0
-        calibrated = runner._estimate(workload, requests=requests)
-        self.assertEqual(calibrated.peak_memory_usage_gb, 10.0)
-        self.assertEqual(calibrated.device_memory_available_gb, 6.0)
-        self.assertEqual(calibrated.model_activation_size_gb, 1.0)
+        result = runner._estimate(workload, requests=requests)
+        self.assertEqual(result.peak_memory_usage_gb, 17.0)
+        self.assertEqual(result.device_memory_available_gb, -1.0)
+        self.assertEqual(result.model_activation_size_gb, 10.0)
 
-        # Trace-derived memory includes 2 GB of KV, but only 1 GB is on device.
-        offloaded = replace(workload, kv_cache_size_gb=1.0, raw_peak_memory_usage_gb=18.0, non_kv_resident_size_gb=2.0)
-        calibrated = runner._estimate(offloaded, requests=requests)
-        self.assertEqual(calibrated.peak_memory_usage_gb, 9.0)
-        self.assertEqual(calibrated.device_memory_available_gb, 7.0)
-
-        runner.total_device_memory_gb = 20.0
-        uncalibrated = runner._estimate(workload, requests=requests)
-        self.assertEqual(uncalibrated.peak_memory_usage_gb, 19.0)
-        self.assertEqual(uncalibrated.model_activation_size_gb, 10.0)
+        runner.total_device_memory_gb = 32.0
+        second = runner._estimate(workload, requests=requests)
+        self.assertEqual(second.peak_memory_usage_gb, 17.0)
+        self.assertEqual(second.device_memory_available_gb, 15.0)
 
     def test_claim_wait_and_publish_are_single_flight(self):
         cache = WorkloadCache()

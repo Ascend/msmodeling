@@ -348,10 +348,9 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         for _ in range(2):
             tracker = MemoryTracker(device)
             with Runtime(AnalyticPerformanceModel(device), device, memory_tracker=tracker), torch.no_grad():
-                tracker.register_model_params(model)
+                tracker.register_static_weight(model.weight)
                 compiled(x)
-            self.assertEqual(tracker.peak_param_bytes(), 8 * 8 * 4)
-            self.assertEqual(tracker.unexecuted_param_bytes(model.named_parameters()), 0)
+            self.assertEqual(tracker.get_forward_memory_summary().request_input_bytes, x.numel() * x.element_size())
 
     def test_attention_dit_eager(self):
         B, S, num_heads, head_dim = 2, 256, 6, 64

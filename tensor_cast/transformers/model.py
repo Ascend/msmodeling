@@ -445,6 +445,20 @@ class TransformerModel(ModelWrapperBase):
             parent_module = self._inner.get_submodule(parent_name)
         setattr(parent_module, child_name, new_module)
 
+    def iter_weight_tensor_registrations(self):
+        """Yield identities and representative-layer flags without changing weight totals."""
+        from ..layers.internal import RegionMarkerWrapper
+
+        templates = set()
+        for module in self.modules():
+            if isinstance(module, RegionMarkerWrapper) and module.repeat_count > 1:
+                templates.update(id(t) for t in module._inner.parameters())
+                templates.update(id(t) for t in module._inner.buffers())
+        for tensor in self.parameters():
+            yield tensor, id(tensor) in templates
+        for tensor in self.buffers():
+            yield tensor, id(tensor) in templates
+
     @staticmethod
     def get_weight_size_nested(modules):
         total_size = 0

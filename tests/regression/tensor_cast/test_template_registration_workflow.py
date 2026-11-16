@@ -75,6 +75,7 @@ def test_shipped_glm_decode_matches_native_batched_mla_contract(tp, batch):
 @pytest.mark.parametrize('has_pixels', [False, True])
 def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixels):
     from tensor_cast.core import model_runner as module
+    from tensor_cast.core import input_generator as input_generator_module
 
     class Runtime(SimpleNamespace):
         def __enter__(self):
@@ -107,10 +108,14 @@ def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixel
     runner.model = SimpleNamespace(
         model_config=SimpleNamespace(
             parallel_config=SimpleNamespace(data_parallel_size=1), hf_config=SimpleNamespace(model_type='fixture')
-        )
+        ),
+        get_weight_size_nested=lambda _: 2 * 1024**3,
+        get_represented_extra_weight_size=lambda _: 0,
+        named_parameters=lambda: (),
+        named_buffers=lambda: (),
     )
     monkeypatch.setattr(module, 'dcp_kv_token_capacity_factor', lambda _: 1)
-    monkeypatch.setattr(module, 'kv_cache_excluded_layer_indices', lambda _: {2})
+    monkeypatch.setattr(input_generator_module, 'kv_cache_excluded_layer_indices', lambda _: {2})
     monkeypatch.setattr(runner, '_ensure_compiled', lambda: pytest.fail('supplied graph must not compile'))
     cache = torch.empty(1024, device='meta', dtype=torch.uint8)
     inputs = dict(
@@ -124,20 +129,25 @@ def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixel
         compressed_kv_cache_per_token=8,
         pixel_values=torch.empty(1, device='meta') if has_pixels else None,
     )
+    summary = SimpleNamespace(
+        request_input_bytes=0,
+        activation_peak_bytes=512 * 1024**2,
+        peak_memory_bytes=lambda weight_bytes, cache_bytes: weight_bytes + cache_bytes + 512 * 1024**2,
+    )
+    tracker = SimpleNamespace(
+        register_model_memory=lambda *_: None,
+        get_forward_memory_summary=lambda: summary,
+        peak_mem_usage=lambda: 10 * 1024**3,
+    )
     runtime = Runtime(
         event_list=[],
-        memory_tracker=SimpleNamespace(
-            # The supplied template graph accounts only for a representative
-            # layer, so its raw peak is lower than full resident weights.
-            peak_mem_usage=lambda: 1 * 1024**3,
-            peak_intermediate_bytes=lambda: 512 * 1024**2,
-        ),
+        memory_tracker=tracker,
         total_execution_time_s=lambda: {'analytic': 0.1},
         table_averages=lambda **_: [],
         get_breakdowns=lambda: {},
     )
     monkeypatch.setattr(module, 'Runtime', lambda *_a, **_k: runtime)
-    monkeypatch.setattr(module, 'MemoryTracker', lambda _: object())
+    monkeypatch.setattr(module, 'MemoryTracker', lambda _: tracker)
     provided = []
 
     def supply(kwargs):
@@ -153,14 +163,13 @@ def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixel
         graph_provider=supply,
     )
     assert provided == ['graph'] and runtime.op_invoke_infos == ['supplied-ops']
-    assert metrics.kv_cache_size_gb == 3 * 1024 / 1024**3
+    # All cache dictionaries intentionally reference the same tensor; the
+    # unified inventory charges that physical storage once.
+    assert metrics.kv_cache_size_gb == 1024 / 1024**3
     assert metrics.kv_cache_per_token_gb == 28 / 1024**3
     assert metrics.model_weight_size_gb == 4
     expected_activation_gb = 0.5
-    expected_peak_gb = max(
-        1.0,
-        metrics.model_weight_size_gb + metrics.kv_cache_size_gb + expected_activation_gb,
-    )
+    expected_peak_gb = metrics.model_weight_size_gb + metrics.kv_cache_size_gb + expected_activation_gb
     assert metrics.model_activation_size_gb == pytest.approx(expected_activation_gb)
     assert metrics.peak_memory_usage_gb == pytest.approx(expected_peak_gb)
     assert metrics.device_memory_available_gb == pytest.approx(

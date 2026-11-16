@@ -431,7 +431,9 @@ class ModelRunner:
         ]
         inference_metrics = self.tensor_cast_model_runner.run_inference(batch, with_sampler=True)
         block_size = self.common_config.serving_config.block_size
-        all_mem_for_kv_cache = inference_metrics.device_memory_available_gb + inference_metrics.kv_cache_size_gb
+        # Only the token-dependent part can be reclaimed for KV blocks.
+        variable_kv_cache_gb = inference_metrics.kv_cache_size_gb - inference_metrics.fixed_cache_size_gb
+        all_mem_for_kv_cache = inference_metrics.device_memory_available_gb + variable_kv_cache_gb
         num_blocks = int(all_mem_for_kv_cache / inference_metrics.kv_cache_per_token_gb // block_size)
         # Decode Context Parallel shards the KV cache along the token dimension, so
         # the same per-card byte budget can hold more tokens. The factor is 1 when DCP

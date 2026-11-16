@@ -1091,8 +1091,7 @@ def test_v41_offload_disabled_preserves_cache_accounting():
     runner = object.__new__(ModelRunner)
     runner.user_input = SimpleNamespace()
     runner.model = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v41")))
-    assert runner._apply_kv_offload_accounting(10.0, 1024, 128, 32, 1, False, 2) == (
-        10.0,
+    assert runner._apply_kv_offload_accounting(1024, 128, 32, 1, False, 2) == (
         1152 / 1024**3,
         "none",
         0.0,

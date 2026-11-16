@@ -817,22 +817,19 @@ class TestModelRunnerProfilingMetrics:
         pm = self._make_empirical_pm(hit_shapes=set())
 
         class FakeMemoryTracker:
-            def peak_mem_usage(self):
-                return 0
-
-            def register_model_params(self, _model):
+            def register_model_memory(self, _model, _inventory):
                 pass
 
-            def unexecuted_param_bytes(self, _named_tensors):
-                return 0
+            def register_model_outputs(self, _outputs):
+                pass
 
-            def peak_intermediate_bytes(self):
-                return 0
+            def get_forward_memory_summary(self):
+                return SimpleNamespace(
+                    activation_peak_bytes=0,
+                    peak_memory_bytes=lambda weight_bytes, cache_bytes: weight_bytes + cache_bytes,
+                )
 
-            def peak_param_bytes(self):
-                return 0
-
-            def peak_derived_resident_bytes(self):
+            def peak_mem_usage(self):
                 return 0
 
         class FakeRuntime:
@@ -880,7 +877,11 @@ class TestModelRunnerProfilingMetrics:
 
         monkeypatch.setattr(model_runner_module, "Runtime", FakeRuntime)
         monkeypatch.setattr(model_runner_module, "MemoryTracker", lambda _device: FakeMemoryTracker())
-        monkeypatch.setattr(model_runner_module, "kv_cache_excluded_layer_indices", lambda _model: set())
+        monkeypatch.setattr(
+            model_runner_module,
+            "collect_cache_memory",
+            lambda _model, _kwargs: SimpleNamespace(entries=(), fixed_bytes=0),
+        )
         monkeypatch.setattr(model_runner_module, "dcp_kv_token_capacity_factor", lambda _model: 1)
 
         runner = object.__new__(ModelRunner)

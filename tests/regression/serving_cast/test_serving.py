@@ -60,6 +60,7 @@ class ServingTestCase(unittest.TestCase):
         self.fake_ret.execution_time_s = self.dummy_duration
         self.fake_ret.device_memory_available_gb = 40.0
         self.fake_ret.kv_cache_size_gb = 0
+        self.fake_ret.fixed_cache_size_gb = 0
         self.fake_ret.kv_cache_per_token_gb = 0.001
         self.fake_ret.kv_cache_token_capacity_factor = 1
         self.latency_thresholds = build_latency_thresholds(

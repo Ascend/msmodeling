@@ -161,26 +161,10 @@ class _ChunkedAggMetrics:
     decode_latency_source: str = "exact"
 
     @property
-    def derived_resident_size_gb(self) -> float:
-        """Derived-resident size for the per-request memory budget.
-
-        Reads the wave's ``memory_info`` — the account's single source — so
-        waves with a classified ``memory_info`` contribute their real value.
-        Unclassified waves (no ``memory_info`` at all, or the NaN
-        placeholders of PP hand-built dicts) contribute 0.0 so the
-        linear-exponential search budget is never poisoned by NaN.
-        """
-        value = (self.memory_info or {}).get("derived_resident_size_gb", 0.0)
-        return 0.0 if math.isnan(value) else value
-
-    @property
     def kv_cache_size_gb(self) -> float:
         """KV-cache size for the per-request memory budget (PR #906 review #2).
 
-        Same NaN-tolerant read as ``derived_resident_size_gb``: the KV part
-        of derived residents scales with concurrency and is amortized into
-        the per-request term by ``_compute_per_request_memory_gb`` instead of
-        being deducted as a fixed cost.
+        Missing hand-built PP memory records contribute zero rather than NaN.
         """
         info = self.memory_info or {}
         value = info.get("forward_kv_cache_size_gb", info.get("kv_cache_size_gb", 0.0))
@@ -316,8 +300,6 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             metrics.prefill_breakdowns,
             metrics.decode_breakdowns,
             memory_info["model_weight_size_gb"] if memory_info else float("nan"),
-            memory_info["param_matched_size_gb"] if memory_info else float("nan"),
-            memory_info["derived_resident_size_gb"] if memory_info else float("nan"),
             memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
             memory_info["model_activation_size_gb"] if memory_info else float("nan"),
             memory_info["device_memory_available_gb"] if memory_info else float("nan"),
@@ -363,8 +345,6 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             metrics.ttft,
             metrics.tpot,
             summary,
-            derived_resident_size_gb=metrics.derived_resident_size_gb,
-            kv_cache_size_gb=metrics.kv_cache_size_gb,
         )
 
         return summary
@@ -584,8 +564,6 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         memory_info = {
             "total_device_memory_gb": runner.total_device_memory_gb,
             "model_weight_size_gb": float("nan"),
-            "param_matched_size_gb": float("nan"),
-            "derived_resident_size_gb": float("nan"),
             "kv_cache_size_gb": float("nan"),
             "model_activation_size_gb": float("nan"),
             "reserved_memory_gb": float(runner.user_input.reserved_memory_gb or 0.0),

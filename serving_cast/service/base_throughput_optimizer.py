@@ -15,7 +15,6 @@
 # -------------------------------------------------------------------------
 
 import logging
-import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -481,35 +480,11 @@ class BaseThroughputOptimizer(ABC):
         reserved_memory_gb,
         memory_left_gb,
         batch_size,
-        derived_resident_size_gb=0.0,
-        kv_cache_size_gb=0.0,
     ):
-        """Per-request memory from the stored accounts (reported fallback value).
-
-        PR #906 review #2: the derived-resident account contains KV-cache-like
-        inputs that scale with tokens/concurrency, so they must be amortized
-        into the per-request term instead of being deducted once as a
-        batch-independent fixed cost.  Only the non-KV remainder is treated as
-        fixed here.  Account names cannot fully classify scaling (hybrid
-        linear-attention persistent state and V4 per-request compressed pools
-        live outside the KV account), so the two-probe incremental slope in
-        ``_estimate_right_boundary`` is the primary defense; this stored value
-        is the reported fallback and a lower bound.
-        """
+        """Average non-weight memory per request for the reported fallback value."""
         if batch_size <= 0:
             return 0
-        if derived_resident_size_gb is None or math.isnan(derived_resident_size_gb):
-            derived_resident_size_gb = 0.0
-        if kv_cache_size_gb is None or math.isnan(kv_cache_size_gb):
-            kv_cache_size_gb = 0.0
-        fixed_derived_resident_size_gb = max(derived_resident_size_gb - kv_cache_size_gb, 0.0)
-        return (
-            total_device_memory_gb
-            - model_weight_size_gb
-            - fixed_derived_resident_size_gb
-            - reserved_memory_gb
-            - memory_left_gb
-        ) / batch_size
+        return (total_device_memory_gb - model_weight_size_gb - reserved_memory_gb - memory_left_gb) / batch_size
 
     def _maybe_set_search_info(
         self,
@@ -519,8 +494,6 @@ class BaseThroughputOptimizer(ABC):
         ttft,
         tpot,
         summary,
-        derived_resident_size_gb=0.0,
-        kv_cache_size_gb=0.0,
     ):
         if optimizer_data.concurrency_search_strategy == "linear_exponential":
             per_request_memory_gb = self._compute_per_request_memory_gb(
@@ -529,8 +502,6 @@ class BaseThroughputOptimizer(ABC):
                 self.model_runner.user_input.reserved_memory_gb,
                 memory_left_gb,
                 batch_size,
-                derived_resident_size_gb=derived_resident_size_gb,
-                kv_cache_size_gb=kv_cache_size_gb,
             )
 
             summary.set_search_info(

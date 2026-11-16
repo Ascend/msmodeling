@@ -50,6 +50,7 @@ import torch
 
 from ..custom_model_registry import ModelProfile, get_visual_layers, register_model_profile
 from ...layers.internal import CopyLayerWrapper, RegionMarkerWrapper
+from ...memory_accounting import CacheMemoryEntry, register_cache_memory_collector
 
 logger = logging.getLogger(__name__)
 
@@ -1983,8 +1984,8 @@ class K3IdentityRotaryEmb(torch.nn.Module):
         return cos, sin
 
 
-def _k3_kda_state_size_gb(model) -> float:
-    """Per-rank KDA state (``recurrent_states`` + ``conv_states``) memory in GB.
+def _k3_kda_state_bytes_per_layer(model, batch_size: int = 1) -> int:
+    """Per-layer, per-rank KDA persistent-state capacity in bytes.
 
     K3 hybrid attention uses KDA (``KimiDeltaAttention``, ~69/93 layers) with
     a *fixed-size* recurrent state plus a short-conv tail state. Unlike MLA's
@@ -1994,8 +1995,7 @@ def _k3_kda_state_size_gb(model) -> float:
     MSModeling's ``kv_cache_excluded_layer_indices`` correctly excludes KDA
     layers from per-token KV cache accounting (they are not paged), but this
     also drops KDA's fixed state from the memory budget entirely. This
-    helper computes the per-rank persistent footprint so the ModelRunner patch can fold it
-    back into the memory figures.
+    helper computes the exact integer-byte footprint for one KDA layer.
 
     The persistent state buffers we account for are:
 
@@ -2008,35 +2008,32 @@ def _k3_kda_state_size_gb(model) -> float:
 
     KDA attention is TP-sharded by heads (same policy as MLA — see P5
     ``_k3_build_tp_plan_extras``), so each rank maintains state for
-    ``num_heads_per_rank`` heads. Steady-state decode keeps ``batch_size=1``
-    per rank for the *persistent* state buffers; prefill allocates larger
-    transient buffers, but only the persistent footprint survives across
-    tokens, matching MLA's per-token KV accounting philosophy.
+    ``num_heads_per_rank`` heads. Each live sequence owns a persistent state;
+    callers pass the rank-local sequence count as ``batch_size``.
 
-    Returns 0.0 for non-K3 models or when ``linear_attn_config`` is missing,
+    Returns 0 for non-K3 models or when ``linear_attn_config`` is missing,
     so callers can invoke unconditionally.
     """
     try:
         model_config = getattr(model, "model_config", None)
         if model_config is None:
-            return 0.0
+            return 0
         hf_config = getattr(model_config, "hf_config", None)
         if hf_config is None or getattr(hf_config, "model_type", None) != "kimi_k3":
-            return 0.0
+            return 0
         # K3 is a VL model; ``linear_attn_config`` lives on ``text_config``.
         # ModelWrapper exposes ``text_config`` on the wrapped model; fall
         # back to the HF config's nested ``text_config`` if the wrapper
         # does not.
         text_config = getattr(model, "text_config", None) or getattr(hf_config, "text_config", None)
         if text_config is None:
-            return 0.0
+            return 0
         linear_attn_cfg = getattr(text_config, "linear_attn_config", None)
         if not isinstance(linear_attn_cfg, dict):
-            return 0.0
+            return 0
         kda_layers = linear_attn_cfg.get("kda_layers") or []
         if not kda_layers:
-            return 0.0
-        num_kda_layers = len(kda_layers)
+            return 0
         head_dim = int(linear_attn_cfg.get("head_dim", 128) or 128)
         num_heads = int(linear_attn_cfg.get("num_heads", 96) or 96)
         short_conv_kernel_size = int(linear_attn_cfg.get("short_conv_kernel_size", 4) or 4)
@@ -2047,7 +2044,8 @@ def _k3_kda_state_size_gb(model) -> float:
             tp_size = 1
         num_heads_per_rank = max(1, num_heads // tp_size)
 
-        batch_size = 1
+        if batch_size < 0:
+            raise ValueError("KDA state batch_size must be non-negative")
 
         recurrent_state_bytes_per_layer = (
             batch_size * num_heads_per_rank * head_dim * head_dim * 4  # fp32
@@ -2056,11 +2054,36 @@ def _k3_kda_state_size_gb(model) -> float:
             3 * batch_size * (short_conv_kernel_size - 1) * (num_heads_per_rank * head_dim) * 2  # bf16
         )
 
-        total_bytes = num_kda_layers * (recurrent_state_bytes_per_layer + conv_state_bytes_per_layer)
-        return total_bytes / 1024**3
+        return recurrent_state_bytes_per_layer + conv_state_bytes_per_layer
     except Exception as e:
         logger.warning("Failed to compute K3 KDA state size: %s", e)
-        return 0.0
+        return 0
+
+
+@register_cache_memory_collector("kimi_k3")
+def _collect_kimi_kda_cache_entries(model, input_kwargs, excluded) -> tuple[CacheMemoryEntry, ...]:
+    """Describe K3 fixed state separately from its forward-only placeholders."""
+    if not excluded:
+        return ()
+
+    attention_meta = input_kwargs.get("attention_meta")
+    seq_lens = getattr(attention_meta, "seq_lens", None)
+    batch_size = int(seq_lens.numel()) if isinstance(seq_lens, torch.Tensor) else 1
+    per_layer_bytes = _k3_kda_state_bytes_per_layer(model, batch_size=batch_size)
+    layer_indices = sorted(excluded)
+    entries = []
+    for layer_idx in layer_indices:
+        placeholder = input_kwargs["kv_cache_by_layers"][layer_idx]
+        entries.append(
+            CacheMemoryEntry(
+                owner_key=f"kimi_kda_state:{layer_idx}",
+                tensors=(placeholder,),
+                size_bytes=per_layer_bytes,
+                token_pool_bytes=0,
+                layer_index=layer_idx,
+            )
+        )
+    return tuple(entries)
 
 
 def _make_k3_mla_prolog_hook(original_compute_mla_prolog):
@@ -3625,82 +3648,28 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
         logger.warning(f"Could not patch K3 KimiLinearForCausalLM.forward for PP: {e}")
         partial_failure = True
 
-    # =================================================================
-    # KDA state memory accounting (recurrent_states + conv_states)
-    # ----------------------------------------------------------------
-    # K3 hybrid attention uses KDA (``KimiDeltaAttention``, ~69/93
-    #      layers) with a *fixed-size* recurrent state plus a short-conv
-    #      tail state. Unlike MLA's paged KV cache, KDA state does NOT
-    #      grow with context length T, but it DOES occupy real GPU memory
-    #      and must NOT be treated as zero memory.
-    #
-    #      MSModeling's ``kv_cache_excluded_layer_indices`` correctly
-    #      excludes KDA layers from per-token KV cache accounting (they
-    #      are not paged), but this exclusion also drops KDA's fixed state
-    #      from the memory budget entirely. The simulation then reports
-    #      ``KV cache: 0.221 GB`` (MLA only) and
-    #      ``Model activation size: 0.000 GB``, giving the false
-    #      impression that KDA has zero memory footprint.
-    #
-    # Monkey-patch ``ModelRunner.run_inference`` and
-    #      ``ModelRunner._build_pipeline_metrics`` to inject KDA state
-    #      bytes into the returned ``ModelRunnerMetrics``:
-    #        - ``kv_cache_size_gb``       += kda_state_gb  (KV-like memory)
-    #        - ``peak_memory_usage_gb``  += kda_state_gb  (real GPU memory)
-    #        - ``device_memory_available_gb`` -= kda_state_gb
-    #        - ``kda_state_size_gb``      = kda_state_gb  (new attribute
-    #          consumed by ``ModelRunnerMetrics.print_info`` to print the
-    #          KDA state line as a peak component alongside the four
-    #          tracker accounts)
-    #
-    #      ``_k3_kda_state_size_gb(model)`` returns 0.0 for non-K3 models
-    #      or when ``linear_attn_config`` is missing, so the patch is a
-    #      pure no-op for every other model — no behavior change, no
-    #      attribute injection, no extra print line.
-    # =================================================================
+    # Keep K3's region markers and torch.empty stubs out of meta constant folding.
     try:
         from tensor_cast.core.model_runner import ModelRunner as _K3_ModelRunner
 
-        if not getattr(_K3_ModelRunner, "_tensor_cast_k3_kda_accounting", False):
+        if not getattr(_K3_ModelRunner, "_tensor_cast_k3_constant_folder_guard", False):
             _orig_run_inference_k3 = _K3_ModelRunner.run_inference
-            _orig_build_pipeline_metrics_k3 = _K3_ModelRunner._build_pipeline_metrics
 
-            def _k3_inject_kda_state(metrics, kda_gb):
-                """Mutate ``metrics`` in place to fold KDA state into the
-                KV-cache/peak/available figures and attach the breakdown
-                attribute. No-op when ``kda_gb`` is 0.
-                """
-                if kda_gb <= 0:
-                    return
-                metrics.kda_state_size_gb = kda_gb
-                metrics.kv_cache_size_gb += kda_gb
-                metrics.peak_memory_usage_gb += kda_gb
-                metrics.device_memory_available_gb -= kda_gb
-
-            def _patched_run_inference_k3(self, *args, **kwargs):
+            def _run_inference_with_k3_constant_folder_guard(self, *args, **kwargs):
                 # Scope the MetaConstantFolder guard to this run so dynamo
                 # compilation (which happens inside run_inference) never
                 # folds K3's region markers / torch.empty stub allocations,
                 # while other execution contexts keep the default policy.
                 with _k3_constant_folder_guard(getattr(self, "model", None)):
                     metrics = _orig_run_inference_k3(self, *args, **kwargs)
-                _k3_inject_kda_state(metrics, _k3_kda_state_size_gb(self.model))
                 return metrics
 
-            def _patched_build_pipeline_metrics_k3(self, pipeline_result, *, batch_size, run_time_s, **kwargs):
-                metrics = _orig_build_pipeline_metrics_k3(
-                    self, pipeline_result, batch_size=batch_size, run_time_s=run_time_s, **kwargs
-                )
-                _k3_inject_kda_state(metrics, _k3_kda_state_size_gb(self.model))
-                return metrics
-
-            _K3_ModelRunner.run_inference = _patched_run_inference_k3
-            _K3_ModelRunner._build_pipeline_metrics = _patched_build_pipeline_metrics_k3
-            _K3_ModelRunner._tensor_cast_k3_kda_accounting = True
+            _K3_ModelRunner.run_inference = _run_inference_with_k3_constant_folder_guard
+            _K3_ModelRunner._tensor_cast_k3_constant_folder_guard = True
             patched = True
-            logger.info("Patched ModelRunner/ModelRunnerMetrics for K3 KDA state memory accounting.")
+            logger.info("Patched ModelRunner with the K3 constant-folder guard.")
     except Exception as e:
-        logger.warning(f"Could not patch ModelRunner for K3 KDA state accounting: {e}")
+        logger.warning(f"Could not install the K3 constant-folder guard: {e}")
         partial_failure = True
 
     # Stamp the marker on the remote module objects only when every patch

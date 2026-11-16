@@ -69,8 +69,6 @@ class TestKimiK3(unittest.TestCase):
             "peak_memory_usage_gb",
             "kv_cache_size_gb",
             "model_activation_size_gb",
-            "param_matched_size_gb",
-            "derived_resident_size_gb",
             "device_memory_available_gb",
             "execution_time_s",
             "table_result",
@@ -704,9 +702,9 @@ class TestKimiK3Patches(unittest.TestCase):
         # Neutralize the process-level patches (ModelWrapper / ModelRunner
         # accounting) so this test only exercises the remote-module guard.
         saved_mw_flag = getattr(ModelWrapper, "_patched_for_k3_mtp", None)
-        saved_runner_flag = getattr(ModelRunner, "_tensor_cast_k3_kda_accounting", None)
+        saved_runner_flag = getattr(ModelRunner, "_tensor_cast_k3_constant_folder_guard", None)
         ModelWrapper._patched_for_k3_mtp = True
-        ModelRunner._tensor_cast_k3_kda_accounting = True
+        ModelRunner._tensor_cast_k3_constant_folder_guard = True
 
         try:
             k3_module, linear_module, vl_cls = _build_fake_package()
@@ -738,7 +736,7 @@ class TestKimiK3Patches(unittest.TestCase):
                 restore2()
         finally:
             _restore_flag(ModelWrapper, "_patched_for_k3_mtp", saved_mw_flag)
-            _restore_flag(ModelRunner, "_tensor_cast_k3_kda_accounting", saved_runner_flag)
+            _restore_flag(ModelRunner, "_tensor_cast_k3_constant_folder_guard", saved_runner_flag)
 
     def test_patch_model_classes_not_marked_after_partial_failure(self):
         """Issue #596 review: when a patch block swallows an exception, the
@@ -833,9 +831,9 @@ class TestKimiK3Patches(unittest.TestCase):
             model_type = "kimi_k3"
 
         saved_mw_flag = getattr(ModelWrapper, "_patched_for_k3_mtp", None)
-        saved_runner_flag = getattr(ModelRunner, "_tensor_cast_k3_kda_accounting", None)
+        saved_runner_flag = getattr(ModelRunner, "_tensor_cast_k3_constant_folder_guard", None)
         ModelWrapper._patched_for_k3_mtp = True
-        ModelRunner._tensor_cast_k3_kda_accounting = True
+        ModelRunner._tensor_cast_k3_constant_folder_guard = True
 
         marker = self._km._K3_MODULE_PATCH_MARKER
         saved_gate = getattr(linear_module, "KimiMoEGate")
@@ -860,7 +858,7 @@ class TestKimiK3Patches(unittest.TestCase):
             setattr(linear_module, "KimiMoEGate", saved_gate)
             _restore()
             _restore_flag(ModelWrapper, "_patched_for_k3_mtp", saved_mw_flag)
-            _restore_flag(ModelRunner, "_tensor_cast_k3_kda_accounting", saved_runner_flag)
+            _restore_flag(ModelRunner, "_tensor_cast_k3_constant_folder_guard", saved_runner_flag)
 
     def test_non_quantized_mla_prolog_forwards_phase_metadata(self):
         """The K3 custom BF16 prolog must preserve Chunked-Prefill phase metadata."""
@@ -1330,6 +1328,33 @@ class TestSituPerformanceModel(unittest.TestCase):
         compute = props.compute_ops[torch.bfloat16]
         self.assertEqual(compute.gp_ops, 4 * 8 * _SITU_OPS_PER_ELEM)
         self.assertEqual(compute.mma_ops, 0)
+
+
+class TestKdaMemoryAccounting(unittest.TestCase):
+    def test_persistent_state_scales_with_rank_local_sequences(self):
+        from tensor_cast.transformers.builtin_model.kimi_k3 import _k3_kda_state_bytes_per_layer
+
+        hf_config = SimpleNamespace(
+            model_type="kimi_k3",
+            text_config=SimpleNamespace(
+                linear_attn_config={
+                    "kda_layers": [1, 2, 3],
+                    "head_dim": 16,
+                    "num_heads": 8,
+                    "short_conv_kernel_size": 4,
+                }
+            ),
+        )
+        model = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=hf_config,
+                parallel_config=SimpleNamespace(tensor_parallel_size=2),
+            ),
+            text_config=hf_config.text_config,
+        )
+
+        one_sequence = _k3_kda_state_bytes_per_layer(model, batch_size=1)
+        self.assertEqual(_k3_kda_state_bytes_per_layer(model, batch_size=8), 8 * one_sequence)
 
 
 if __name__ == "__main__":

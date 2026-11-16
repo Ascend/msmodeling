@@ -497,7 +497,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(large.memory_left_gb, 17.0)
         self.assertEqual(large.memory_info["kv_cache_size_gb"], 4.0)
 
-    def test_search_budget_uses_forward_kv_for_derived_resident_memory(self):
+    def test_search_budget_uses_direct_non_weight_memory(self):
         strategy = self.make_strategy()
         runner = strategy.model_runner
         runner.total_device_memory_gb = 20.0
@@ -505,8 +505,6 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         runner.get_resident_kv_cache_size_gb = lambda requests: float(len(requests))
         info = {
             "model_weight_size_gb": 5.0,
-            "param_matched_size_gb": 5.0,
-            "derived_resident_size_gb": 3.0,
             "kv_cache_size_gb": 1.0,
             "model_activation_size_gb": 1.0,
             "device_memory_available_gb": 11.0,
@@ -519,7 +517,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
 
         search_info = summary.get_search_info()
         self.assertEqual(search_info["device_memory_available_gb"], 8.0)
-        self.assertEqual(search_info["per_request_memory_gb"], 1.25)
+        self.assertEqual(search_info["per_request_memory_gb"], 1.75)
 
     def test_waiting_kv_reservation_rounds_pages_per_request(self):
         shape = RequestShape(True, 1, 8)

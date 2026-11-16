@@ -29,7 +29,7 @@ from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from multiprocessing.managers import SyncManager
 from types import SimpleNamespace
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from tensor_cast.device import DeviceProfile
@@ -39,9 +39,9 @@ from tensor_cast.runtime_workload import RuntimeWorkloadTrace, WorkloadFreezeErr
 
 
 logger = logging.getLogger(__name__)
-# v3 stores bounded CPU control-tensor values in workload traces. Invalidate v2
-# keys because their metadata-only traces lose value-dependent sequence lengths.
-_WORKLOAD_TRACE_SCHEMA_VERSION = 3
+# v4 retains resident owners and explicit output boundaries for activation
+# accounting. Older traces cannot reproduce these memory classifications.
+_WORKLOAD_TRACE_SCHEMA_VERSION = 4
 _DEFAULT_WORKLOAD_CACHE_MAX_BYTES = 512 * 1024**2
 _DEFAULT_WORKLOAD_INFLIGHT_TIMEOUT_S = 600.0
 _MODEL_KEY_FIELDS = (
@@ -107,29 +107,7 @@ class RuntimeWorkload:
     indexer_cache_size_gb: float
     indexer_cache_per_token_gb: float
     batch_size: int
-    # Three-account peak breakdown captured during trace capture.
-    # ``intermediate_peak_size_gb`` is the true activation; the other two
-    # are the non-intermediate components of peak.
-    #
-    # The fields are Optional so a caller that never captured the
-    # classification cannot silently pass "0.0 accounts" off as a real
-    # measurement: ``_estimate`` then re-derives the intermediate peak from
-    # the replay tracker and surfaces the param/derived split as NaN
-    # instead of reporting fake zeros.
-    param_matched_size_gb: Optional[float] = None
-    derived_resident_size_gb: Optional[float] = None
-    intermediate_peak_size_gb: Optional[float] = None
-    # Fourth account (Issue #463 follow-up): registered weights never
-    # consumed by any traced op but resident in real deployment.  The replayed
-    # trace does not contain them, so ``_estimate`` adds them back to peak.
-    unexecuted_resident_size_gb: float = 0.0
-    # Fifth account (PR #906 review): RegionMarkerWrapper-extrapolated
-    # representative-layer weight.  The replay reuses the representative
-    # tensors instead of materializing per-repeat copies, so ``_estimate``
-    # adds the extrapolated bytes back to peak (peak >= weight invariant).
-    represented_weight_size_gb: float = 0.0
-    raw_peak_memory_usage_gb: Optional[float] = None
-    non_kv_resident_size_gb: Optional[float] = None
+    fixed_cache_size_gb: float = 0.0
 
 
 class WorkloadCache:
@@ -486,17 +464,11 @@ class WorkloadReuseModelRunner:
                 trace=RuntimeWorkloadTrace.from_runtime(observed_runtimes[0]),
                 model_weight_size_gb=metrics.model_weight_size_gb,
                 kv_cache_size_gb=metrics.kv_cache_size_gb,
+                fixed_cache_size_gb=metrics.fixed_cache_size_gb,
                 kv_cache_per_token_gb=metrics.kv_cache_per_token_gb,
                 indexer_cache_size_gb=metrics.indexer_cache_size_gb,
                 indexer_cache_per_token_gb=metrics.indexer_cache_per_token_gb,
                 batch_size=metrics.batch_size,
-                param_matched_size_gb=metrics.param_matched_size_gb,
-                derived_resident_size_gb=metrics.derived_resident_size_gb,
-                intermediate_peak_size_gb=observed_runtimes[0].memory_tracker.peak_intermediate_bytes() / 1024**3,
-                unexecuted_resident_size_gb=metrics.unexecuted_resident_size_gb,
-                represented_weight_size_gb=metrics.represented_weight_size_gb,
-                raw_peak_memory_usage_gb=metrics.raw_peak_memory_usage_gb,
-                non_kv_resident_size_gb=metrics.non_kv_resident_size_gb,
             )
             self._cache.publish_workload(workload_key, workload, owner_token)
             owner_slot_released = True
@@ -543,63 +515,14 @@ class WorkloadReuseModelRunner:
         if runtime_observer is not None:
             runtime_observer(runtime)
 
-        peak_memory_usage_gb = runtime.memory_tracker.peak_mem_usage() / 1024**3
-        # Three-account breakdown: activation is the intermediate peak,
-        # taken directly from the capture-time MemoryTracker classification.
-        # No clamp is needed because the three accounts partition peak exactly.
-        # Unfilled (None) fields never masquerade as zero accounts: the
-        # intermediate peak can be re-derived from the replay tracker (its
-        # classification does not depend on param registration), while the
-        # param/derived split cannot be reconstructed on replay and is
-        # reported as NaN.
-        model_activation_size_gb = (
-            workload.intermediate_peak_size_gb
-            if workload.intermediate_peak_size_gb is not None
-            else runtime.memory_tracker.peak_intermediate_bytes() / 1024**3
-        )
-        param_matched_size_gb = (
-            workload.param_matched_size_gb if workload.param_matched_size_gb is not None else float("nan")
-        )
-        derived_resident_size_gb = (
-            workload.derived_resident_size_gb if workload.derived_resident_size_gb is not None else float("nan")
-        )
-        unexecuted_resident_size_gb = workload.unexecuted_resident_size_gb
-        # The replayed trace never touches the unexecuted-resident weights
-        # (that is their definition), so restore them into peak to match the
-        # capture-time metrics before computing available memory.
-        peak_memory_usage_gb += unexecuted_resident_size_gb
-        # Same for the fifth account: the replay reuses the representative
-        # layer's tensors instead of materializing per-repeat copies, so the
-        # extrapolated weight must be restored into peak to match the
-        # capture-time metrics (peak >= weight invariant, PR #906 review).
-        peak_memory_usage_gb += workload.represented_weight_size_gb
-        if workload.raw_peak_memory_usage_gb is not None:
-            # Capture includes the physical accounts. Re-evaluate the capacity
-            # threshold locally because a workload can be reused on another device.
-            peak_memory_usage_gb = workload.raw_peak_memory_usage_gb
-        raw_peak_memory_usage_gb = peak_memory_usage_gb
-        non_kv_resident_size_gb = workload.non_kv_resident_size_gb
-        if non_kv_resident_size_gb is None:
-            # Legacy workloads used the device KV size. The cache was bypassed
-            # for offload, so it matched the KV present in the trace.
-            non_kv_resident_size_gb = max(0.0, derived_resident_size_gb - workload.kv_cache_size_gb)
-        peak_memory_usage_gb, peak_calibrated = ModelRunner._check_peak_memory_usage_gb(
-            self,
-            peak_memory_usage_gb,
-            workload.kv_cache_size_gb,
-            requests,
-            model_activation_size_gb,
-            non_kv_resident_gb=non_kv_resident_size_gb,
-        )
-        if peak_calibrated:
-            model_activation_size_gb = max(
-                0.0,
-                peak_memory_usage_gb
-                - param_matched_size_gb
-                - derived_resident_size_gb
-                - unexecuted_resident_size_gb
-                - workload.represented_weight_size_gb,
+        summary = runtime.memory_tracker.get_forward_memory_summary()
+        model_activation_size_gb = summary.activation_peak_bytes / 1024**3
+        peak_memory_usage_gb = (
+            summary.peak_memory_bytes(
+                round(workload.model_weight_size_gb * 1024**3), round(workload.kv_cache_size_gb * 1024**3)
             )
+            / 1024**3
+        )
         device_memory_available_gb = (
             self.total_device_memory_gb - peak_memory_usage_gb - self.user_input.reserved_memory_gb
         )
@@ -627,17 +550,12 @@ class WorkloadReuseModelRunner:
             total_device_memory_gb=self.total_device_memory_gb,
             model_weight_size_gb=workload.model_weight_size_gb,
             peak_memory_usage_gb=peak_memory_usage_gb,
-            raw_peak_memory_usage_gb=raw_peak_memory_usage_gb,
-            non_kv_resident_size_gb=non_kv_resident_size_gb,
             kv_cache_size_gb=workload.kv_cache_size_gb,
+            fixed_cache_size_gb=workload.fixed_cache_size_gb,
             kv_cache_per_token_gb=workload.kv_cache_per_token_gb,
             indexer_cache_size_gb=workload.indexer_cache_size_gb,
             indexer_cache_per_token_gb=workload.indexer_cache_per_token_gb,
             model_activation_size_gb=model_activation_size_gb,
-            param_matched_size_gb=param_matched_size_gb,
-            derived_resident_size_gb=derived_resident_size_gb,
-            unexecuted_resident_size_gb=unexecuted_resident_size_gb,
-            represented_weight_size_gb=workload.represented_weight_size_gb,
             reserved_memory_gb=self.user_input.reserved_memory_gb,
             device_memory_available_gb=device_memory_available_gb,
             execution_time_s=execution_time_s,

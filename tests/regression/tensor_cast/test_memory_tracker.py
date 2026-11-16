@@ -25,6 +25,97 @@ from tensor_cast.runtime import Runtime, RuntimeEvent
 
 
 class TestMemoryTracker(unittest.TestCase):
+    def test_forward_summary_releases_unconsumed_side_output(self):
+        inputs, weight, cache = (torch.empty(5, device="meta") for _ in range(3))
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.register_static_weight(weight)
+        tracker.register_kv_cache(cache)
+        with Runtime([], TEST_DEVICE, tracker):
+            _side = inputs + weight
+            primary = inputs + cache
+            returned = primary.clone()
+            tracker.register_model_outputs(returned)
+        summary = tracker.get_forward_memory_summary()
+        self.assertEqual(summary.request_input_bytes, 20)
+        self.assertEqual(summary.activation_peak_bytes, 40)
+        self.assertEqual(summary.peak_memory_bytes(1000, 2000), 3060)
+
+    def test_weight_view_and_copy_have_different_accounting(self):
+        weight = torch.empty(10, device="meta")
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.register_static_weight(weight)
+        with Runtime([], TEST_DEVICE, tracker):
+            view = weight.view(2, 5)
+            copied = view.clone()
+            tracker.register_model_outputs(copied)
+        summary = tracker.get_forward_memory_summary()
+        self.assertEqual(summary.request_input_bytes, 0)
+        self.assertEqual(summary.activation_peak_bytes, 40)
+        tracker.analyze()
+        self.assertEqual(tracker.get_forward_memory_summary(), summary)
+        with self.assertRaises(RuntimeError):
+            tracker.register_kv_cache(weight)
+
+    def test_conflicting_alias_owners_fail(self):
+        weight = torch.empty(10, device="meta")
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.register_static_weight(weight)
+        with self.assertRaises(ValueError):
+            with Runtime([], TEST_DEVICE, tracker):
+                view = weight.view(2, 5)
+                tracker.register_kv_cache(view)
+
+    def test_empty_trace_and_unobserved_weight(self):
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.register_static_weight(torch.empty(100, device="meta"))
+        tracker.analyze()
+        self.assertEqual(tracker.peak_mem_usage(), 0)
+        self.assertEqual(tracker.get_forward_memory_summary().peak_memory_bytes(400, 0), 400)
+        self.assertFalse(tracker.tensor_infos)
+
+    def test_frozen_trace_preserves_accounting(self):
+        from tensor_cast.runtime_workload import RuntimeWorkloadTrace
+
+        weight, cache, inputs = (torch.empty(10, device="meta") for _ in range(3))
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.register_static_weight(weight)
+        tracker.register_kv_cache(cache)
+        with Runtime([], TEST_DEVICE, tracker) as original:
+            hidden = inputs + weight
+            output = hidden + cache
+            tracker.register_model_outputs(output)
+        frozen = RuntimeWorkloadTrace.from_runtime(original)
+        replayed = MemoryTracker(TEST_DEVICE)
+        runtime = Runtime([], TEST_DEVICE, replayed)
+        frozen.replay(runtime)
+        replayed.analyze()
+        self.assertEqual(replayed.get_forward_memory_summary(), tracker.get_forward_memory_summary())
+
+    def test_representative_weight_is_excluded_for_each_repeat(self):
+        from tensor_cast.layers.internal import CopyLayerWrapper, RegionMarkerWrapper
+        from tensor_cast.runtime_workload import RuntimeWorkloadTrace
+
+        linear = torch.nn.Linear(4, 4, bias=False, device="meta")
+        representative = RegionMarkerWrapper(51, linear, repeat_count=3)
+        copied = CopyLayerWrapper(51, linear, representative)
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.register_static_weight(linear.weight, repeat_template=True)
+        inputs = torch.empty(1, 4, device="meta")
+        with Runtime([], TEST_DEVICE, tracker) as runtime:
+            hidden = representative(inputs)
+            hidden = copied(hidden)
+            hidden = copied(hidden)
+            tracker.register_model_outputs(hidden)
+        summary = tracker.get_forward_memory_summary()
+        self.assertEqual(summary.request_input_bytes, 16)
+        self.assertEqual(summary.activation_peak_bytes, 32)
+        self.assertEqual(summary.peak_memory_bytes(3 * 64, 0), 240)
+        frozen = RuntimeWorkloadTrace.from_runtime(runtime)
+        replayed = MemoryTracker(TEST_DEVICE)
+        frozen.replay(Runtime([], TEST_DEVICE, replayed))
+        replayed.analyze()
+        self.assertEqual(replayed.get_forward_memory_summary(), summary)
+
     def _run_and_check(self, test_func, input_tensors, expected_profile_bytes):
         with (
             Runtime([], TEST_DEVICE, MemoryTracker(TEST_DEVICE)) as runtime,
@@ -538,67 +629,3 @@ class TestMemoryTracker(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             tracker.record_op_invocation("not-an-op")
-
-
-class TestThreeAccountClassification(unittest.TestCase):
-    # Tests for the three-account peak breakdown (Issue #463).
-
-    def test_register_model_params_collects_param_ids(self):
-        tracker = MemoryTracker(TEST_DEVICE)
-        model = torch.nn.Linear(10, 10)
-        tracker.register_model_params(model)
-        self.assertGreater(len(tracker._registered_param_tensor_ids), 0)
-
-    def test_three_account_peak_invariant(self):
-        x = torch.randn(100)
-        model = torch.nn.Linear(100, 100, bias=False)
-        tracker = MemoryTracker(TEST_DEVICE)
-        tracker.register_model_params(model)
-        with Runtime([], TEST_DEVICE, tracker), torch.no_grad():
-            _ = model(x)
-        tracker.analyze()
-        peak = tracker.peak_mem_usage()
-        param_matched = tracker.peak_param_bytes()
-        derived = tracker.peak_derived_resident_bytes()
-        intermediate = tracker.peak_intermediate_bytes()
-        self.assertEqual(peak, param_matched + derived + intermediate)
-        self.assertGreater(param_matched, 0)
-        self.assertGreater(intermediate, 0)
-
-    def test_intermediate_peak_is_activation(self):
-        x = torch.randn(100)
-        model = torch.nn.Linear(100, 100, bias=False)
-        tracker = MemoryTracker(TEST_DEVICE)
-        tracker.register_model_params(model)
-        with Runtime([], TEST_DEVICE, tracker), torch.no_grad():
-            _ = model(x)
-        tracker.analyze()
-        activation = tracker.peak_intermediate_bytes()
-        self.assertGreater(activation, 0)
-
-    def test_unexecuted_param_bytes_counts_only_never_touched_weights(self):
-        # Fourth account (Issue #463 follow-up): weights hanging on the tree
-        # but never consumed by any traced op are unexecuted-resident.
-        x = torch.randn(100)
-        model = torch.nn.Module()
-        model.used = torch.nn.Linear(100, 100, bias=False)
-        model.dead = torch.nn.Linear(100, 100, bias=False)  # forward never touches it
-        tracker = MemoryTracker(TEST_DEVICE)
-        tracker.register_model_params(model)
-        with Runtime([], TEST_DEVICE, tracker), torch.no_grad():
-            _ = model.used(x)
-        tracker.analyze()
-
-        named = list(model.named_parameters())
-        self.assertEqual(len(named), 2)
-        unexecuted = tracker.unexecuted_param_bytes(named)
-        expected = model.dead.weight.numel() * model.dead.weight.element_size()
-        self.assertEqual(unexecuted, expected)
-
-        # Sanity: the consumed weight is not double-counted as unexecuted.
-        self.assertEqual(tracker.peak_param_bytes(), model.used.weight.numel() * model.used.weight.element_size())
-
-    def test_unexecuted_param_bytes_requires_analyze(self):
-        tracker = MemoryTracker(TEST_DEVICE)
-        with self.assertRaisesRegex(RuntimeError, "analyze"):
-            tracker.unexecuted_param_bytes([])

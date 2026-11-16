@@ -57,8 +57,6 @@ class TestKimiK25(unittest.TestCase):
             "peak_memory_usage_gb",
             "kv_cache_size_gb",
             "model_activation_size_gb",
-            "param_matched_size_gb",
-            "derived_resident_size_gb",
             "device_memory_available_gb",
             "execution_time_s",
             "table_result",

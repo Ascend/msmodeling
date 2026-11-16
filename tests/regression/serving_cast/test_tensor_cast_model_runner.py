@@ -163,72 +163,6 @@ class TestTensorCastModelRunner(unittest.TestCase):
         metrics = model_runner.run_inference(requests)
         self.assertIsNotNone(metrics)
 
-    def test_check_peak_memory_usage_gb_scales_heterogeneous_prefill_batch(self):
-        runner = TensorCastModelRunner.__new__(TensorCastModelRunner)
-        runner.model_weight_size_gb = 40.0
-        runner.total_device_memory_gb = 64.0
-        runner.user_input = UserInputConfig(
-            device="TEST_DEVICE",
-            model_id="Qwen/Qwen3-32B",
-            reserved_memory_gb=10.0,
-        )
-
-        peak_memory_usage_gb, peak_calibrated = runner._check_peak_memory_usage_gb(
-            peak_memory_usage_gb=80.0,
-            kv_cache_size_gb=5.0,
-            requests=[
-                RequestInfo(query_len=250, seq_len=250, is_decode=False),
-                RequestInfo(query_len=1000, seq_len=1000, is_decode=False),
-            ],
-        )
-
-        self.assertEqual(peak_memory_usage_gb, 48.5)
-        self.assertTrue(peak_calibrated)
-
-    def test_check_peak_memory_usage_gb_keeps_homogeneous_prefill_batch(self):
-        runner = TensorCastModelRunner.__new__(TensorCastModelRunner)
-        runner.model_weight_size_gb = 40.0
-        runner.total_device_memory_gb = 64.0
-        runner.user_input = UserInputConfig(
-            device="TEST_DEVICE",
-            model_id="Qwen/Qwen3-32B",
-            reserved_memory_gb=10.0,
-        )
-
-        peak_memory_usage_gb, peak_calibrated = runner._check_peak_memory_usage_gb(
-            peak_memory_usage_gb=80.0,
-            kv_cache_size_gb=5.0,
-            requests=[
-                RequestInfo(query_len=250, seq_len=250, is_decode=False),
-                RequestInfo(query_len=250, seq_len=250, is_decode=False),
-            ],
-        )
-
-        self.assertEqual(peak_memory_usage_gb, 80.0)
-        self.assertFalse(peak_calibrated)
-
-    def test_check_peak_memory_usage_gb_clamps_negative_activation_for_heterogeneous_prefill_batch(self):
-        runner = TensorCastModelRunner.__new__(TensorCastModelRunner)
-        runner.model_weight_size_gb = 40.0
-        runner.total_device_memory_gb = 50.0
-        runner.user_input = UserInputConfig(
-            device="TEST_DEVICE",
-            model_id="Qwen/Qwen3-32B",
-            reserved_memory_gb=10.0,
-        )
-
-        peak_memory_usage_gb, peak_calibrated = runner._check_peak_memory_usage_gb(
-            peak_memory_usage_gb=42.0,
-            kv_cache_size_gb=5.0,
-            requests=[
-                RequestInfo(query_len=250, seq_len=250, is_decode=False),
-                RequestInfo(query_len=1000, seq_len=1000, is_decode=False),
-            ],
-        )
-
-        self.assertEqual(peak_memory_usage_gb, 45.0)
-        self.assertTrue(peak_calibrated)
-
 
 class TestInterpolationPoint(unittest.TestCase):
     """Tests for InterpolationPoint dataclass."""
@@ -1233,6 +1167,13 @@ class TestModelRunnerIntegration(unittest.TestCase):
 
         self.assertGreater(blocks_dcp1, 0)
         self.assertEqual(blocks_dcp2, blocks_dcp1 * 2)
+        metrics = _fake_metrics(1)
+        metrics.kv_cache_size_gb = 10.0
+        metrics.fixed_cache_size_gb = 4.0
+        metrics.device_memory_available_gb = 10.0
+        with patch.object(runner.tensor_cast_model_runner, "run_inference", return_value=metrics):
+            blocks, block_size = runner.warmup()
+        self.assertEqual(blocks, int(16.0 / metrics.kv_cache_per_token_gb // block_size))
         runner.shutdown()
 
     def test_apply_interpolation_model_not_ready(self):

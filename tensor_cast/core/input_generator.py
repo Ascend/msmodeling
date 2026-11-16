@@ -40,6 +40,7 @@ from ..layers.glm5 import (
     resolve_glm5_indexer_source_layer,
 )
 from ..layers.sampler import SamplingMetadata, SpecDecodeMetadata
+from ..memory_accounting import CacheMemoryEntry, CacheMemoryInventory, collect_model_cache_memory_entries
 from ..model_config import config_has_draft_spec
 from ..performance_model import bytes_of_tensor
 from ..transformers.utils import get_attention_quant_config, logger
@@ -1603,6 +1604,7 @@ def _get_kv_cache_info(
                 dtype=torch.uint8,
                 device="meta",
             )
+            kv_cache_by_layers[i].tensor_cast_fixed_cache = True
             # Count persistent state in total memory, but not in per-token KV
             # cache or KV transfer. This follows the Bailing KDA convention.
             continue
@@ -1660,6 +1662,7 @@ def _get_kv_cache_info(
                     dtype=torch.uint8,
                     device="meta",
                 )
+                kv_cache_by_layers[i].tensor_cast_fixed_cache = True
                 # KDA state scales per request, not per token.
                 continue
             if is_v4_model:
@@ -2718,3 +2721,34 @@ def get_inputs_num_bytes(model, requests: list[RequestInfo], block_size: int) ->
     # image_grid_thw on the host as encoder metadata.
     inputs_num_bytes += get_multimodal_h2d_num_bytes(input_kwargs)
     return inputs_num_bytes
+
+
+def collect_cache_memory(model, input_kwargs) -> CacheMemoryInventory:
+    """Collect cache capacities and identities, including model-specific fixed state."""
+    excluded = kv_cache_excluded_layer_indices(model)
+    inventory = collect_cache_inventory(input_kwargs, excluded)
+    extra_entries = collect_model_cache_memory_entries(model, input_kwargs, excluded)
+    return CacheMemoryInventory(inventory.entries + extra_entries)
+
+
+def collect_cache_inventory(input_kwargs, excluded):
+    entries = []
+    seen = set()
+    for cache_field in (
+        "kv_cache_by_layers",
+        "indexer_cache_by_layers",
+        "indexer_scale_cache_by_layers",
+        "compressed_kv_cache_by_source",
+        "compressed_kv_scale_cache_by_source",
+    ):
+        for key, tensor in input_kwargs.get(cache_field, {}).items():
+            if cache_field == "kv_cache_by_layers" and key in excluded:
+                continue
+            if id(tensor) in seen:
+                continue
+            seen.add(id(tensor))
+            size = bytes_of_tensor(tensor)
+            fixed = getattr(tensor, "tensor_cast_fixed_cache", False)
+            layer_index = key if cache_field.endswith("_by_layers") and isinstance(key, int) else None
+            entries.append(CacheMemoryEntry(f"{cache_field}:{key}", (tensor,), size, 0 if fixed else size, layer_index))
+    return CacheMemoryInventory(tuple(entries))

@@ -140,8 +140,6 @@ class TestBaseBackend(unittest.TestCase):
                             "prefill_breakdonws",
                             "decode_breakdowns",
                             20.0,
-                            2.0,
-                            2.0,
                             4.0,
                             1.0,
                             39.0,
@@ -341,8 +339,6 @@ class TestBaseBackend(unittest.TestCase):
             "total_device_memory_gb": 64.0,
             "reserved_memory_gb": 4.0,
             "model_weight_size_gb": 20.0,
-            "param_matched_size_gb": 3.0,
-            "derived_resident_size_gb": 5.0,
             "kv_cache_size_gb": 8.0,
             "model_activation_size_gb": 2.0,
             "device_memory_available_gb": 30.0,
@@ -376,8 +372,6 @@ class TestBaseBackend(unittest.TestCase):
                         "prefill_breakdowns",
                         "decode_breakdowns",
                         memory_info["model_weight_size_gb"],
-                        memory_info["param_matched_size_gb"],
-                        memory_info["derived_resident_size_gb"],
                         memory_info["kv_cache_size_gb"],
                         memory_info["model_activation_size_gb"],
                         memory_info["device_memory_available_gb"],
@@ -1026,18 +1020,7 @@ class TestBaseBackend(unittest.TestCase):
         # per_req = max(0.5, 16/4=4) = 4;  8 + (-8)/4 = 6 -> max(1, round(6)+1) = 7
         self.assertEqual(estimated, 7)
 
-    def test_compute_per_request_memory_gb_ignores_unknown_derived_resident(self):
-        for value in (None, float("nan")):
-            with self.subTest(derived_resident_size_gb=value):
-                self.assertEqual(
-                    self.backend._compute_per_request_memory_gb(20.0, 5.0, 1.0, 8.0, 2, derived_resident_size_gb=value),
-                    3.0,
-                )
-
-    def test_compute_per_request_memory_gb_amortizes_kv_into_per_request(self):
-        # PR #906 review #2: only the non-KV derived remainder is a fixed
-        # cost; the KV part scales with concurrency and is amortized per
-        # request instead of being deducted once.
+    def test_compute_per_request_memory_gb_uses_direct_non_weight_cost(self):
         self.assertEqual(
             self.backend._compute_per_request_memory_gb(
                 total_device_memory_gb=64,
@@ -1045,24 +1028,8 @@ class TestBaseBackend(unittest.TestCase):
                 reserved_memory_gb=10,
                 memory_left_gb=12,
                 batch_size=4,
-                derived_resident_size_gb=10.0,
-                kv_cache_size_gb=6.0,
             ),
-            4.5,
-        )
-        # NaN KV (PP hand-built dicts) is sanitized to 0: derived is then
-        # fully deducted as fixed, matching the legacy conservative fallback.
-        self.assertEqual(
-            self.backend._compute_per_request_memory_gb(
-                total_device_memory_gb=64,
-                model_weight_size_gb=20,
-                reserved_memory_gb=10,
-                memory_left_gb=12,
-                batch_size=4,
-                derived_resident_size_gb=10.0,
-                kv_cache_size_gb=float("nan"),
-            ),
-            3.0,
+            5.5,
         )
 
     def test_exponential_search_without_acc_search_doubles_until_max_iterations(self):

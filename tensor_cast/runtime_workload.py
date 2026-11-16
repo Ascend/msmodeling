@@ -87,6 +87,9 @@ class RuntimeWorkloadTrace:
     tensors: tuple[FrozenTensor, ...]
     invocations: tuple[FrozenOpInvoke, ...]
     region_aliases: tuple[FrozenRegionAlias, ...] = ()
+    resident_owners: tuple[tuple[int, str], ...] = ()
+    returned_tensors: tuple[int, ...] = ()
+    weight_templates: frozenset[int] = frozenset()
 
     @classmethod
     def from_runtime(cls, runtime) -> "RuntimeWorkloadTrace":
@@ -123,15 +126,38 @@ class RuntimeWorkloadTrace:
                     reference_id=reference_id,
                 )
             )
+        tracker = getattr(runtime, "memory_tracker", None)
         return cls(
             tensors=tuple(freezer.tensors.values()),
             invocations=tuple(frozen_ops),
             region_aliases=tuple(region_aliases),
+            weight_templates=frozenset(tracker._weight_templates & freezer.tensors.keys())
+            if tracker is not None
+            else frozenset(),
+            resident_owners=tuple(
+                (key, owner) for key, (_, owner) in tracker._resident_tensors.items() if key in freezer.tensors
+            )
+            if tracker is not None
+            else (),
+            returned_tensors=tuple(id(t) for t in tracker._returned_tensors if id(t) in freezer.tensors)
+            if tracker is not None
+            else (),
         )
 
     def replay(self, runtime) -> None:
         """Rebuild the op inputs and replay them through an existing Runtime."""
         thawer = _ValueThawer(self.tensors)
+        tracker = getattr(runtime, "memory_tracker", None)
+        if tracker is not None:
+            for key, owner in self.resident_owners:
+                tensor = thawer.thaw(("tensor", key))
+                if owner == "weight":
+                    tracker.register_static_weight(tensor, repeat_template=key in self.weight_templates)
+                elif owner == "cache":
+                    tracker.register_kv_cache(tensor)
+                else:
+                    raise ValueError(f"Unknown frozen resident owner: {owner!r}")
+            tracker.register_model_outputs([thawer.thaw(("tensor", key)) for key in self.returned_tensors])
         # Keep the thawed tensor aliases scoped to this replay. A Runtime may be
         # reused, and a later replay can reuse an earlier meta tensor's object id.
         # Runtime scoping isolates different estimates; this inner scope prevents
@@ -166,6 +192,8 @@ class RuntimeWorkloadTrace:
                 manager.add_equivalent_keys([(id(real_input), 0), (id(logical_input), alias.reference_id)])
                 manager.add_equivalent_keys([(id(real_output), 0), (id(logical_output), alias.reference_id)])
             runtime.replay_flat_op_invoke_infos(invocations)
+            if tracker is not None:
+                tracker.resolve_memory_boundaries()
 
 
 class _ValueFreezer:

@@ -28,7 +28,8 @@ from torch._inductor.fx_passes.post_grad import decompose_auto_functionalized
 
 from .. import config, ops  # noqa: F401
 from . import patterns
-from .constant_folding import fold_meta_constants, register_graph_folded_constants, replace_node_with_constant
+from .constant_folding import fold_meta_constants, replace_node_with_constant
+from .memory_registration import mark_frozen_weight_origins, register_graph_weight_aliases
 from .freezing_passes import patterns as freezing_patterns
 from .freezing_passes.dispatch_ffn_combine_pass import DispatchFFNCombinePass
 from .freezing_passes.grouped_matmul_swiglu_pass import GroupedMatmulSwigluPass
@@ -79,13 +80,13 @@ class CompilerBackend:
         def freezing_compile(compile_inner, aot_autograd_gm, example_inputs):
             # Freeze the graph first before passing to AOT Autograd.
             frozen_gm, preserved_arg_indices = freeze(gm, aot_autograd_gm, example_inputs)
+            mark_frozen_weight_origins(frozen_gm)
             example_inputs = [example_inputs[ind] for ind in preserved_arg_indices]
-            optimized_function = compile_inner(frozen_gm, example_inputs)
+            optimized_function = register_graph_weight_aliases(compile_inner(frozen_gm, example_inputs))
 
             def wrapper(args: list[object]) -> Sequence[torch.Tensor]:
                 args_new = [args[i] for i in preserved_arg_indices]
                 args.clear()
-                register_graph_folded_constants(optimized_function)
                 return optimized_function(*args_new)
 
             wrapper._boxed_call = True  # type: ignore[attr-defined]
@@ -99,13 +100,8 @@ class CompilerBackend:
             self.rewrite_before_freezing(fx_graph, inputs)
             if config.compilation.enable_freezing:
                 return freezing_compile(self.rewrite_after_freezing, fx_graph, inputs)
-            optimized_graph = self.rewrite_after_freezing(fx_graph, inputs)
-
-            def forward(*args):
-                register_graph_folded_constants(optimized_graph)
-                return optimized_graph(*args)
-
-            return forward
+            else:
+                return register_graph_weight_aliases(self.rewrite_after_freezing(fx_graph, inputs))
 
         # Use the default decomposition table to decompose operators.
         decompositions = select_decomp_table()
@@ -163,13 +159,14 @@ class CompilerBackend:
         gm.recompile()
         inputs = example_inputs[num_frozen_inputs:]
         frozen, indices = freeze(gm, gm, inputs)
+        mark_frozen_weight_origins(frozen)
         if indices != list(range(len(inputs))):
             raise RuntimeError("Static meta capture unexpectedly froze request inputs")
         result = self.rewrite_after_freezing(frozen, inputs)
         # make_fx gives us an eager GraphModule. Unlike AOT's lazy module, its
         # code must be regenerated after the final functionalization rewrite.
         result.recompile()
-        return result
+        return register_graph_weight_aliases(result)
 
     def apply_redundant_node_elimination_pass(self, gm: fx.GraphModule, inputs):
         GraphTransformObserver = functools.partial(
