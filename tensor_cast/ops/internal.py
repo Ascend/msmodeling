@@ -203,3 +203,49 @@ def _(
     """
     del role, wait_tag, window_tag
     return x.clone()
+
+
+@register_tensor_cast_op("materialize")
+def _(
+    src: torch.Tensor,
+    shape: List[int],
+) -> torch.Tensor:
+    """Anchor a device-side materialization copy at an explicit op boundary.
+
+    Used where the official modeling forces a contiguous copy whose kernel
+    must stay visible in the performance model while ``aten.clone`` itself is
+    calibrated as fused MoE routing glue on newer CANN stacks: the Bailing
+    V3 VL pos-embed interpolation reorders each image's embeddings into the
+    2x2 window-major layout (``permute(0, 2, 1, 3, 4).reshape`` of the
+    ``[h/m, m, w/m, m, C]`` grid — the NPU merger-phase TensorMove). Routing
+    that copy through this op keeps its kernel label and cost separate from
+    the routing clones. Meta tensors only carry the resolved output shape;
+    real tensors additionally get a contiguous copy of ``src`` in logical
+    element order so numerical execution on CPU/NPU keeps the values. The
+    copy cost is carried by the registered performance properties.
+    """
+    dims = list(shape)
+    if not dims:
+        raise ValueError("materialize expects a non-empty output shape")
+    unknown = [i for i, dim in enumerate(dims) if dim == -1]
+    if len(unknown) > 1:
+        raise ValueError(f"materialize allows at most one -1 dim, got {shape}")
+    known = 1
+    for dim in dims:
+        if dim == -1:
+            continue
+        if dim <= 0:
+            raise ValueError(f"materialize expects positive dims or -1, got {shape}")
+        known *= dim
+    if unknown:
+        if known == 0 or src.numel() % known != 0:
+            raise ValueError(f"materialize shape {shape} is incompatible with {tuple(src.shape)}")
+        dims[unknown[0]] = src.numel() // known
+    elif known != src.numel():
+        raise ValueError(f"materialize shape {shape} does not match {tuple(src.shape)}")
+    if src.is_meta:
+        return torch.empty(tuple(dims), device=src.device, dtype=src.dtype)
+    # Real tensors: clone in logical element order (contiguous copy), then
+    # view into the requested shape. clone keeps the values; the reshape of
+    # the freshly contiguous clone cannot copy again.
+    return src.clone(memory_format=torch.contiguous_format).view(tuple(dims))

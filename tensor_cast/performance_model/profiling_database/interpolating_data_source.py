@@ -71,6 +71,7 @@ from .profiling_data_source import (
     _aligned_input_metadata,
     _compute_scale_input_format,
     _is_block_padded,
+    _is_varlen_encoder_attention,
     _normalize_fia_q_shape,
     _normalize_func_name,
     _parse_shape_str,
@@ -397,6 +398,18 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if mapping.get("query_mode") == "moe_fused":
             return self._interpolate_moe_fused(op_invoke_info, mapping, fallback_from=fallback_from)
         if mapping.get("query_mode") == "attention_special":
+            if _is_varlen_encoder_attention(op_invoke_info):
+                # Encoder varlen attention carries no paged FIA params, so the
+                # FIA interpolation cannot apply. Exact routing already ran in
+                # the base source via varlen_encoder_kernel_type; record a
+                # dedicated miss for collection planning (PR-9) and keep the
+                # analytic fallback.
+                self._record_miss(
+                    "varlen_encoder_not_interpolated",
+                    kernel_type=mapping.get("varlen_encoder_kernel_type"),
+                    base_miss_reason=self.base.last_miss_reason,
+                )
+                return None
             return self._interpolate_attention(op_invoke_info, mapping, fallback_from=fallback_from)
         if mapping.get("query_mode") == "v4_physical":
             return self._interpolate_v4_physical(op_invoke_info, mapping, fallback_from=fallback_from)

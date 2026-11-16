@@ -1,0 +1,2 @@
+Input Shapes,Input Data Types,Input Formats,Average Duration(us)
+"""8,3,224,224;64,3,7,7;64""",DT_BF16;DT_BF16;DT_BF16,ND;ND;ND,55.6

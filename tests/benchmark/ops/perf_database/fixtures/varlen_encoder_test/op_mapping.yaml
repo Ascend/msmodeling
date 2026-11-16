@@ -1,0 +1,36 @@
+# Minimal synthetic operator-mapping used only by test_vision_encoder_lookup.
+# It is overlaid onto the fia_raw_test fixture and declares exactly the
+# entries the varlen-encoder / convolution-rank / materialize tests need:
+# nothing here mirrors any production profiling database.
+operator_mappings:
+  # Varlen-encoder routing under test: the varlen field is present, so
+  # encoder varlen calls reach the dedicated UnpadFlashAttention path
+  # (currently segment-gated to a miss; the gate-open test mocks the
+  # signature and then hits the synthetic CSV row).
+  "tensor_cast.attention.default":
+    kernel_type: FusedInferAttentionScore
+    query_mode: attention_special
+    varlen_encoder_kernel_type: UnpadFlashAttention
+
+  # Deliberately WITHOUT the varlen field so a varlen call on this op
+  # reports varlen_encoder_kernel_type_missing (not missing_seq_lens).
+  "tensor_cast.attention_quant.default":
+    kernel_type: FusedInferAttentionScore
+    query_mode: attention_special
+
+  # Rank-based convolution routing: first-input rank picks the kernel.
+  "aten.convolution.default":
+    kernel_type: Conv2D
+    kernel_types_by_input_rank:
+      3: [Conv1D]
+      5: [Conv3D]
+
+  # Stacks that do NOT zero-cost clones (v0.13/v0.15 semantics) keep
+  # resolving measured TensorMove rows; v0.18+/v0.23 keep zero_cost and
+  # route the merger-phase copy through tensor_cast.materialize below.
+  "aten.clone.default":
+    kernel_type: TensorMove
+
+  # Dedicated op for the merger-phase materialization copy (PR-8 P1-07/P1-13).
+  "tensor_cast.materialize.default":
+    kernel_type: TensorMove

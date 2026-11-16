@@ -212,6 +212,35 @@ def _normalize_func_name(func) -> str:
     return s.removeprefix("torch.ops.")
 
 
+def _is_varlen_encoder_attention(op_invoke_info: "OpInvokeInfo") -> bool:
+    """Encoder varlen attention call (e.g. VL vision tower).
+
+    Flattened 2-D query ``[total_tokens, hidden]`` with no paged-KV metadata
+    (attention_meta is None, so attention_mask / block_table /
+    query_start_loc / seq_lens are all absent). These calls must not run the
+    paged FIA projection: they resolve through ``varlen_encoder_kernel_type``
+    instead. Shared by the base exact lookup and the interpolating wrapper
+    dispatch so the two layers never disagree on the call type.
+
+    ``tensor_cast.attention`` positional arg layout (see
+    ``tensor_cast/ops/attention.py``): 0=query, 1=key, 2=value,
+    3=attention_mask, 4=block_table, 5=query_start_loc, 6=seq_lens,
+    7=query_lens.
+    """
+    args = op_invoke_info.args
+    if len(args) < 7:
+        return False
+    query = args[0]
+    return (
+        isinstance(query, torch.Tensor)
+        and query.ndim == 2
+        and not isinstance(args[3], torch.Tensor)  # attention_mask absent
+        and not isinstance(args[4], torch.Tensor)  # block_table absent
+        and not isinstance(args[5], torch.Tensor)  # query_start_loc absent
+        and not isinstance(args[6], torch.Tensor)  # seq_lens absent
+    )
+
+
 def _parse_shape_str(
     s: str,
     *,
@@ -4563,6 +4592,17 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             return None
 
         query = args[0]
+
+        # Encoder varlen attention (e.g. VL vision tower): flattened query
+        # [total_tokens, hidden] with no paged-KV metadata (attention_meta is
+        # None, so block_table / query_start_loc / seq_lens are all absent).
+        # The paged FIA projection (avg_seq_len / sparse_mode) does not apply;
+        # route to the encoder kernel via `varlen_encoder_kernel_type` so the
+        # kernel label and shape demand are recorded for collection planning
+        # instead of failing with missing_seq_lens.
+        if _is_varlen_encoder_attention(op_invoke_info):
+            return self._lookup_varlen_encoder_attention(op_invoke_info, mapping)
+
         key = args[1]
         seq_lens = args[6] if len(args) > 6 else None
         query_lens = args[7] if len(args) > 7 else None
@@ -4691,6 +4731,99 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 kernel_shapes=[],
                 shape_match_rule="attention",
             ),
+        )
+
+    # ---- Varlen encoder attention lookup (VL vision tower) ----
+
+    def _varlen_encoder_segment_signature(self, op_invoke_info: "OpInvokeInfo") -> Optional[tuple]:
+        """Validated image-segment signature for a varlen encoder call, or None.
+
+        ``tensor_cast.attention`` does not carry cu_seqlens across the op
+        boundary (``flash_attention_forward`` receives it as a kwarg that the
+        op call drops), so the segmentation behind a flattened
+        ``[total_tokens, hidden]`` query is not observable at this layer.
+        Carrying an explicit segment signature end-to-end is the prerequisite
+        for re-enabling measured varlen lookups: UnpadFlashAttention CSV rows
+        record cu_seqlens as a kernel input and must never be matched against
+        segment-ambiguous queries.
+        """
+        return None
+
+    def _lookup_varlen_encoder_attention(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        mapping: dict,
+    ) -> Optional[QueryResult]:
+        """Encoder varlen attention lookup (VL vision tower, no paged KV).
+
+        The call carries no paged-KV metadata, so the FIA enriched-CSV
+        projection (avg_seq_len / sparse_mode / block_table) cannot apply.
+        Resolve the kernel from ``varlen_encoder_kernel_type`` (plus optional
+        ``varlen_encoder_alternate_kernel_types``) only — do NOT fall back to
+        the paged ``kernel_type``, whose CSV rows encode seq-len semantics a
+        varlen encoder call never had.
+
+        Segment-ambiguity gate: the op contract does not carry cu_seqlens, so
+        calls with different image segmentations share one (shape, dtype)
+        signature. A measured row must not be reused across segmentations
+        whose ΣL² work differs, so until a validated segment signature is
+        carried end-to-end the exact match is refused: the kernel label and
+        shape demand recorded above stay (PR-9 collection planning) and the
+        latency falls back to the analytic model.
+        """
+        kernel_type = mapping.get("varlen_encoder_kernel_type")
+        if not isinstance(kernel_type, str) or not kernel_type:
+            self.last_miss_reason = "varlen_encoder_kernel_type_missing"
+            return None
+
+        tc_inputs = self._extract_tensor_inputs(op_invoke_info)
+        simulation_shapes = [list(s) for s, _ in tc_inputs]
+        query_inputs = tc_inputs if self._backend_projector.enabled else None
+        self._record_tensor_query(
+            op_invoke_info,
+            [kernel_type],
+            query_mode="varlen_encoder",
+            inputs=query_inputs,
+            attributes={"varlen_encoder": True},
+        )
+
+        # Segment-ambiguity gate (PR #1101 review): e.g. cu_seqlens
+        # [0, 4080, 8160] and [0, 2040, 8160] both present as query=[8160, 1152]
+        # with K/V=[1, 8160, 16, 72], although their full-attention ΣL² differs
+        # (33,292,800 vs 41,616,000). Refuse MEASURED hits until the segment
+        # signature is carried and validated; keep the demand records above.
+        if self._varlen_encoder_segment_signature(op_invoke_info) is None:
+            self.last_miss_reason = "varlen_encoder_segment_signature_unavailable"
+            self.last_shape_match_info = ShapeMatchInfo(
+                simulation_shapes=simulation_shapes,
+                kernel_shapes=[],
+                shape_match_rule=self.last_miss_reason,
+            )
+            return None
+
+        kernel_types = [kernel_type]
+        for alt in mapping.get("varlen_encoder_alternate_kernel_types", []):
+            if isinstance(alt, str) and alt not in kernel_types:
+                kernel_types.append(alt)
+        tc_input_count = mapping.get("tc_input_count")
+        checker = self._make_compute_checker(tc_inputs, tc_input_count, simulation_shapes)
+        hit = self._find_candidates(kernel_types, checker, select="nearest")
+        if hit is None:
+            if not self.last_miss_reason:
+                self.last_miss_reason = "varlen_encoder_shape_mismatch"
+            self.last_shape_match_info = ShapeMatchInfo(
+                simulation_shapes=simulation_shapes,
+                kernel_shapes=[],
+                shape_match_rule=self.last_miss_reason,
+            )
+            return None
+        self.last_shape_match_info = hit.shape_match_info
+        return QueryResult(
+            latency_us=hit.latency_us,
+            confidence=hit.confidence,
+            source=QuerySource.MEASURED,
+            details={"kernel_type": hit.kernel_type, **hit.details},
+            shape_match_info=hit.shape_match_info,
         )
 
     # ---- Elementwise op lookup (output-shape matching) ----

@@ -866,6 +866,21 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.materialize.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    """Device-side materialization copy (e.g. the VL merger grid reshape).
+
+    A materialization reads its source once and writes the reshaped output
+    once — the same traffic TensorMove charges for a contiguous copy. Only
+    the tensors carry bytes: the shape list is host-side metadata.
+    """
+    src = op_invoke_info.args[0]
+    output = op_invoke_info.out
+    assert isinstance(src, torch.Tensor)
+    assert isinstance(output, torch.Tensor)
+    return op_invoke_info.get_memory_access_properties()
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.apply_rope_single.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     x = op_invoke_info.args[0]

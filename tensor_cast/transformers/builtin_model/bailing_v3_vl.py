@@ -227,6 +227,69 @@ def _bailing_vl_apply_vision_rotary_pos_emb(query_states, key_states, cos, sin):
     return query_states.to(query_dtype), key_states.to(key_dtype)
 
 
+def _tc_fast_pos_embed_interpolate(self, grid_thw):
+    """Official fast_pos_embed_interpolate with the window-merge copy
+    anchored on tensor_cast.materialize instead of aten.clone, gated on the
+    official copy-on-need reshape semantics.
+
+    Module-level on purpose: the runtime patch installs it on the vision
+    model class, and the copy-on-need split (narrow window -> free view,
+    regular window -> tensor_cast.materialize) is the part regression tests
+    protect through this exact entry point.
+    """
+    num_grid_per_side = self.num_grid_per_side
+    m_size = self.spatial_merge_size
+    hidden_dim = self.pos_embed.embedding_dim
+    outputs = []
+    for t, h, w in grid_thw.tolist():
+        h_idxs = torch.linspace(0, num_grid_per_side - 1, h, dtype=torch.float32, device=self.pos_embed.weight.device)
+        w_idxs = torch.linspace(0, num_grid_per_side - 1, w, dtype=torch.float32, device=self.pos_embed.weight.device)
+
+        h_floor = h_idxs.to(torch.long)
+        w_floor = w_idxs.to(torch.long)
+        h_ceil = torch.clamp(h_floor + 1, max=num_grid_per_side - 1)
+        w_ceil = torch.clamp(w_floor + 1, max=num_grid_per_side - 1)
+
+        dh = h_idxs - h_floor
+        dw = w_idxs - w_floor
+
+        dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
+        h_floor_grid, w_floor_grid = torch.meshgrid(h_floor, w_floor, indexing="ij")
+        h_ceil_grid, w_ceil_grid = torch.meshgrid(h_ceil, w_ceil, indexing="ij")
+
+        w11 = dh_grid * dw_grid
+        w10 = dh_grid - w11
+        w01 = dw_grid - w11
+        w00 = 1 - dh_grid - w01
+
+        h_grid = torch.stack([h_floor_grid, h_floor_grid, h_ceil_grid, h_ceil_grid])
+        w_grid = torch.stack([w_floor_grid, w_ceil_grid, w_floor_grid, w_ceil_grid])
+        h_grid_idx = h_grid * num_grid_per_side
+        indices = (h_grid_idx + w_grid).reshape(4, -1)
+        weights = torch.stack([w00, w01, w10, w11], dim=0).reshape(4, -1, 1)
+        weights = weights.to(dtype=self.pos_embed.weight.dtype)
+
+        embeds = self.pos_embed(indices)
+        embeds *= weights
+        combined = embeds.sum(dim=0)
+        combined = combined.reshape(h // m_size, m_size, w // m_size, m_size, hidden_dim)
+        permuted = combined.permute(0, 2, 1, 3, 4)
+        if permuted.is_contiguous():
+            # Narrow window (w // m_size == 1): the permuted grid is
+            # already contiguous and the official reshape is a free
+            # view — no TensorMove copy happens, so do not bill one
+            # (mirror the official copy-on-need semantics).
+            combined = permuted.reshape(1, -1, hidden_dim)
+        else:
+            # The reorder materializes a contiguous device copy (the
+            # NPU merger-phase TensorMove) — anchor it on the dedicated
+            # op so the cost keeps its kernel label.
+            combined = torch.ops.tensor_cast.materialize(permuted, (1, -1, hidden_dim))
+        repeated = combined.expand(t, -1, -1).reshape(-1, hidden_dim)
+        outputs.append(repeated)
+    return torch.cat(outputs, dim=0)
+
+
 def _patch_bailing_v3_vl_official_runtime(decoder):
     """Class-level runtime patches for the official self-contained modeling.
 
@@ -246,6 +309,11 @@ def _patch_bailing_v3_vl_official_runtime(decoder):
     2. patch-embed executed through the ``Conv3d`` module so the vision chain
        keeps the single-Conv3D anchor (PR-8 P1-06); the official unfold+
        F.linear path stays the Phase-3 numerical B2B reference;
+    2b. ``fast_pos_embed_interpolate``'s window-merge reorder
+       (``permute(0, 2, 1, 3, 4).reshape``) materializing on device anchored
+       on ``tensor_cast.materialize`` (PR-8 P1-07/P1-13): the copy keeps its
+       TensorMove kernel label while ``aten.clone`` stays calibrated as
+       fused MoE routing glue on newer CANN stacks;
     3. ``get_placeholder_mask`` returning a CPU-concrete mask with the exact
        expected True count on meta tensors: the official ``mask.sum().item()``
        count check passes and ``masked_scatter`` itself stays shape-only
@@ -338,6 +406,26 @@ def _patch_bailing_v3_vl_official_runtime(decoder):
 
         patch_embed_cls.forward = _tc_patch_embed_forward
         patch_embed_cls._bailing_vl_tc_patch_embed_patched = True
+
+    # --- 2b. pos-embed interpolate merge copy -> tensor_cast.materialize -------
+    # The official ``fast_pos_embed_interpolate`` reorders each image's
+    # interpolated embeddings into the 2x2 window-major layout:
+    # ``combined.permute(0, 2, 1, 3, 4).reshape(1, -1, hidden_dim)``. The
+    # reshape is copy-on-need: it materializes a device copy — the NPU
+    # merger-phase TensorMove (e.g. [34, 60, 2, 2, 1152] at 1080p) — only
+    # when the permuted grid is non-contiguous (w // m_size > 1); for
+    # narrow windows (w // m_size == 1) the permuted grid is already
+    # contiguous and the reshape is a free view. The downstream merger's
+    # ``[tokens, C] -> [patches, 4*C]`` view then rides on this window-major
+    # layout and stays free. Mirror that copy-on-need split: bill the
+    # materialize op (TensorMove kernel label) only when a copy actually
+    # happens, while aten.clone stays calibrated as fused MoE routing glue
+    # on newer CANN stacks. Mirrors the official method — keep in sync when
+    # the vendored asset updates.
+    vision_model_cls = type(visual)
+    if not getattr(vision_model_cls, "_bailing_vl_tc_pos_embed_patched", False):
+        vision_model_cls.fast_pos_embed_interpolate = _tc_fast_pos_embed_interpolate
+        vision_model_cls._bailing_vl_tc_pos_embed_patched = True
 
     # --- 3. placeholder mask: meta-safe exact-count concrete mask -------------
     if not getattr(vl_model_cls, "_bailing_vl_tc_placeholder_patched", False):

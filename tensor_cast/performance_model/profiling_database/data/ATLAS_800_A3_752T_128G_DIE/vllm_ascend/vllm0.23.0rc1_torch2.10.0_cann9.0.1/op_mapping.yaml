@@ -334,9 +334,19 @@ operator_mappings:
 
   "aten.convolution.default":
     kernel_type: Conv2D
+    kernel_types_by_input_rank:
+      3: [Conv1D]
+      5: [Conv3D]
     notes: >
       [LOW] op-plugin: ConvolutionKernelNpuOpApi.cpp.
-      aclnn: aclnnConvolution. LLM does not contain convolutional layers; only used for video/image models.
+      aclnn: aclnnConvolution. The "LLM does not contain convolutional layers"
+      assumption no longer holds: Bailing V3 VL ships Conv3d patch-embed
+      (input/weight rank 5, kernel (2,16,16)) and KDA depthwise Conv1d
+      (rank 3). Route by first-input rank: rank 3 -> Conv1D, rank 5 ->
+      Conv3D, rank 4 keeps Conv2D first. Conv1D/Conv3D CSVs are pending
+      profiling collection; until then the shape check rejects the Conv2D
+      fallback rows (different rank) and the op resolves to the analytic
+      model with the correct kernel label recorded for demand capture.
 
   "aten.cat.default":
     kernel_type: ConcatD
@@ -587,10 +597,17 @@ operator_mappings:
   "tensor_cast.attention.default":
     kernel_type: FusedInferAttentionScore
     query_mode: attention_special
+    varlen_encoder_kernel_type: UnpadFlashAttention
     notes: >
       [HIGH] op-plugin: FusedInferAttentionScoreKernelNpuOpApi.cpp.
       aclnn: aclnnFusedInferAttentionScoreV2/V3.
       Profiling: Qwen3 CANN 8.5 FusedInferAttentionScore(1920x).
+      [Bailing V3 VL] Encoder varlen calls (vision tower: flattened query
+      [total_tokens, hidden], no seq_lens/block_table) route to
+      UnpadFlashAttention via varlen_encoder_kernel_type; the paged FIA
+      rows never apply to them. UnpadFlashAttention.csv is pending
+      profiling collection; until then the label is recorded for demand
+      capture and the latency falls back to the analytic model.
 
   "tensor_cast.attention_quant.default":
     kernel_type: FusedInferAttentionScore
@@ -1164,6 +1181,22 @@ operator_mappings:
       [LOW→zero_cost] MoE routing clone. NPU fusion to MoeGatingTopK/DispatchFFNCombine.
       All scenarios < 0.014ms (< 0.01% of total time).
       Original kernel: TensorMove (op-plugin: clone → aclnnInplaceCopy/contiguous copy).
+      Real materializations are anchored separately: the Bailing V3 VL
+      pos-embed interpolation window-merge copy is routed through
+      tensor_cast.materialize, so this entry keeps zero_cost without
+      hiding the merger-phase TensorMove cost (PR-8 P1-07/P1-13).
+
+  "tensor_cast.materialize.default":
+    kernel_type: TensorMove
+    notes: >
+      [LOW] Explicit device-side materialization copy (op-plugin:
+      clone → aclnnInplaceCopy/contiguous copy → TensorMove). Anchored by
+      model wrappers where the official code forces a contiguous copy
+      whose cost must stay visible: the Bailing V3 VL pos-embed
+      interpolation window-merge reorder (permute(0,2,1,3,4).reshape of
+      the [h/m, m, w/m, m, C] grid — the NPU merger-phase TensorMove;
+      PR-8 P1-07/P1-13). aten.clone
+      stays zero_cost on stacks where NPU fuses its MoE routing instances.
 
   "aten.bitwise_not.default":
     zero_cost: true

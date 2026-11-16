@@ -14,6 +14,8 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
+import types
+
 import pytest
 import torch
 
@@ -277,3 +279,137 @@ def test_vision_rotary_uses_fp32_and_restores_input_dtypes():
     assert actual_key.dtype == key.dtype
     torch.testing.assert_close(actual_query, expected_query, rtol=0, atol=0)
     torch.testing.assert_close(actual_key, expected_key, rtol=0, atol=0)
+
+
+def test_materialize_op_resolves_and_validates_output_shape():
+    src = torch.empty((34, 60, 2, 2, 1152), device="meta", dtype=torch.bfloat16)
+
+    merged = torch.ops.tensor_cast.materialize(src, [1, -1, 1152])
+    assert merged.shape == (1, 8160, 1152)
+    assert merged.dtype == torch.bfloat16
+
+    with pytest.raises(ValueError, match="non-empty"):
+        torch.ops.tensor_cast.materialize(src, [])
+    with pytest.raises(ValueError, match="at most one -1"):
+        torch.ops.tensor_cast.materialize(src, [-1, -1, 1152])
+    with pytest.raises(ValueError, match="incompatible"):
+        torch.ops.tensor_cast.materialize(src, [1, -1, 1153])
+    with pytest.raises(ValueError, match="does not match"):
+        torch.ops.tensor_cast.materialize(src, [2040, 4609])
+
+
+def test_materialize_properties_charge_copy_traffic():
+    src = torch.empty((34, 60, 2, 2, 1152), device="meta", dtype=torch.bfloat16)
+    out = torch.ops.tensor_cast.materialize(src, [2040, 4608])
+
+    properties = OpInvokeInfo(
+        torch.ops.tensor_cast.materialize.default,
+        (src, [2040, 4608]),
+        {},
+        out,
+    ).get_perf_properties()
+
+    expected_bytes = 8160 * 1152 * 2  # bf16: one read of the source + one write of the output
+    assert properties.memory_read_bytes == expected_bytes
+    assert properties.memory_write_bytes == expected_bytes
+
+
+def test_materialize_real_tensor_copies_values_contiguously():
+    """Real (non-meta) inputs get a contiguous value copy, not uninitialized
+    storage: the output matches src.contiguous().reshape(shape) element-wise
+    and does not share storage with the source.
+    """
+    src = torch.randn((4, 2, 3, 2, 8), dtype=torch.float32).permute(0, 2, 1, 3, 4)
+    assert not src.is_contiguous()
+
+    out = torch.ops.tensor_cast.materialize(src, [1, -1, 8])
+
+    expected = src.contiguous().reshape(1, -1, 8)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    assert out.is_contiguous()
+    assert out.data_ptr() != src.data_ptr()
+    assert out.shape == (1, 48, 8)  # logical numel 4*3*2*2*8 = 384 = 48 * 8
+
+
+def test_materialize_real_tensor_plain_shape_keeps_values():
+    """The value-copy contract also holds for fully specified shapes."""
+    src = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+    out = torch.ops.tensor_cast.materialize(src, [12])
+
+    torch.testing.assert_close(out, src.reshape(12), rtol=0, atol=0)
+    assert out.data_ptr() != src.data_ptr()
+
+
+def _expected_interpolate_output(host, grid_thw):
+    """Independent re-derivation of the pos-embed interpolation output.
+
+    Uses F.interpolate (bilinear, align_corners=True) instead of the manual
+    4-corner weighted-sum formulation: with align_corners=True, the output
+    pixel i is sampled at source coordinate i*(n-1)/(h-1), which equals
+    torch.linspace(0, n-1, h)[i] — so the two formulations are numerically
+    identical for any (h, w) pair.
+    """
+    n = host.num_grid_per_side
+    m = host.spatial_merge_size
+    d = host.pos_embed.embedding_dim
+    table = host.pos_embed.weight.reshape(n, n, d).permute(2, 0, 1).unsqueeze(0)
+    rows = []
+    for t, h, w in grid_thw.tolist():
+        img = (
+            torch.nn.functional.interpolate(table, size=(h, w), mode="bilinear", align_corners=True)[0]
+            .permute(1, 2, 0)
+            .reshape(h, w, d)
+        )
+        window_major = img.reshape(h // m, m, w // m, m, d).permute(0, 2, 1, 3, 4).reshape(1, -1, d)
+        rows.append(window_major.expand(t, -1, -1).reshape(-1, d))
+    return torch.cat(rows, dim=0)
+
+
+@pytest.mark.parametrize(
+    "grid_thw,expected_materialize_calls",
+    [
+        (torch.tensor([[1, 4, 2]]), 0),  # narrow window: w // m_size == 1 -> free view
+        (torch.tensor([[1, 4, 4]]), 1),  # regular window: w // m_size == 2 -> one materialize
+        (torch.tensor([[1, 4, 2], [1, 4, 4]]), 1),  # mixed: only the regular image materializes
+    ],
+)
+def test_patched_fast_pos_embed_interpolate_routes_copy_on_need(monkeypatch, grid_thw, expected_materialize_calls):
+    """The patched fast_pos_embed_interpolate itself (not a tensor-level
+    replica of its internals) keeps the official copy-on-need semantics:
+    narrow windows never call tensor_cast.materialize, regular windows call it
+    exactly once per image, and the outputs match an independent bilinear-
+    interpolation re-derivation (F.grid_sample) for every window shape.
+    """
+    from tensor_cast.transformers.builtin_model.bailing_v3_vl import _tc_fast_pos_embed_interpolate
+
+    hidden_dim = 8
+    torch.manual_seed(0)
+    host = types.SimpleNamespace(
+        num_grid_per_side=6,
+        spatial_merge_size=2,
+        pos_embed=torch.nn.Embedding(6 * 6, hidden_dim),
+    )
+
+    calls = []
+    real_materialize = torch.ops.tensor_cast.materialize
+
+    def counting_materialize(src, shape):
+        calls.append((tuple(src.shape), tuple(shape)))
+        return real_materialize(src, shape)
+
+    monkeypatch.setattr(torch.ops.tensor_cast, "materialize", counting_materialize, raising=False)
+
+    patched_out = _tc_fast_pos_embed_interpolate(host, grid_thw)
+    assert len(calls) == expected_materialize_calls
+    for src_shape, _ in calls:
+        # materialize only ever bills regular windows (w // m_size > 1):
+        # the permuted grid is [h//m, w//m, m, m, C] with w//m > 1.
+        assert len(src_shape) == 5
+        assert src_shape[1] > 1
+
+    expected_out = _expected_interpolate_output(host, grid_thw)
+    # F.interpolate and the manual 4-corner weighted-sum are mathematically
+    # identical but differ in float32 rounding order; allow standard tolerance.
+    torch.testing.assert_close(patched_out, expected_out, rtol=1e-5, atol=1e-6)
+    assert patched_out.shape == expected_out.shape
