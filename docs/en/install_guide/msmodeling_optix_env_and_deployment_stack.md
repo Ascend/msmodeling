@@ -25,7 +25,7 @@ vllm --help
 For MindIE scenarios, confirm that `mindieservice_daemon` is available, or that the installation pointed to by `MIES_INSTALL_PATH` is correct.
 
 > [!NOTE]
-> For the full deployment of the deployment stack, see [VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html), [MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/en/user_guide/quick_start.md), and [AISBench Benchmark Tool Deployment](https://gitee.com/aisbench/benchmark/blob/master/README.md).
+> For the full deployment of the deployment stack, see [VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html), [MindIE Service](https://atomgit.com/Ascend/MindIE-Motor/blob/master/docs/en/user_guide/quick_start.md), and [AISBench Benchmark Tool Deployment](https://gitee.com/aisbench/benchmark/blob/master/README.md).
 
 **3. Optional: Specify the Deployment Root Directory**
 

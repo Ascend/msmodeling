@@ -118,7 +118,7 @@ After generation, open the trace file with `chrome://tracing` or MindStudio Insi
 
 ### 2.3 Run Throughput Optimizer
 
-The throughput optimizer searches for the best parallel strategy and batch configuration under SLO constraints such as TTFT and TPOT. It helps estimate the maximum serving throughput of a target model on target hardware.
+The ServingCast throughput optimizer searches for the best parallel strategy and batch configuration under SLO constraints such as TTFT and TPOT. It helps estimate the maximum serving throughput of a target model on target hardware.
 
 > [!NOTE]
 > PD (Prefill-Decode) colocated means Prefill and Decode run in the same instance. It is suitable for quickly evaluating overall service throughput. To evaluate Prefill and Decode separately, see the [Throughput Optimizer Guide](../user_guide/msmodeling_throughput_optimizer_user_guide.md).
@@ -135,7 +135,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --output-length 1500 \
     --quantize-linear-action W8A8_DYNAMIC \
     --quantize-attention-action DISABLED \
-    --tpot-limit 50
+    --tpot-limits 50
 ```
 
 

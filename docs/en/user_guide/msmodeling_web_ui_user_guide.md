@@ -182,7 +182,7 @@ VL adds image input parameters on top of the LLM simulation.
 | prefix-cache-hit-rate                | Prefix Cache hit rate, in the range [0,1), used to estimate the reuse benefit of prefill tokens |
 | quantize-linear-action               | Quantization method for Linear layers, for example, `W8A8_DYNAMIC`, `FP8`, `MXFP4`, or `HIF8` |
 | quantize-non-expert-linear-action    | Quantization override for non-expert Linear layers, mainly used for DeepSeek V4. It applies to attention projections, dense MLP, and shared experts, while routed MoE experts still use `quantize-linear-action` |
-| quantize-attention-action            | Quantization method for KV Cache/Attention, for example, `DISABLED`, `INT8`, `FP8`, or `HIF8` |
+| quantize-attention-action            | Quantization method for KV Cache/Attention, for example, `disabled`, `int8`, `fp8`, or `hif8` |
 | image-height/image-width             | VL image size |
 
 ### 4.2 Minimal LLM Example: Single-Chip Decode
@@ -830,9 +830,9 @@ You are advised to run [16,32,64,128] in the first round, and then scan finely a
 | Obvious memory pressure | Try `int8` attention or `fp8` |
 | mxfp4 scheme evaluation | Use `mxfp4`, and adjust `mxfp4-group-size` when necessary. |
 
-For A5 HIF8 evaluation, select an A5 device and set `quantize-linear-action` to `HIF8`. The default recipe uses dynamic per-token activations, per-output-channel weights, and FP32 scales. Use `quantize-non-expert-linear-action` for non-expert overrides.
+When evaluating A5 HIF8, select an A5 device and set `quantize-linear-action` to `HIF8`. By default, dynamic per-token activation, per-output-channel weight, and FP32 scale are used. You can configure overrides for non-expert layers with `quantize-non-expert-linear-action`.
 
-Attention/KV is configured independently through `quantize-attention-action`. Selecting `HIF8` stores the KV cache in HIF8 and performs Attention computation in BF16 (performance simulation only); it does not select HIF8 Attention matrix computation. The Linear quantization option does not automatically change the Attention/KV setting.
+Attention/KV is configured independently with `quantize-attention-action`. Selecting `HIF8` means that the KV Cache is stored in HIF8 and Attention is computed in BF16 (for performance simulation only); it does not mean HIF8 Attention matrix computation is used. Linear quantization options do not automatically change the Attention/KV configuration.
 
 Note: The simulation tool focuses on performance and resource estimation and does not replace real accuracy evaluation. The quality of the quantized model still needs to be verified through accuracy tests.
 

@@ -12,6 +12,47 @@ The whole procedure consists of three steps:
 
 If the complete PD service is already deployed and you only need to adjust the benchmark concurrency and request rate, you can start directly from [Step 3](#step-3-fine-tuning-the-complete-pd-service).
 
+## Running the Complete Process with a Single Command
+
+The `pd_disagg.full_service.enabled` switch controls whether OptiX runs the complete pipeline. The default value is `false`. When you set it to `true`, the same command performs the P search, the D search, the ratio recommendation, the deployment of the complete PD service, and the load fine-tuning in sequence, with no manual deployment or second OptiX start in between. When you set it to `false`, OptiX runs only the P/D search and the ratio recommendation, and skips the pre-check, the deployment, and the benchmark of the complete service. You can retain the other complete service settings. Existing configurations that omit this switch are now treated as disabled. To run the complete process, add `enabled = true` explicitly.
+
+```toml
+[pd_disagg.full_service]
+enabled = true  # false: search P/D only and recommend the ratio. true: continue to deploy the complete PD service and fine-tune the load
+```
+
+When you enable the switch, you still need to fill in the load search ranges and the deployment information in the following complete process template.
+
+When you prepare the environment for the first time, install the existing PD plugin. You need to reinstall it after you run `uv sync` again:
+
+```bash
+uv pip install --python .venv/bin/python -e contrib/optix/vllm_pd_simulator
+```
+
+Copy the [complete process configuration template](examples/optix_pd_disaggregation/full_pipeline.toml), and fill in the search parameters, the model, the AISBench short names, and the devices, communication NICs, and Proxy addresses that are allowed in `cluster.hosts` and `vllm_pd.nodes` for your environment. The template shows 24 devices with 8 devices per P/D instance. The paths are resolved relative to the repository root.
+
+```bash
+uv run --no-sync msmodeling optix --mode pd_disagg -c ./pd_full.toml
+```
+
+- When the device pool uses `role="auto"`, OptiX splits it into P and D automatically according to the recommended instance counts. `prefill` and `decode` can restrict the device roles, and you must reserve enough devices for the corresponding role. You can leave devices unused, which is controlled by `use_full_device`. This process requires a flat `vllm_pd.nodes` list and does not accept the old manual group layout.
+- The serving parameters of P and D and their respective fixed startup parameters are passed to the deployment plugin automatically. The TP×DP of each side must match the number of devices per instance on that side. The current plugin requires PP=1. DP>1 applies to MoE models.
+- `full_service.target_field` configures only `CONCURRENCY`, `REQUESTRATE`, and the optional `NUM_PROMPTS`, and the first two must be present. The final phase fixes the ratio and the serving parameters, and reuses the same load settings for service fine-tuning. It does not run PSO again.
+- vLLM parameters that apply only to real PD nodes can be placed in `full_service.prefill_additional_config`/`decode_additional_config`, and they are merged into the `--additional-config` of the corresponding role, for example, `decode_additional_config = { recompute_scheduler_enable = true }`. Single-side searches do not enable them, and the searched parameters still take precedence.
+- The final phase configures the end-to-end TTFT/TPOT targets and the benchmark load separately, and uses the full output length. `vllm_benchmark` and `ais_bench` are supported, and the tool binds the Proxy address automatically. AISBench can reuse the D model configuration, which requires a single explicit model and a literal address, and the configuration file is restored after the run.
+- SSH access, the model, vLLM, CANN, the KV Connector, and the Proxy scripts must be ready before execution. The deployment plugin starts and stops the services and performs health checks. All resources must be dedicated to this test. Single-side searches still run in sequence on the devices configured on the current controller.
+
+When you set `enabled = true`, view **`output/pd_disagg/<run_id>/final_result.md`** directly after the run finishes. The command prints the path of this file at the end. The report presents the following in a single file:
+
+- The complete process status, and the throughput, TTFT, TPOT, success rate, and per-item SLO results of the complete service.
+- The final concurrency, request rate, and benchmark command overrides.
+- The final P/D serving parameters, the single-side load and metrics, the theoretical ratio, and the actual instance counts.
+- The actual machines, containers, physical devices, Proxy addresses, and the complete deployment configuration, which is embedded as JSON for direct checking and extraction.
+
+If the process fails midway, the same report records the failed phase, the error, and the phase results that are already saved. It does not mark missing metrics as meeting the target. `status="completed"` indicates that the process is complete, and `full_service.slo_met` separately indicates whether all performance targets are met.
+
+The existing `pd_disagg_summary.json`, `full_service/deployment.json`, the `phase_result.json` of each phase, and the CSV files are retained for traceability. For daily checks of the final result, you do not need to open them one by one. When `enabled = false` or the complete service is not configured, this report is not generated, and the status, files, and viewing method of step-by-step mode remain unchanged. The complete service stops automatically after it finishes.
+
 ## Preparing the Environment and Configuration Files
 
 First install OptiX as described in [Environment Preparation and Installation](../user_guide/msmodeling_optix_user_guide.md#4-environment-preparation-and-installation), and confirm that `vllm` and the benchmark tool you choose are available in the runtime environment.
@@ -101,6 +142,8 @@ others = "--seed 1024 --num-prompts 500 --random-input-len 1024 --random-output-
 The P phase sets the output length to 1 so that requests end after the first token, which mainly measures the processing capability of Prefill. The D phase enables prefix caching and runs two consecutive benchmark runs on the same group of candidates: the first run fills the cache, and the second run records the metrics. The two runs share one vLLM instance, and the warm-up result of the first round is not counted toward the search score or the ratio.
 
 The two Decode rounds must issue identical requests. Therefore, the example sets `--seed 1024` in the **benchmark command**. The input and output lengths, the number of requests, the concurrency, and the request rate must also remain consistent. Setting the seed only in `vllm serve` cannot make the benchmark requests identical. Cache warm-up can reduce the effect of Prefill on the standalone D benchmark, but the performance of the complete PD pipeline still needs to be verified in Step 3.
+
+If the current model or engine does not support prefix caching for this scenario, set `--no-enable-prefix-caching` explicitly in the standalone D benchmark and in the corresponding role of the complete PD service. In this case, the repeated benchmark runs can still warm up the runtime environment, but the standalone D requests include the Prefill cost. Therefore, their throughput cannot be regarded as pure Decode capacity.
 
 | Parameter | Meaning and How to Modify It |
 |---|---|
@@ -207,6 +250,8 @@ others = "--datasets your_prefill_dataset_config"
 
 For the D phase, specify the corresponding configuration in `[pd_disagg.decode.benchmark_command_overrides]` in the same way. For `models` and `datasets`, enter the short names of the configurations that AISBench can resolve. `datasets` is passed through `others`. The Python model configuration of AISBench also needs the correct service address, port, and served model name. If you use `ais_bench` and need to enable steady-state testing, you can append `--summarizer stable_stage` to `others` in `[ais_bench.command]`, for example, `others = "--datasets your_dataset_config --summarizer stable_stage"`.
 
+When you use `stable_stage`, the number of requests must be greater than the concurrency, and enough requests must remain to be injected later. If the number of requests equals the concurrency, no valid steady-state interval can be formed. For short-budget verification, restrict the concurrency range accordingly and check the number of samples that actually participate in the steady-state statistics.
+
 Set the output length of P to 1 token. The model and dataset configurations of D should ensure that the warm-up and the formal benchmark runs generate identical requests. The configuration method of AISBench differs from that of `vllm_benchmark`. Do not reuse parameters such as `--random-input-len` directly. The OptiX command fields that you can override are `models`, `mode`, `work_dir`, and `others`.
 
 Check whether the short names can be resolved in the environment where AISBench runs, and then start the search. Replace the following short names with your own configurations and check once for P and D respectively:
@@ -240,7 +285,7 @@ You can also format and view the summary directly:
 python -m json.tool result/pd_disagg/<run_id>/pd_disagg_summary.json
 ```
 
-`pd_ratio` indicates **the number of P instances / the number of D instances** and is calculated as follows:
+`pd_ratio` indicates **the number of P instances/the number of D instances** and is calculated as follows:
 
 ```text
 pd_ratio = QPS of a single D instance / QPS of a single P instance

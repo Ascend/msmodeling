@@ -2,7 +2,7 @@
 
 This document is intended for first-time OptiX users. It walks you through model preparation, image and container deployment, tool installation, agent-driven optimization, and result viewing in sequence.
 
-**Scope**: Linux, Ascend NPU, vLLM Ascend, and OptiX agent mode. Obtain the tool from the [msmodeling official repository](https://gitcode.com/Ascend/msmodeling/). For the installation steps, see section 4.
+**Scope**: Linux, Ascend NPU, vLLM Ascend, and OptiX agent mode. Obtain the tool from the [msmodeling official repository](https://atomgit.com/Ascend/msmodeling/). For the installation steps, see section 4.
 
 **Before you start, ensure that the following conditions are met:**
 
@@ -134,7 +134,7 @@ Pass criteria: Both of the preceding checks complete without a password prompt a
 msmodeling is the tool repository that contains OptiX and the optimization Skill. The following downloads the master branch of the main repository to the mount directory that you created in the previous section:
 
 ```bash
-git clone --branch master https://gitcode.com/Ascend/msmodeling.git /tmp/msmodeling-source
+git clone --branch master https://atomgit.com/Ascend/msmodeling.git /tmp/msmodeling-source
 cp -a /tmp/msmodeling-source/. /workspace/msmodeling/
 cd /workspace/msmodeling
 ```
