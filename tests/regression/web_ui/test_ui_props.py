@@ -281,3 +281,36 @@ class TestUIPropsModuleIntegration:
         for module_id in ["text_generate", "throughput_optimizer", "video_generate", "image_generate"]:
             ui = get_ui(module_id)
             assert "model-id" in ui, f"Module {module_id} missing model-id field"
+
+
+class TestLegacyMtpFieldsHidden:
+    """Legacy MTP fields should be hidden in favor of unified speculative entry."""
+
+    def test_text_generate_num_mtp_tokens_hidden(self):
+        """text_generate: num-mtp-tokens is hidden (superseded by speculative-method)."""
+        ui = get_ui("text_generate")
+        assert ui["num-mtp-tokens"].hidden is True
+
+    def test_throughput_optimizer_num_mtp_tokens_hidden(self):
+        """throughput_optimizer: num-mtp-tokens is hidden."""
+        ui = get_ui("throughput_optimizer")
+        assert ui["num-mtp-tokens"].hidden is True
+
+    def test_throughput_optimizer_mtp_acceptance_rates_hidden(self):
+        """throughput_optimizer: mtp-acceptance-rates is hidden."""
+        ui = get_ui("throughput_optimizer")
+        assert ui["mtp-acceptance-rates"].hidden is True
+
+
+class TestModelIdOptions:
+    """MODEL_ID_OPTIONS should include recent models."""
+
+    def test_minimax_m31_flash_in_options(self):
+        """MiniMax-M3.1-Flash is in model options."""
+        model_ids = [opt["value"] for opt in MODEL_ID_OPTIONS]
+        assert "MiniMaxAI/MiniMax-M3.1-Flash" in model_ids
+
+    def test_minimax_m3_in_options(self):
+        """MiniMax-M3 is in model options."""
+        model_ids = [opt["value"] for opt in MODEL_ID_OPTIONS]
+        assert "MiniMaxAI/MiniMax-M3" in model_ids

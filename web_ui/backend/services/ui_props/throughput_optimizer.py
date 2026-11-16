@@ -31,7 +31,7 @@ from cli.registry.modules import get_spec
 from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
-VERSION = "2.9.21"
+VERSION = "2.9.22"
 
 TITLE = I18nText("吞吐优化", "Throughput Optimizer")
 RUNNER = "ParallelRunner"
@@ -347,7 +347,15 @@ UI: dict[str, UIFieldProps] = {
         control="switch",
     ),
     "compile-allow-graph-break": UIFieldProps(hidden=True),
+    # Legacy MTP entry (num-mtp-tokens + mtp-acceptance-rates) — superseded by the
+    # unified speculative decoding entry (speculative-method=mtp +
+    # num-speculative-tokens + acceptance-length). Hidden from the form so users
+    # go through the new entry. Safe to hide: the runner forces num_mtp_tokens=0
+    # whenever speculative-method is set (runners/throughput_optimizer.py), and
+    # the defaults below (0 = MTP off) are inert on a baseline run. conditions is
+    # kept so the legacy defaults drop out of the submission once a method is set.
     "num-mtp-tokens": UIFieldProps(
+        hidden=True,
         label=I18nText("MTP token 数", "MTP Token Count"),
         tooltip=I18nText(
             'MTP token 数量（argparse 允许 0-9；运行时受 mtp_acceptance_rate 长度限制）。推荐使用"投机解码方法=mtp + 投机 token 数"统一入口。选定 speculative-method 后此字段自动禁用。',
@@ -364,6 +372,7 @@ UI: dict[str, UIFieldProps] = {
         conditions={"enabled": {"field": "speculative-method", "op": "empty"}},
     ),
     "mtp-acceptance-rates": UIFieldProps(
+        hidden=True,
         label=I18nText("MTP 接收率列表", "MTP Acceptance Rate List"),
         tooltip=I18nText(
             "MTP 接收率列表。仅在 num_mtp_tokens > 0 时有效。选定 speculative-method 后此字段自动禁用。",

@@ -294,10 +294,19 @@ defineExpose({ formItemRef })
       @blur="onBlur"
     />
 
-    <!-- Select dropdown -->
+    <!-- Select dropdown. `clearable` is schema-driven (field.clearable, which
+         is flattened from ui_props UIFieldProps.clearable during field
+         resolution) — a field whose value gates other fields via
+         `conditions.enabled` MUST be resettable, otherwise the gated fields
+         stay locked with no way back (e.g. speculative-method gating the draft
+         options num-draft-layers / dspark-markov-*). Clearing writes null,
+         matching the schema `default: null` these fields declare, rather than
+         el-select's built-in `undefined`. -->
     <el-select
       v-else-if="field.control === 'select'"
       v-model="internalValue"
+      :clearable="field.clearable === true"
+      :value-on-clear="null"
       :placeholder="fieldPlaceholder"
       :disabled="isDisabled || !!optionsError"
       :loading="loading"

@@ -70,9 +70,14 @@ const menuPlugins = computed(() =>
     })),
 )
 
-// Active-nav detection: '/' matches only the exact root; other paths match by prefix.
+// Active-nav detection: '/' redirects straight to '/console', so route.path is
+// never '/' — treat both as home or the Home button would never show active
+// (and clicking it on the console is a duplicate navigation, i.e. a no-op).
+// Other paths match by prefix.
+const HOME_PATHS = ['/', '/console'] // keep in sync with the '/' redirect in the router config
+
 const isCurrent = (to: string) =>
-  to === '/' ? route.path === '/' : route.path.startsWith(to)
+  to === '/' ? HOME_PATHS.includes(route.path) : route.path.startsWith(to)
 </script>
 
 <template>

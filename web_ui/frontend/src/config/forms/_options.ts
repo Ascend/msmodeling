@@ -107,6 +107,7 @@ export const MODEL_ID_OPTIONS = [
   v('MiniMaxAI/MiniMax-M2.5'),
   v('MiniMaxAI/MiniMax-M2.7'),
   v('MiniMaxAI/MiniMax-M3'),
+  v('MiniMaxAI/MiniMax-M3.1-Flash'),
   // --- Qwen3-VL (Dense) ---
   v('Qwen/Qwen3-VL-2B-Instruct'),
   v('Qwen/Qwen3-VL-4B-Instruct'),

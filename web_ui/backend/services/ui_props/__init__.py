@@ -338,6 +338,7 @@ MODEL_ID_OPTIONS: list[dict] = [
     _v("MiniMaxAI/MiniMax-M2.5"),
     _v("MiniMaxAI/MiniMax-M2.7"),
     _v("MiniMaxAI/MiniMax-M3"),
+    _v("MiniMaxAI/MiniMax-M3.1-Flash"),
     # --- Qwen3-VL (Dense) ---
     _v("Qwen/Qwen3-VL-2B-Instruct"),
     _v("Qwen/Qwen3-VL-4B-Instruct"),

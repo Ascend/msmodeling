@@ -31,7 +31,7 @@ from cli.registry.modules import get_spec
 from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
-VERSION = "2.6.14"
+VERSION = "2.6.15"
 
 TITLE = I18nText("视频生成", "Video Generate")
 RUNNER = "VideoGenerateRunner"

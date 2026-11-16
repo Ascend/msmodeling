@@ -136,6 +136,23 @@ export const useFormStateStore = defineStore('formState', () => {
     }
   }
 
+  // Whether a field currently participates in the submission, i.e. its
+  // `conditions.enabled` predicate holds against the live form model. Fields
+  // without such a predicate are always active.
+  //
+  // Shared by getFormValues (params) and getTouchedFields (provided) so the two
+  // sets can never disagree. They MUST stay in lockstep: `provided` mirrors CLI
+  // argv-present semantics, and wants_provided validators (e.g.
+  // draftLegacyMtpMutex) reject a flag merely for being in `provided`. If a
+  // condition-disabled field were stripped from params but kept in provided, the
+  // backend would report a conflict against a value the submission does not
+  // contain — and the user could not fix it, because the field is disabled.
+  function isFieldActive(fieldId: string): boolean {
+    const field = (schema.value?.fields ?? []).find((f: any) => f.id === fieldId)
+    if (!field?.conditions?.enabled) return true
+    return evalPredicate(field.conditions.enabled, form.value)
+  }
+
   // Get current form values. Statically hidden fields (schema `hidden: true`
   // from backend ui_props) are INCLUDED — hidden only means "no visible
   // control"; the value (schema default or a programmatic override, e.g.
@@ -145,13 +162,7 @@ export const useFormStateStore = defineStore('formState', () => {
   function getFormValues(): FormModel {
     const out: FormModel = {}
     for (const [k, v] of Object.entries(form.value)) {
-      // Check if field is disabled by conditions
-      const field = (schema.value?.fields ?? []).find((f: any) => f.id === k)
-      if (field?.conditions?.enabled) {
-        const isEnabled = evalPredicate(field.conditions.enabled, form.value)
-        if (!isEnabled) continue  // Skip disabled fields
-      }
-
+      if (!isFieldActive(k)) continue // Skip disabled fields
       out[k] = v
     }
     return out
@@ -161,9 +172,14 @@ export const useFormStateStore = defineStore('formState', () => {
   // Used at submit time to build the `provided` set for wants_provided=True
   // validators — mirrors CLI semantics where argv-present flags are "provided"
   // regardless of whether their value equals the default.
+  //
+  // Condition-disabled fields are excluded, matching getFormValues: a value that
+  // is not submitted cannot have been "provided". Note `touched` is also set by
+  // programmatic setFieldValue callers (model-features fills, benchmark
+  // expand/collapse, prefill), so this filter is not only about user typing.
   function getTouchedFields(): string[] {
     return Object.entries(fieldStates.value)
-      .filter(([, state]) => state.touched)
+      .filter(([id, state]) => state.touched && isFieldActive(id))
       .map(([id]) => id)
   }
 

@@ -31,7 +31,7 @@ from cli.registry.modules import get_spec
 from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 TITLE = I18nText("吞吐优化 (Benchmark)", "Throughput Optimizer (Benchmark)")
 RUNNER = "ParallelRunner"
 

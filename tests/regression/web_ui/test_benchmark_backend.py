@@ -231,7 +231,7 @@ class TestBenchmarkSchemaGeneration:
         # moduleId is the benchmark-specific key: the schema registry, job
         # submission and result fetch all look up this module_id.
         assert schema["moduleId"] == "throughput_optimizer_benchmark"
-        assert schema["version"] == "1.0.10"
+        assert schema["version"] == "1.0.11"
 
         field_ids = [f["id"] for f in schema["fields"]]
         # Check visible fields
