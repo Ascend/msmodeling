@@ -882,7 +882,6 @@ class TestModelRunnerProfilingMetrics:
         monkeypatch.setattr(model_runner_module, "MemoryTracker", lambda _device: FakeMemoryTracker())
         monkeypatch.setattr(model_runner_module, "kv_cache_excluded_layer_indices", lambda _model: set())
         monkeypatch.setattr(model_runner_module, "dcp_kv_token_capacity_factor", lambda _model: 1)
-        monkeypatch.setattr(model_runner_module, "get_visual", lambda _model: None)
 
         runner = object.__new__(ModelRunner)
         runner.perf_models = [pm]
