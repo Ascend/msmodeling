@@ -29,8 +29,10 @@ _VENDORED_MODEL_CONFIG_DIRS: dict[str, str] = {
     "MiniMaxAI/MiniMax-M2": "minimax_m2",
     "MiniMaxAI/MiniMax-M2.7": "minimax_m2_7",
     "inclusionAI/Ling-3.0-flash-VL": "ling_3_0_flash_vl",
+    "inclusionAI/Ling-1T": "ling_1t",
     "inclusionAI/Ling-flash-2.0": "ling_flash_2_0",
     "moonshotai/Kimi-K2-Thinking": "kimi_k2_thinking",
+    "moonshotai/Kimi-K2.5": "kimi_k2_5",
     "Qwen/Qwen2.5-7B": "qwen2_5_7b",
     "Qwen/Qwen3-0.6B": "qwen3_dense_0_6b",
     "Qwen/Qwen3-8B": "qwen3_dense_8b",
@@ -53,6 +55,7 @@ _VENDORED_MODEL_CONFIG_DIRS: dict[str, str] = {
     "zai-org/GLM-4.5V": "glm4v_moe_4_5v",
     "zai-org/GLM-4.7": "glm4_7",
     "zai-org/GLM-5.1": "glm5_1",
+    "zai-org/GLM-5.2": "glm5_2",
 }
 
 # Hub repo id -> directory name under tests/assets/model_config/.

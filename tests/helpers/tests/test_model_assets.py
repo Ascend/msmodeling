@@ -32,8 +32,10 @@ from tests.helpers.model_assets import (
     (
         "MiniMaxAI/MiniMax-M2",
         "MiniMaxAI/MiniMax-M2.7",
+        "inclusionAI/Ling-1T",
         "inclusionAI/Ling-flash-2.0",
         "moonshotai/Kimi-K2-Thinking",
+        "moonshotai/Kimi-K2.5",
         "Qwen/Qwen2.5-7B",
         "Qwen/Qwen3-0.6B",
         "Qwen/Qwen3-8B",
@@ -56,6 +58,7 @@ from tests.helpers.model_assets import (
         "zai-org/GLM-4.5V",
         "zai-org/GLM-4.7",
         "zai-org/GLM-5.1",
+        "zai-org/GLM-5.2",
     ),
 )
 def test_vendored_model_config_path_returns_complete_local_fixture(model_id: str) -> None:
