@@ -7,6 +7,8 @@
 
 本文使用 Python 模块入口 `python -m cli.inference.throughput_optimizer`；安装后也可使用 `msmodeling inference throughput-optimizer`，二者调用同一实现并接受相同参数。
 
+完整场景命令和结果解读见[Throughput Optimizer 渐进式场景案例](throughput_optimizer_scenarios.md)。
+
 ## 2 主要场景
 
 吞吐优化器可用于硬件规划、SLO 约束下的吞吐寻优、PD 分离部署设计，以及反推「满足目标 QPS 所需最少卡数」的容量规划。按部署形态划分，主要支持以下五类场景：
