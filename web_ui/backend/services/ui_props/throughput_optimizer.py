@@ -460,9 +460,13 @@ UI: dict[str, UIFieldProps] = {
         group={"zh": "搜索", "en": "Search"},
         control="text",
     ),
-    # Multimodal CLI-only knob (PR-5 P1-05): it shapes the serving-level image
-    # modelling rather than a Web UI benchmark form, so it stays hidden.
+    # Multimodal CLI-only knobs: they shape the serving-level image modelling
+    # rather than a Web UI benchmark form, so they stay hidden.
     "encoder-budget": UIFieldProps(hidden=True),
+    "encoder-budgets": UIFieldProps(hidden=True),
+    "image-cache-capacity": UIFieldProps(hidden=True),
+    "image-cache-capacities": UIFieldProps(hidden=True),
+    "vision-tp-sizes": UIFieldProps(hidden=True),
     "dcp-sizes": UIFieldProps(hidden=True),
     "enable-shared-expert-tp": UIFieldProps(hidden=True),
     "compilation-config": UIFieldProps(

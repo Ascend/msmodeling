@@ -19,6 +19,7 @@ import copy
 import logging
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
 from functools import partial
 import multiprocessing as mp
 from multiprocessing.context import BaseContext
@@ -55,6 +56,24 @@ from .service.utils import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_structural_candidate_error(exc: BaseException) -> bool:
+    """True when the failure is about building this candidate's shapes.
+
+    Type first: ``UndeployableCandidateError`` is the explicit contract for
+    "this candidate cannot be served" (image span / encoder budget / cache
+    reservation), so a new undeployable check does not need to be added to a
+    brittle message list. The historical message fragments stay as a fallback
+    for errors that arrive as a plain ``RuntimeError`` through the process
+    pool. Everything else keeps propagating.
+    """
+    from serving_cast.service.multimodal import UndeployableCandidateError
+
+    if isinstance(exc, UndeployableCandidateError):
+        return True
+    text = str(exc)
+    return "split_sizes" in text or "vision_tp" in text
 
 
 class ParallelRunner:
@@ -146,6 +165,7 @@ class ParallelRunner:
             image_height=self.args.image_height,
             image_width=self.args.image_width,
             encoder_budget=getattr(self.args, "encoder_budget", None),
+            image_cache_capacity_mib=getattr(self.args, "image_cache_capacity", None),
             ttft_limits=self.args.ttft_limits,
             max_batched_tokens=max_batched_tokens,
             max_concurrency=getattr(self.args, "max_concurrency", None),
@@ -166,23 +186,157 @@ class ParallelRunner:
             concurrency_search_strategy=self.args.concurrency_search_strategy,
         )
 
+    @contextmanager
+    def _vision_tp_override(self) -> Iterator[None]:
+        """Restore ``args.vision_tp_size`` after the sweep, however it exits.
+
+        ``vision_tp_size`` has to be written on the runner args because
+        ``UserInputConfig.from_args()`` reads the scalar name. A candidate
+        without a value must not inherit the previous one, and the caller's args
+        object (shared with later device/planning runs) must not stay mutated.
+        """
+        had_vision_tp = hasattr(self.args, "vision_tp_size")
+        original_vision_tp = getattr(self.args, "vision_tp_size", None)
+        try:
+            yield
+        finally:
+            if had_vision_tp:
+                self.args.vision_tp_size = original_vision_tp
+            elif hasattr(self.args, "vision_tp_size"):
+                # The attribute only existed because this sweep created it.
+                del self.args.vision_tp_size
+
     def run_agg(self) -> list[OptimizerSummary]:
         logger.info(
             "Run Aggregation with ttft %r ms, tpot %r ms.",
             self.args.ttft_limits,
             self.args.tpot_limits,
         )
-        overwrite_optimizer_data = copy.deepcopy(self.optimizer_data)
-        overwrite_optimizer_data.tpot_limits = self.args.tpot_limits
-        summary_list = self._get_df_list(overwrite_optimizer_data)
-
-        self._add_summary_result(summary_list, overwrite_optimizer_data)
-
+        combos = self._multimodal_search_combos()
+        with self._vision_tp_override():
+            for combo in combos:
+                summary_list = self._run_agg_combo(combo)
+                if summary_list is None:
+                    continue
+                self._add_summary_result(summary_list, self._combo_data(combo))
         return self.summary_result
+
+    def _combo_data(self, combo: Optional[dict]) -> OptimizerData:
+        """``OptimizerData`` for one sweep candidate (also used by the caller)."""
+        data = copy.deepcopy(self.optimizer_data)
+        data.tpot_limits = self.args.tpot_limits
+        if combo is not None:
+            if combo.get("encoder_budget") is not None:
+                data.encoder_budget = combo["encoder_budget"]
+            if combo.get("image_cache_capacity_mib") is not None:
+                data.image_cache_capacity_mib = combo["image_cache_capacity_mib"]
+        return data
+
+    def _run_agg_combo(self, combo: Optional[dict]) -> Optional[list[OptimizerSummary]]:
+        """Run one sweep candidate; skip structural failures, return others."""
+        if combo is not None and combo.get("vision_tp_size") is not None:
+            # A sweep either sets a degree on every candidate or on none:
+            # ``UserInputConfig.vision_tp_size`` is a validated ``int = 1`` and
+            # rejects None, so an absent value keeps the caller's.
+            self.args.vision_tp_size = combo["vision_tp_size"]
+        overwrite_optimizer_data = self._combo_data(combo)
+        try:
+            summary_list = self._get_df_list(overwrite_optimizer_data)
+        except (RuntimeError, ValueError) as exc:
+            # A candidate the model cannot build (e.g. a vision tower that
+            # cannot shard at this degree) is skipped and counted, exactly
+            # like an undeployable encoder budget: one bad point of the
+            # sweep must not abort the rest (P1-36).
+            if combo is None or not _is_structural_candidate_error(exc):
+                raise
+            logger.warning(
+                "Skipping candidate vision_tp=%r encoder_budget=%r cache=%r: %s",
+                combo.get("vision_tp_size"),
+                combo.get("encoder_budget"),
+                combo.get("image_cache_capacity_mib"),
+                exc,
+            )
+            return None
+        if combo is not None:
+            # Keep the candidate identity on every row so the sweep is
+            # readable without cross-referencing the run order (P1-36).
+            for summary in summary_list:
+                df = summary.get_summary_df()
+                if df is None or df.empty:
+                    continue
+                df = df.copy()
+                df["vision_tp_size"] = combo.get("vision_tp_size")
+                df["encoder_budget"] = combo.get("encoder_budget")
+                df["image_cache_capacity_mib"] = combo.get("image_cache_capacity_mib")
+                summary.set_summary_df(df)
+        return summary_list
+
+    def _multimodal_search_combos(self) -> list[Optional[dict]]:
+        """Cross product of the multimodal search dimensions (P1-36).
+
+        Returns ``[None]`` when no sweep was requested, so the historical
+        single-run path and its result schema stay untouched.
+        """
+        budgets = getattr(self.args, "encoder_budgets", None)
+        capacities = getattr(self.args, "image_cache_capacities", None)
+        vision_tps = getattr(self.args, "vision_tp_sizes", None)
+        # ``nargs="*"`` turns a bare flag into ``[]``, which means "the user asked
+        # for a sweep" and not "no sweep": only ``None`` (flag absent) keeps the
+        # historical single-run path.
+        if budgets is None and capacities is None and vision_tps is None:
+            return [None]
+        budgets = list(budgets) if budgets else [getattr(self.args, "encoder_budget", None)]
+        capacities = list(capacities) if capacities else [getattr(self.args, "image_cache_capacity", None)]
+        # ``vision_tp_size`` lives on UserInputConfig, so None keeps the model's
+        # own default (vision TP=1) and the scalar --vision-tp-size wins if set.
+        vision_tps = list(vision_tps) if vision_tps else [getattr(self.args, "vision_tp_size", None)]
+        combos = [
+            {
+                "vision_tp_size": vision_tp,
+                "encoder_budget": budget,
+                "image_cache_capacity_mib": capacity,
+            }
+            for vision_tp in vision_tps
+            for budget in budgets
+            for capacity in capacities
+        ]
+        logger.info(
+            "Multimodal search: %d candidate(s) over vision TP %r x encoder budgets %r x cache capacities %r",
+            len(combos),
+            vision_tps,
+            budgets,
+            capacities,
+        )
+        return combos
+
+    def _reject_multimodal_sweep_outside_agg(self) -> None:
+        """Fail loudly when a multimodal sweep is asked for on the PD path.
+
+        Only ``run_agg`` expands the cross product; the Prefill/Decode and PD
+        ratio paths take the scalar values instead. Silently ignoring the sweep
+        would hand back a single-candidate result that looks like a comparison
+        of every candidate the caller listed (review: zhenyu_zhang).
+        """
+        requested = [
+            flag
+            for flag, attr in (
+                ("--vision-tp-sizes", "vision_tp_sizes"),
+                ("--encoder-budgets", "encoder_budgets"),
+                ("--image-cache-capacities", "image_cache_capacities"),
+            )
+            if getattr(self.args, attr, None) is not None
+        ]
+        if requested:
+            raise ValueError(
+                f"multimodal sweep dimension(s) {', '.join(requested)} are aggregation-only; "
+                "the --disagg / PD ratio paths run the scalar values. Drop the sweep flags, "
+                "or run without --disagg."
+            )
 
     def run_disagg(self) -> list[OptimizerSummary]:
         # if set pd_ratio, run PD ratio optimization
         # if set ttft_limits, run Prefill; if set tpot_limits, run Decode
+        self._reject_multimodal_sweep_outside_agg()
         if self.args.enable_optimize_prefill_decode_ratio:
             return self._run_pd_ratio()
 

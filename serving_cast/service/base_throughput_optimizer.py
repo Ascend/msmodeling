@@ -480,11 +480,21 @@ class BaseThroughputOptimizer(ABC):
         reserved_memory_gb,
         memory_left_gb,
         batch_size,
+        static_reservation_gb=0.0,
     ):
-        """Average non-weight memory per request for the reported fallback value."""
+        """Average non-weight memory per request for the reported fallback value.
+
+        ``static_reservation_gb`` is the multimodal cache reservation charged
+        to ``memory_left_gb``. It is a fixed cost, not a per-request one:
+        folding it into this term would make the linear search believe every
+        extra request costs the whole cache reservation and truncate the legal
+        concurrency range (review: zhenyu_zhang P2).
+        """
         if batch_size <= 0:
             return 0
-        return (total_device_memory_gb - model_weight_size_gb - reserved_memory_gb - memory_left_gb) / batch_size
+        return (
+            total_device_memory_gb - model_weight_size_gb - reserved_memory_gb - static_reservation_gb - memory_left_gb
+        ) / batch_size
 
     def _maybe_set_search_info(
         self,
@@ -494,6 +504,7 @@ class BaseThroughputOptimizer(ABC):
         ttft,
         tpot,
         summary,
+        static_reservation_gb=0.0,
     ):
         if optimizer_data.concurrency_search_strategy == "linear_exponential":
             per_request_memory_gb = self._compute_per_request_memory_gb(
@@ -502,6 +513,7 @@ class BaseThroughputOptimizer(ABC):
                 self.model_runner.user_input.reserved_memory_gb,
                 memory_left_gb,
                 batch_size,
+                static_reservation_gb=static_reservation_gb,
             )
 
             summary.set_search_info(
@@ -783,6 +795,18 @@ class BaseThroughputOptimizer(ABC):
 
         return latency, memory_left_gb, breakdowns, record.memory_info
 
+    def _fully_cached_image_bins(self, optimizer_data: OptimizerData) -> bool:
+        """True when every image-bearing bin has all of its images Encoder-cached.
+
+        Partial hits still run the vision tower for the whole request (the
+        documented conservative contract), so only a full hit set can remove
+        the vision waves from this candidate's accounting.
+        """
+        if optimizer_data.length_distribution is None:
+            return False
+        image_rows = [row for row in optimizer_data.get_representative_rows() if row.get("images")]
+        return bool(image_rows) and all(int(row.get("cached_images", 0)) >= len(row["images"]) for row in image_rows)
+
     def _encoder_row_accounting(self, optimizer_data: OptimizerData, concurrency: int) -> tuple[int, float]:
         """``(encoder_waves, vision_time_ms)`` for the result row (P1-05).
 
@@ -791,7 +815,15 @@ class BaseThroughputOptimizer(ABC):
         vision cost of the additional waves; it needs a measured vision delta, so
         it is reported only when ``--encoder-budget`` actually splits the batch
         and a measurement is available.
+
+        An Encoder hit only removes the vision tower for a request whose every
+        image is cached. When all image-bearing bins are fully hit, the forward
+        carries no image input at all, so no wave is charged. A mixed batch is
+        charged the full plan on purpose: it is the conservative direction and
+        avoids inventing a partial-vision wave divisor.
         """
+        if self._fully_cached_image_bins(optimizer_data):
+            return 0, 0.0
         template = getattr(optimizer_data, "distribution_images", None)
         plan = self._resolve_encoder_wave_plan(
             optimizer_data,
@@ -1073,6 +1105,142 @@ class BaseThroughputOptimizer(ABC):
             optimizer_data.image_width,
         )
 
+    def _multimodal_cache_reservation_bytes(self, optimizer_data: OptimizerData) -> int:
+        """Bytes the candidate's static multimodal cache reserves on the card.
+
+        Single budget source shared by the simulated cache and the VRAM
+        feasibility check: both read the per-candidate
+        ``image_cache_capacity_mib``. The optimizer never writes that value
+        back to the global ``Config`` (the singleton is shared by every
+        component), so one candidate cannot leak its reservation into another
+        candidate or a later run.
+        """
+        capacity_mib = getattr(optimizer_data, "image_cache_capacity_mib", None)
+        if not capacity_mib or capacity_mib <= 0:
+            return 0
+        return int(capacity_mib) * 1024 * 1024
+
+    def _prepare_multimodal_cache(self, optimizer_data: OptimizerData) -> Optional[dict]:
+        """Resolve Encoder/Prefix hits for the representative bins."""
+        reserved_bytes = self._multimodal_cache_reservation_bytes(optimizer_data)
+        if not reserved_bytes or optimizer_data.length_distribution is None:
+            return None
+        rows = optimizer_data.get_representative_rows()
+        if not any(row.get("images") for row in rows):
+            return None
+        runner = self.model_runner
+        if runner is None:
+            return None
+        model = runner.model
+
+        from serving_cast.service.multimodal import resolve_image_geometry
+        from serving_cast.service.multimodal_cache import (
+            MultimodalCache,
+            encoder_entry_bytes,
+            image_cache_key,
+            kv_bytes_per_token,
+            language_hidden_and_dtype_bytes,
+            prefix_cache_key,
+        )
+
+        try:
+            _, dtype_bytes = language_hidden_and_dtype_bytes(model)
+        except ValueError:
+            return None
+        try:
+            kv_token_bytes = kv_bytes_per_token(model.model_config.hf_config, dtype_bytes)
+        except ValueError:
+            # Without a KV per-token figure the Prefix pool cannot be sized;
+            # leave it disabled rather than guessing (Encoder still works).
+            kv_token_bytes = 0
+
+        # The reservation stays local to this candidate: the optimizer never
+        # writes the global Config singleton (it is shared by every component and
+        # mutating it would leak the reservation across candidates and runs).
+        cache = MultimodalCache(reserved_bytes=reserved_bytes)
+        model_id = getattr(model, "model_id", "") or ""
+        media_version = getattr(optimizer_data, "media_version", "") or ""
+        adapter_version = getattr(optimizer_data, "adapter_version", "") or ""
+        row_entries = []
+        for index, row in enumerate(rows):
+            specs = tuple(row.get("images", ()))
+            image_tokens = [resolve_image_geometry(model, spec)["num_image_tokens"] for spec in specs]
+            entry_bytes = [encoder_entry_bytes(model, tokens) for tokens in image_tokens]
+            prompt_tokens = row["num_input_tokens"] + sum(image_tokens)
+            # A statistical distribution carries no literal prompt text, so the
+            # bins must not share a Prefix entry: reusing it would attribute one
+            # bin's prefix to another bin's (different) prompt. Keying by the
+            # bin keeps the cold/warm hit inside one row and stops the cross-bin
+            # reuse that the review found (a 64-token bin serving a 128-token one).
+            text_id = str(row.get("text_id", "") or "") or f"bin:{index}"
+            row_entries.append((index, row, specs, entry_bytes, prompt_tokens, text_id))
+
+        # Deterministic victim order across BOTH layers: lightest bin first,
+        # then larger entries, then fingerprint. Prefix entries are included;
+        # otherwise a small pool can be pinned by one prefix and starve every
+        # Encoder entry, and the resident set depends on bin enumeration order
+        # (review: zhenyu_zhang / stormchasingg).
+        victims: dict[str, tuple[float, int]] = {}
+        for index, row, specs, entry_bytes, prompt_tokens, text_id in row_entries:
+            ratio = float(row.get("request_ratio", 0.0))
+            for spec, size in zip(specs, entry_bytes):
+                fingerprint = image_cache_key(model_id, media_version, spec).fingerprint()
+                if fingerprint not in victims or ratio > victims[fingerprint][0]:
+                    victims[fingerprint] = (ratio, size)
+            prefix_bytes = prompt_tokens * kv_token_bytes if kv_token_bytes else 0
+            if prefix_bytes:
+                fingerprint = prefix_cache_key(model_id, adapter_version, media_version, text_id, specs).fingerprint()
+                if fingerprint not in victims or ratio > victims[fingerprint][0]:
+                    victims[fingerprint] = (ratio, prefix_bytes)
+        order = [
+            fingerprint
+            for fingerprint, (ratio, size) in sorted(
+                victims.items(), key=lambda item: (item[1][0], -item[1][1], item[0])
+            )
+        ]
+
+        def _lookup(entry):
+            index, row, specs, entry_bytes, prompt_tokens, text_id = entry
+            return cache.lookup(
+                prefix_cache_key(model_id, adapter_version, media_version, text_id, specs),
+                [image_cache_key(model_id, media_version, spec) for spec in specs],
+                prefix_tokens=prompt_tokens,
+                image_entry_bytes=entry_bytes,
+                prefix_kv_bytes=prompt_tokens * kv_token_bytes if kv_token_bytes else 0,
+                eviction_order=order,
+                entry_weight=float(row.get("request_ratio", 0.0)),
+            )
+
+        for entry in row_entries:
+            _lookup(entry)
+        hits: dict[int, int] = {}
+        image_hits: dict[int, int] = {}
+        for entry in row_entries:
+            prefix_tokens, cached_images = _lookup(entry)
+            hits[entry[0]] = prefix_tokens
+            image_hits[entry[0]] = cached_images
+        optimizer_data._cache_prefix_tokens = hits
+        optimizer_data._cache_image_hits = image_hits
+        # A Prefix entry holds the whole prompt's KV, so it can be far larger
+        # than one image: a reservation smaller than one prefix entry silently
+        # bypasses the Prefix pool (only the Encoder pool then contributes).
+        stats = cache.stats
+        logger.info(
+            "Multimodal cache: %d/%d bins hit the prefix pool, images %d/%d, resident %.1f of %.1f MiB",
+            sum(1 for value in hits.values() if value),
+            len(rows),
+            stats.image_hits,
+            stats.image_misses,
+            stats.resident_bytes / 1024**2,
+            stats.reserved_bytes / 1024**2,
+        )
+        return {
+            "image_hits": stats.image_hits,
+            "image_misses": stats.image_misses,
+            "resident_bytes": stats.resident_bytes,
+            "reserved_bytes": stats.reserved_bytes,
+        }
+
     def _requires_image_span_in_chunk(self) -> bool:
         """Whether the model needs the whole image span inside one prefill chunk."""
         model = getattr(self.model_runner, "model", None)
@@ -1333,8 +1501,8 @@ class BaseThroughputOptimizer(ABC):
             # Non-VL models never contribute an image token budget: stray
             # image parameters on a text model are configuration noise and
             # keep the historical "ignored" behaviour in the generators
-            # (PR-1 review round 6 — the fail-closed raise below only
-            # guards VL models whose own budget formula fails).
+            # (the fail-closed raise below only guards VL models whose own
+            # budget formula fails).
             return 0
         try:
             return self._image_tokens_for_scalar_geometry(optimizer_data, image_batch_size)

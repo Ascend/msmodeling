@@ -14,6 +14,7 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
+import dataclasses
 import argparse
 import unittest
 from pathlib import Path
@@ -1369,3 +1370,36 @@ serving_config:
             path.write_text(yaml_text, encoding="utf-8")
             common = Config._parse_common_config(str(path))
         self.assertEqual(common.load_gen.images, [[1080, 1920]])
+
+
+class TestProcessorCacheConclusion(unittest.TestCase):
+    """P1-01: a processor-cache hit has no device-side effect in this framework.
+
+    The field is accepted for configuration compatibility and deliberately
+    ignored: there is no Host latency model (P1-31), and the device-side
+    shapes/bytes do not depend on it.
+    """
+
+    def test_field_is_accepted_and_documented(self):
+        data = OptimizerData(input_length=512, output_length=128, processor_cache_hit_rate=0.9)
+        self.assertEqual(data.processor_cache_hit_rate, 0.9)
+        self.assertIn("processor_cache_hit_rate", {field.name for field in dataclasses.fields(OptimizerData)})
+
+    def test_it_does_not_change_the_chunk_plan(self):
+        base = OptimizerData(
+            length_distribution=LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=512, weight=1.0)]),
+            output_length=128,
+            max_batched_tokens=2048,
+        )
+        cached = OptimizerData(
+            length_distribution=LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=512, weight=1.0)]),
+            output_length=128,
+            max_batched_tokens=2048,
+            processor_cache_hit_rate=1.0,
+        )
+        self.assertEqual(base.get_prefill_chunk_plan(concurrency=1), cached.get_prefill_chunk_plan(concurrency=1))
+
+    def test_it_is_not_consumed_by_the_token_contract(self):
+        data = OptimizerData(input_length=512, output_length=128, processor_cache_hit_rate=1.0)
+        self.assertEqual(data.get_effective_input_length(), 512)
+        self.assertEqual(data.get_decode_context_length(), 512)

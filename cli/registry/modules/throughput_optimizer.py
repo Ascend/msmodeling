@@ -392,6 +392,63 @@ ENCODER_BUDGET = Param(
     ),
 )
 
+IMAGE_CACHE_CAPACITY = Param(
+    name="image-cache-capacity",
+    data_type="integer",
+    default=None,
+    min=0,
+    group="Multimodal Options",
+    cli_metavar="<MIB>",
+    cli_help=(
+        "Static startup reservation (MiB) shared by the multimodal Encoder and Prefix "
+        "caches; 0 or omitted disables both."
+    ),
+)
+
+VISION_TP_SIZES = Param(
+    name="vision-tp-sizes",
+    data_type="integer[]",
+    nargs="*",
+    default=None,
+    group="Multimodal Options",
+    cli_metavar="<N>",
+    cli_help=(
+        "Search the vision tower's tensor-parallel degree. It is independent of --tp-size: "
+        "the tower has its own shard degree, constrained only by the device world size and "
+        "the vision head count. Each value is one candidate and must divide the world size; "
+        "invalid values are skipped and counted. Omit to keep vision TP=1. Aggregation only: "
+        "rejected on the --disagg / PD ratio paths."
+    ),
+)
+
+ENCODER_BUDGETS = Param(
+    name="encoder-budgets",
+    data_type="integer[]",
+    nargs="*",
+    default=None,
+    group="Multimodal Options",
+    cli_metavar="<N>",
+    cli_help=(
+        "Search the vision-encoder wave budget (patch tokens per wave). Each value is one "
+        "candidate; omit to keep the single --encoder-budget value. Undeployable values are "
+        "skipped and counted. Aggregation only: rejected on the --disagg / PD ratio paths."
+    ),
+)
+
+IMAGE_CACHE_CAPACITIES = Param(
+    name="image-cache-capacities",
+    data_type="integer[]",
+    nargs="*",
+    default=None,
+    group="Multimodal Options",
+    cli_metavar="<MIB>",
+    cli_help=(
+        "Search the multimodal Encoder/Prefix cache reservation (MiB). Each value is one "
+        "candidate; omit to keep the single --image-cache-capacity value. Aggregation only: "
+        "rejected on the --disagg / PD ratio paths."
+    ),
+)
+
 # PD Ratio Optimization Options
 PREFILL_DEVICES_PER_INSTANCE = Param(
     name="prefill-devices-per-instance",
@@ -612,6 +669,10 @@ SPEC = ModuleSpec(
         IMAGE_HEIGHT,
         IMAGE_WIDTH,
         ENCODER_BUDGET,
+        IMAGE_CACHE_CAPACITY,
+        VISION_TP_SIZES,
+        ENCODER_BUDGETS,
+        IMAGE_CACHE_CAPACITIES,
         # PD Ratio Optimization Options
         PREFILL_DEVICES_PER_INSTANCE,
         DECODE_DEVICES_PER_INSTANCE,

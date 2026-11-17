@@ -441,6 +441,21 @@ class ModelRunner:
         # h_kv >= tp, where the KV-head growth cancels the sequence shrink) or is not
         # modeled (V4/SFA caches); see ``dcp_kv_token_capacity_factor``.
         num_blocks *= inference_metrics.kv_cache_token_capacity_factor
+        # The multimodal Encoder/Prefix cache is a static startup reservation
+        # out of the KV pool, so the scheduler never sees blocks it
+        # cannot use. The deduction is validated rather than clamped.
+        from serving_cast.service.multimodal_cache import reserve_kv_blocks
+
+        reservation = getattr(self.common_config.model_config, "image_cache_capacity_mib", 0)
+        # A mocked/absent config reports a non-numeric attribute; treat that as
+        # "no reservation" instead of comparing a Mock with an int.
+        reservation_mib = reservation if isinstance(reservation, (int, float)) else 0
+        num_blocks = reserve_kv_blocks(
+            num_blocks,
+            block_size,
+            inference_metrics.kv_cache_per_token_gb,
+            reservation_mib,
+        )
         logger.debug("warmup result: %d blocks", num_blocks)
         return num_blocks, block_size
 

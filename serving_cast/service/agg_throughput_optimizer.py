@@ -33,6 +33,7 @@ from .optimizer_summary import (
 from .scheduler import DecodeFirstWithSlack
 from .utils import (
     AGG_COLUMNS,
+    IMAGE_CACHE_COLUMNS,
     IMAGE_COLUMNS,
     format_parallel_label,
     MemoryInfo,
@@ -185,6 +186,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             enable_static_capture(model_runner)
 
     def get_inference_info(self, optimizer_data: OptimizerData) -> OptimizerSummary:
+        cache_stats = self._prepare_multimodal_cache(optimizer_data) or {}
         max_batched_tokens = optimizer_data.max_batched_tokens
         batch_size = optimizer_data.batch_size
         input_length = optimizer_data.input_length
@@ -224,7 +226,16 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             composition_rows = optimizer_data.build_concurrency_samples(batch_size)
             composition_rows = [dict(row, samples=row["samples"] * self.dp) for row in composition_rows]
 
-        memory_left = metrics.memory_left_gb
+        # The multimodal cache is a static startup reservation, so a candidate
+        # is only deployable when its headroom covers the reservation on top of
+        # the timeline's own peak. Charge it exactly once, here, where the
+        # feasibility verdict (early stop / OOM) is taken. Sharing
+        # ``_multimodal_cache_reservation_bytes`` with the simulated cache keeps
+        # one budget source; the PP path's per-stage minimum already covers the
+        # worst stage, so no extra per-stage loop is needed.
+        cache_reservation_gb = self._multimodal_cache_reservation_bytes(optimizer_data) / 1024**3
+        memory_left = metrics.memory_left_gb - cache_reservation_gb
+        prefill_memory_left = metrics.prefill_memory_left_gb - cache_reservation_gb
         token_s_device = metrics.output_throughput / self.dp / self.pp / self.tp
         parallel = format_parallel_label(
             self.model_runner.model.model_config.parallel_config,
@@ -261,23 +272,40 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             concurrency,
             parallel,
             memory_left,
-            metrics.prefill_memory_left_gb,
+            prefill_memory_left,
         )
         summary = OptimizerSummary(optimizer_data)
         memory_info = getattr(metrics, "memory_info", None)
         if memory_info:
+            # Copy before rewriting: the tightest record can come from a cached
+            # forward/PP record, so mutating it in place would corrupt the cache.
+            memory_info = dict(memory_info)
+            memory_info["device_memory_available_gb"] = memory_left
             summary.set_memory_info(memory_info)
         if getattr(metrics, "pp_mixed_pd_overlap_approx", False):
             summary.set_pp_mixed_pd_overlap_approx(True)
         # P1-05: the vision-encoder accounting of this candidate, derived from
-        # the same plan the forward uses (deterministic per candidate). The two
+        # the same plan the forward uses (deterministic per candidate). These
         # columns only exist for an image-bearing workload, so a text-only run
         # keeps the historical result schema (review: stormchasingg).
-        image_columns = list(IMAGE_COLUMNS) if self._has_image_workload(optimizer_data) else []
+        image_columns = (
+            list(IMAGE_COLUMNS) + list(IMAGE_CACHE_COLUMNS) if self._has_image_workload(optimizer_data) else []
+        )
         if image_columns:
             encoder_waves, vision_time_ms = self._encoder_row_accounting(optimizer_data, concurrency)
+            # Images whose vision actually came from the cache: a request only
+            # skips the tower when every one of its images hit, so a partial
+            # hit contributes 0 here even though it counts in image_hits. A
+            # scalar (non-distribution) workload has no bins to inspect.
+            vision_saved = 0
+            if optimizer_data.length_distribution is not None:
+                vision_saved = sum(
+                    len(row["images"])
+                    for row in optimizer_data.get_representative_rows()
+                    if row.get("images") and int(row.get("cached_images", 0)) >= len(row["images"])
+                )
         else:
-            encoder_waves, vision_time_ms = 1, 0.0
+            encoder_waves, vision_time_ms, vision_saved = 1, 0.0, 0
         columns = AGG_COLUMNS.copy() + image_columns
         data = [
             self.model_runner.user_input.device,
@@ -303,7 +331,19 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
             memory_info["model_activation_size_gb"] if memory_info else float("nan"),
             memory_info["device_memory_available_gb"] if memory_info else float("nan"),
-            *([encoder_waves, vision_time_ms] if image_columns else []),
+            *(
+                [
+                    encoder_waves,
+                    vision_time_ms,
+                    cache_stats.get("image_hits", 0),
+                    cache_stats.get("image_misses", 0),
+                    round(cache_stats.get("resident_bytes", 0) / 1024**3, 3),
+                    round(cache_stats.get("reserved_bytes", 0) / 1024**3, 3),
+                    vision_saved,
+                ]
+                if image_columns
+                else []
+            ),
         ]
         columns.append("qps")
         data.append(metrics.output_throughput / output_length)
@@ -332,7 +372,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         result_df = pd.DataFrame(columns=columns, data=rows).round(3)
         summary.set_summary_df(result_df)
         early_stop_reason = None
-        if metrics.prefill_memory_left_gb < 0:
+        if prefill_memory_left < 0:
             early_stop_reason = EARLY_STOP_PREFILL_OOM
         elif memory_left < 0:
             early_stop_reason = EARLY_STOP_DECODE_OOM
@@ -345,6 +385,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             metrics.ttft,
             metrics.tpot,
             summary,
+            static_reservation_gb=cache_reservation_gb,
         )
 
         return summary
@@ -359,8 +400,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
     ) -> _ChunkedAggMetrics:
         """Schedule variable or fixed requests through PP stages to completion.
 
-        ``image_tokens_per_request`` mirrors the PP=1 timeline contract (PR-1
-        round 8): request lengths already include the image token budget, so
+        ``image_tokens_per_request`` mirrors the PP=1 timeline contract:
+        request lengths already include the image token budget, so
         forward keys declare ``image_tokens_included`` and only each request's
         first prefill chunk carries the image forward inputs (the vision
         tower runs once per request; review: zhenghaojie - without this the
@@ -610,7 +651,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         """Run one replica's finite batch and scale completion counts by DP.
 
         ``image_tokens_per_request`` consumes the image-aware chunk-plan
-        contract (PR-1): request lengths already include the image token
+        contract: request lengths already include the image token
         budget, so forward keys declare ``image_tokens_included`` and only
         the first chunk of each request carries the image forward inputs
         (the vision tower runs once per request; review: zhangzhenyu

@@ -120,10 +120,35 @@ def build_requests(
             budget = (
                 int(row.get("image_tokens", 0)) if image_tokens_per_row is not None else int(image_tokens_per_request)
             )
-            rows.append(dict(row, query_len=row["query_len"] + budget, image_budget=budget))
+            specs = tuple(row.get("images", ()))
+            cached_images = int(row.get("cached_images", 0))
+            # Encoder hits skip the vision tower for the whole request only
+            # when every image is cached; a partial hit still runs the tower
+            # (documented conservative contract). The placeholder tokens stay
+            # in the prompt either way: the Encoder cache holds activations,
+            # not KV, so the image span is still prefill compute.
+            vision_budget = 0 if specs and cached_images >= len(specs) else budget
+            prompt = row["num_input_tokens"] + budget
+            cached_prefix = int(row.get("cached_prefix_tokens", 0))
+            if cached_prefix:
+                # Prefix hits hold KV for a contiguous prefix of the full
+                # prompt (text + image placeholders), so the cached span must
+                # not be prefilled again -- and the image span must not be
+                # re-added to the query when it is fully covered (review:
+                # zhenyu_zhang P1 -- full hit still prefilled the image span).
+                cached_prefix = min(cached_prefix, prompt - 1)
+                query = max(1, prompt - cached_prefix)
+                if cached_prefix >= prompt - 1:
+                    vision_budget = 0
+            else:
+                query = row["query_len"] + budget
+            rows.append(
+                dict(row, query_len=query, image_budget=budget, vision_budget=vision_budget, prompt_length=prompt)
+            )
     requests = []
     for row in rows:
         budget = int(row.get("image_budget", image_tokens_per_request))
+        vision_budget = int(row.get("vision_budget", budget))
         prompt = row["num_input_tokens"] + budget
         query = row["query_len"]
         if query <= 0:
@@ -133,7 +158,7 @@ def build_requests(
         consumed = 0
         while consumed < query:
             q = min(data.max_batched_tokens, query - consumed)
-            if budget and not chunks and q < budget:
+            if vision_budget and not chunks and q < vision_budget:
                 # The image-bearing first chunk must hold the full placeholder
                 # span: the budget models placeholders + boundary tokens and
                 # the forward writes the whole image span in one chunk.
@@ -143,7 +168,7 @@ def build_requests(
                 # cross-chunk feature reuse and stays out of scope.
                 raise ValueError(
                     f"max_batched_tokens ({data.max_batched_tokens}) cannot hold the per-request "
-                    f"image token budget ({budget}); raise instead of "
+                    f"image token budget ({vision_budget}); raise instead of "
                     "straddling the image placeholders across chunks"
                 )
             consumed += q
@@ -154,7 +179,7 @@ def build_requests(
                     False,
                     q,
                     cached + consumed,
-                    carries_image=budget > 0 and not chunks,
+                    carries_image=vision_budget > 0 and not chunks,
                 )
             )
         requests.extend(TimelineRequest(prompt, chunks.copy()) for _ in range(row["samples"]))

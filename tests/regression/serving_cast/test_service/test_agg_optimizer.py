@@ -31,7 +31,11 @@ from serving_cast.service.agg_throughput_optimizer import (
 )
 from serving_cast.service.aggregation_timeline import RequestShape, TimelineResult
 from serving_cast.service.latency_table import ForwardLatencyRecord
-from serving_cast.service.optimizer_summary import EARLY_STOP_TPOT_LIMIT
+from serving_cast.service.optimizer_summary import (
+    EARLY_STOP_PREFILL_OOM,
+    EARLY_STOP_TPOT_LIMIT,
+    OptimizerSummary,
+)
 from serving_cast.service.scheduler import DecodeFirstWithSlack, StepDecision
 from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
 
@@ -558,6 +562,79 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least one prefill chunk"):
             simulate([TimelineRequest(0, [])], self.data(), strategy.scheduler, 1, 1, lambda shapes, resident: None)
 
+    def _memory_bounded_strategy(self, memory_left_gb):
+        """An agg strategy whose forward fits exactly ``memory_left_gb`` of headroom."""
+        strategy = self.make_strategy()
+        info = {
+            "total_device_memory_gb": 40.0,
+            "model_weight_size_gb": 10.0,
+            "kv_cache_size_gb": 1.0,
+            "model_activation_size_gb": 2.0,
+            "reserved_memory_gb": 0.0,
+            "device_memory_available_gb": memory_left_gb,
+        }
+        strategy._compute_forward_latency_record = lambda key, data: ForwardLatencyRecord(
+            2.0 if key.is_decode else 10.0, memory_left_gb, "", dict(info)
+        )
+        strategy._build_forward_latency_record = lambda requests: ForwardLatencyRecord(
+            10.0, memory_left_gb, "", dict(info)
+        )
+        return strategy
+
+    def test_cache_reservation_is_charged_once_to_memory_left(self):
+        """The static reservation occupies real planned VRAM (review: zhenyu_zhang)."""
+        strategy = self._memory_bounded_strategy(20.0)
+        data = self.data(output_length=1)
+        data.image_cache_capacity_mib = 0
+        with patch("serving_cast.service.agg_throughput_optimizer.format_parallel_label", return_value="TP=1"):
+            baseline = strategy.get_inference_info(data)
+            data.image_cache_capacity_mib = 4 * 1024
+            charged = strategy.get_inference_info(data)
+        self.assertFalse(baseline.check_early_stop_flag())
+        self.assertFalse(charged.check_early_stop_flag())
+        baseline_avail = baseline.get_summary_df().iloc[0]["avail_GB"]
+        charged_avail = charged.get_summary_df().iloc[0]["avail_GB"]
+        self.assertGreaterEqual(baseline_avail, 0)
+        # Exactly one deduction, not one per record/phase.
+        self.assertAlmostEqual(baseline_avail - charged_avail, 4.0, places=6)
+
+    def test_cache_reservation_crosses_the_oom_boundary_for_the_same_shape(self):
+        """Same shape: 0 MiB is deployable, a reservation above the headroom is not."""
+        strategy = self._memory_bounded_strategy(20.0)
+        data = self.data(output_length=1)
+        data.image_cache_capacity_mib = 0
+        with patch("serving_cast.service.agg_throughput_optimizer.format_parallel_label", return_value="TP=1"):
+            feasible = strategy.get_inference_info(data)
+            data.image_cache_capacity_mib = 24 * 1024
+            rejected = strategy.get_inference_info(data)
+        self.assertFalse(feasible.check_early_stop_flag())
+        self.assertGreaterEqual(feasible.get_summary_df().iloc[0]["avail_GB"], 0)
+        self.assertTrue(rejected.check_early_stop_flag())
+        self.assertEqual(rejected.get_early_stop_reason(), EARLY_STOP_PREFILL_OOM)
+        self.assertLess(rejected.get_summary_df().iloc[0]["avail_GB"], 0)
+
+    def test_static_cache_reservation_is_not_amortized_per_request(self):
+        """linear_exponential must not treat the fixed cache as per-request RAM.
+
+        Same inputs: total 80 GiB, weights 10 GiB, 30 GiB static cache, and
+        40 GiB left after the reservation. The dynamic cost is 0.05 GiB/request;
+        without separating the static term the estimate would be 40/400 - 0.05,
+        which truncates the legal concurrency boundary (review: zhenyu_zhang P2).
+        """
+        strategy = self.make_strategy()
+        strategy.model_runner.total_device_memory_gb = 80.0
+        strategy.model_runner.model_weight_size_gb = 10.0
+        strategy.model_runner.user_input.reserved_memory_gb = 0.0
+        dynamic = strategy._compute_per_request_memory_gb(80.0, 10.0, 0.0, 40.0, 400)
+        self.assertAlmostEqual(dynamic, 0.075)
+        separated = strategy._compute_per_request_memory_gb(80.0, 10.0, 0.0, 40.0, 400, static_reservation_gb=30.0)
+        self.assertAlmostEqual(separated, 0.0)
+        data = self.data(output_length=1)
+        data.concurrency_search_strategy = "linear_exponential"
+        summary = OptimizerSummary(data)
+        strategy._maybe_set_search_info(data, 40.0, 400, 1.0, 1.0, summary, static_reservation_gb=30.0)
+        self.assertAlmostEqual(summary.get_search_info()["per_request_memory_gb"], 0.0)
+
 
 _agg_pp_profile = partial(_pp_profile, include_transfers=False)
 _AggPPMetrics = _PPMetrics
@@ -924,6 +1001,34 @@ class TestAggPipelineParallel(unittest.TestCase):
         self.assertFalse(summary.check_early_stop_flag())
         self.assertEqual(len(strategy._last_aggregation_timeline.requests), 4)
         self.assertGreater(len(strategy._last_aggregation_timeline.steps), 1)
+
+    def test_cache_reservation_is_charged_to_the_worst_pp_stage(self):
+        """PP>1 charges the reservation once, on the stage with the least headroom."""
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+        profile = _agg_pp_profile((2.0, 2.0))
+        optimizer_data = OptimizerData(
+            input_length=4,
+            output_length=4,
+            batch_size=2,
+            max_batched_tokens=2048,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
+            optimizer_data.image_cache_capacity_mib = 0
+            baseline = strategy.get_inference_info(optimizer_data)
+            optimizer_data.image_cache_capacity_mib = 4 * 1024
+            charged = strategy.get_inference_info(optimizer_data)
+            # The synthetic device is 64 GiB, so this reservation cannot fit.
+            optimizer_data.image_cache_capacity_mib = 70 * 1024
+            rejected = strategy.get_inference_info(optimizer_data)
+        self.assertFalse(baseline.check_early_stop_flag())
+        self.assertFalse(charged.check_early_stop_flag())
+        baseline_avail = baseline.get_summary_df().iloc[0]["avail_GB"]
+        charged_avail = charged.get_summary_df().iloc[0]["avail_GB"]
+        self.assertAlmostEqual(baseline_avail - charged_avail, 4.0, places=6)
+        self.assertTrue(rejected.check_early_stop_flag())
+        self.assertEqual(rejected.get_early_stop_reason(), EARLY_STOP_PREFILL_OOM)
 
 
 if __name__ == "__main__":

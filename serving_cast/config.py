@@ -98,6 +98,9 @@ class ModelConfig:
     enable_interpolate: bool = True
     interpolation_seed: int = 1234
     enable_preprocessing_modeling: bool = False
+    # Multimodal Encoder/Prefix cache reservation (MiB), deducted from the KV
+    # pool at startup once; 0 disables the cache.
+    image_cache_capacity_mib: int = 0
     enable_kv_transfer_modeling: bool = False
     # Fusion plugin .py paths loaded before the TensorCast ModelRunner is built
     # (RFC manual_fusion_eval §7.2). Same load_plugin() hook as the CLI / Python

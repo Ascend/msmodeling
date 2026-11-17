@@ -95,6 +95,19 @@ AGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns(p)", "percentage_breakdow
 # table when the workload actually carries images, so text-only runs keep the
 # historical schema (review: stormchasingg).
 IMAGE_COLUMNS = ["encoder_waves", "vision_time_ms"]
+# Multimodal cache statistics of a candidate (P1-03/P1-04). Appended next to
+# IMAGE_COLUMNS so an image-bearing run also reports the Encoder/Prefix cache
+# behaviour; text-only runs keep the historical schema.
+IMAGE_CACHE_COLUMNS = [
+    "encoder_cache_hits",
+    "encoder_cache_misses",
+    "encoder_cache_GB",
+    "prefix_cache_GB",
+    # Images whose vision forward was actually removed by the cache. A partial
+    # per-request hit stays in ``encoder_cache_hits`` but not here, so the
+    # saving column never over-claims a visual-compute reduction.
+    "encoder_vision_saved",
+]
 # Internal phase timing retained for diagnostics and PP>1 fallback paths. PP=1
 # disaggregated Prefill throughput and QPS use request-average TTFT.
 PREFILL_PHASE_MAKESPAN_COLUMN = "prefill_phase_makespan_ms"
@@ -120,7 +133,7 @@ class PrefillChunk:
     seq_len: int
     is_last_chunk: bool = False
     # True on the chunk that carries the request's image placeholders (the
-    # request's first chunk under the PR-1 contract: the chunk planner puts
+    # request's first chunk: the chunk planner puts
     # the whole multimodal token budget into the request length and the
     # image-bearing chunk is the first one). Only this chunk receives image
     # forward inputs; later chunks of the same request are text-only.
@@ -170,6 +183,19 @@ class OptimizerData:
     # Maximum image patch tokens the vision encoder processes in one wave
     # (P1-05). ``None`` keeps the historical single-wave assumption.
     encoder_budget: Optional[int] = None
+    # Processor (Host-side) cache hit rate — P1-01 conclusion: the framework has
+    # no Host latency model (P1-31 is not implemented) and
+    # ``enable_preprocessing_modeling`` only models the H2D copy, so a
+    # processor-cache hit has **no device-side effect**: pixel_values shape,
+    # image_grid_thw, H2D bytes and KV footprint are identical either way.
+    # The field is therefore accepted and ignored; revisit when P1-31 lands.
+    # Do not wire it into ttft/tpot without a Host-time model.
+    processor_cache_hit_rate: Optional[float] = None
+    # Multimodal Encoder/Prefix cache: one static reservation, two
+    # measures: Encoder entries by projected visual tokens, Prefix by KV tokens.
+    image_cache_capacity_mib: Optional[int] = None
+    media_version: str = ""
+    adapter_version: str = ""
 
     def __post_init__(self) -> None:
         """Fold a multimodal distribution's image config into the scalar fields.
@@ -231,7 +257,9 @@ class OptimizerData:
         """
         representative_rows = []
         total_weight = sum(bin_.weight for bin_ in self.length_distribution.bins)
-        for bin_ in self.length_distribution.bins:
+        cache_hits = getattr(self, "_cache_prefix_tokens", None)
+        cache_images = getattr(self, "_cache_image_hits", None)
+        for index, bin_ in enumerate(self.length_distribution.bins):
             if strategy == "mid":
                 representative_point = math.floor((bin_.min_tokens + bin_.max_tokens) / 2)
             elif strategy == "min":
@@ -240,21 +268,31 @@ class OptimizerData:
                 representative_point = bin_.max_tokens
             else:
                 raise ValueError(f"Unknown strategy: {strategy}")
-            # prefix_cache_hit_rate is a fixed float number for now
-            cached_prefix_tokens = math.floor(representative_point * self.prefix_cache_hit_rate)
-            representative_rows.append(
-                {
-                    "num_input_tokens": representative_point,
-                    "query_len": max(1, representative_point - cached_prefix_tokens),
-                    "request_ratio": bin_.weight / total_weight,
-                    # Declared per-image specs for this bin's representative
-                    # request. Token counts are resolved later, against a live
-                    # model, because they depend on the pixel budget. The key
-                    # is absent for text-only bins so the historical row shape
-                    # stays byte-identical.
-                    **({"images": bin_.images.specs(strategy=strategy)} if bin_.images is not None else {}),
-                }
-            )
+            if cache_hits is not None:
+                cached_prefix_tokens = int(cache_hits.get(index, 0))
+            else:
+                # prefix_cache_hit_rate is a fixed float number for now
+                cached_prefix_tokens = math.floor(representative_point * self.prefix_cache_hit_rate)
+            row = {
+                "num_input_tokens": representative_point,
+                "query_len": max(1, representative_point - cached_prefix_tokens),
+                "request_ratio": bin_.weight / total_weight,
+                # Declared per-image specs for this bin's representative
+                # request. Token counts are resolved later, against a live
+                # model, because they depend on the pixel budget. The key
+                # is absent for text-only bins so the historical row shape
+                # stays byte-identical.
+                **({"images": bin_.images.specs(strategy=strategy)} if bin_.images is not None else {}),
+            }
+            if cache_hits is not None:
+                # The stored prefix is measured on the full prompt (text +
+                # image placeholders); expose it so the timeline does not add
+                # the cached image span back to the query. ``cached_images``
+                # lets the first chunk skip the vision tower when every image
+                # of the request is an Encoder hit.
+                row["cached_prefix_tokens"] = cached_prefix_tokens
+                row["cached_images"] = int(cache_images.get(index, 0)) if cache_images is not None else 0
+            representative_rows.append(row)
         return representative_rows
 
     def get_effective_input_length(self, is_decode: bool = False):
