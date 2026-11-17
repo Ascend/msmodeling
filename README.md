@@ -181,6 +181,10 @@ msModeling 提供模型推理性能仿真、服务化性能仿真和服务化实
 
 各工具的详细使用说明请参阅其源码仓库中的 README 文件，也可通过上方功能介绍表格中的链接直接跳转。
 
+## 🌐 在线体验
+
+msModeling 在 GitCode 上提供 Web UI 在线体验环境，可直接在浏览器中进行可视化仿真与吞吐寻优，无需本地安装，点击 [在线体验](https://gitcode.com/ascend-model-ecosystem/msModeling) 即可开始体验。
+
 ## 💡 典型案例
 
 通过典型问题场景帮助用户理解并掌握工具使用，请参见《[模型推理性能仿真](./docs/zh/user_guide/msmodeling_tensor_cast_user_guide.md)》与《[服务化性能仿真](./docs/zh/user_guide/msmodeling_throughput_optimizer_user_guide.md)》中的示例。

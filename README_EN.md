@@ -181,6 +181,10 @@ For environment dependencies and installation instructions, see the [msModeling 
 
 For detailed usage instructions for each tool, refer to the `README` file in its source code repository, or jump directly via the links in the function introduction table above.
 
+## 🌐 Live Demo
+
+msModeling provides a Web UI hosted on GitCode that lets you run visual simulations and throughput optimization directly in your browser, with no local installation required. Click [Live Demo](https://gitcode.com/ascend-model-ecosystem/msModeling) to get started.
+
 ## 💡 Typical Use Cases
 
 To help you understand and master the tools through typical problem scenarios, see the examples in [Model Inference Performance Simulation](./docs/en/user_guide/msmodeling_tensor_cast_user_guide.md) and [Serving Performance Simulation](./docs/en/user_guide/msmodeling_throughput_optimizer_user_guide.md).
