@@ -35,7 +35,7 @@ Configure this only when the system PATH cannot find the correct command:
 export OPTIX_DEPLOY_PATH=/path/to/custom-deploy-root
 ```
 
-You can also write it into `optix/config.toml`. For field descriptions, see [Configuration File Description](../user_guide/msmodeling_optix_user_guide.md#7-configuration-file-description) in the *User Guide*, specifically "Advanced Configuration → Deployment Environment `[deploy]`":
+You can also write it into `optix/config.toml`. For field descriptions, see [Configuration File Description](../user_guide/optix/configuration.md#7-configuration-file-description) in the *User Guide*, specifically "Advanced Configuration → Deployment Environment `[deploy]`":
 
 ```toml
 [deploy]

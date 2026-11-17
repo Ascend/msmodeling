@@ -4,9 +4,11 @@ This document uses **DeepSeek-V4-Flash + vLLM + AISBench** as an example to desc
 
 When you search the P/D parameters separately on heterogeneous devices, or use the multi-node PD aggregation plugin to measure service units and manually calculate the ratio, see [Searching P/D Parameters Separately and Calculating the Deployment Ratio](optix_pso_pd_ratio_separate_search.md).
 
-The operation sequence is as follows: **search the parameters of P (which processes the input) and D (which generates the subsequent tokens) separately → deploy the PD service and the Proxy based on the results → benchmark the complete service through the Proxy**. If a working PD service is already available and you only need to adjust the benchmark load, start directly from [Step 5](#step-5-benchmarking-the-complete-pd-service-through-the-proxy).
+The operation sequence is as follows: **search the parameters of P (which processes the input) and D (which generates the subsequent tokens) separately → deploy the PD service and the Proxy based on the results → benchmark the complete service through the Proxy**. If a working PD service is already available and you only need to adjust the benchmark load, start directly from [Step 6](#step-5-benchmarking-the-complete-pd-service-through-the-proxy).
 
-## Running the Complete Process with One Command
+<a id="running-the-complete-process-with-one-command"></a>
+
+## 1 Running the Complete Process with One Command
 
 The `pd_disagg.full_service.enabled` switch controls whether the complete pipeline runs, and defaults to `false`. When you set it to `true`, the same command runs the P search, the D search, the ratio recommendation, the complete PD service deployment, and the load fine-tuning in sequence, with no manual deployment or OptiX restart in between. When you set it to `false`, only the P/D search and the ratio recommendation run, and the complete service precheck, deployment, and benchmark are skipped. You can keep the other complete service configurations. If an existing configuration omits this switch, it is now treated as disabled. To use the complete process, add `enabled = true` explicitly.
 
@@ -65,7 +67,12 @@ If the process fails midway, the same report records the failed phase, the error
 
 The existing `pd_disagg_summary.json`, `full_service/deployment.json`, the `phase_result.json` of each phase, and the CSV files are retained for traceability, and you do not need to open them one by one for routine viewing of the final results. This report is not generated when `enabled = false` or the complete service is not configured, and the status, files, and viewing method of the step-by-step mode remain unchanged. The complete service stops automatically after it finishes.
 
-## Step 1: Confirming the Example Configuration and Preparing the Environment
+
+<a id="step-1-confirming-the-example-configuration-and-preparing-the-environment"></a>
+
+<a id="1-confirming-the-example-configuration-and-preparing-the-environment"></a>
+
+## 2 Confirming the Example Configuration and Preparing the Environment
 
 This example uses the following model, serving parameters, and benchmark load:
 
@@ -88,7 +95,9 @@ This example uses the following model, serving parameters, and benchmark load:
 
 This document uses **24 devices, with 8 devices for each P/D instance**, to demonstrate the instance ratio. Replace 24 with the total number of devices that are actually available.
 
-### 1.1 Preparing the vLLM Deployment Environment
+<a id="11-preparing-the-vllm-deployment-environment"></a>
+
+### 2.1 Preparing the vLLM Deployment Environment
 
 Perform the operations on a **Linux server or in a vLLM-Ascend container** that supports DSv4, and prepare the Ascend driver, CANN, vLLM-Ascend, and the model weights. First check the following:
 
@@ -103,7 +112,9 @@ The output should show the NPU devices, the Python version, and the vLLM help in
 
 This example includes quantization, MTP, and graph compilation settings. Therefore, vLLM-Ascend in the deployment environment must support these features and the startup parameters in the template.
 
-### 1.2 Installing AISBench
+<a id="12-installing-aisbench"></a>
+
+### 2.2 Installing AISBench
 
 Run `ais_bench --help` in the preceding deployment environment. If the help information is displayed, proceed directly to 1.3. If AISBench is not installed yet, create a separate environment for AISBench to avoid changing the dependencies of vLLM:
 
@@ -119,9 +130,11 @@ export PATH="$HOME/optix-workspace/aisbench-env/bin:$PATH"
 ais_bench --help
 ```
 
-After the source installation, keep the `benchmark` directory, because you need to modify the model and dataset configurations in it in Step 2.
+After the source installation, keep the `benchmark` directory, because you need to modify the model and dataset configurations in it in Step 3.
 
-### 1.3 Installing OptiX
+<a id="13-installing-optix"></a>
+
+### 2.3 Installing OptiX
 
 OptiX is installed together with msmodeling and uses the `.venv` of the repository. Keep it separate from the preceding vLLM and AISBench deployment environments to prevent the dependency versions from affecting each other.
 
@@ -151,7 +164,9 @@ uv run msmodeling optix --help
 
 `uv sync` creates the `.venv` in the repository and installs OptiX. After the OptiX help information is displayed, continue with the following deployment command check. **Do not install vLLM and AISBench into this `.venv`.**
 
-### 1.4 Confirming That OptiX Can Find the Deployment Commands
+<a id="14-confirming-that-optix-can-find-the-deployment-commands"></a>
+
+### 2.4 Confirming That OptiX Can Find the Deployment Commands
 
 When OptiX starts services and runs benchmarks, it strips the `.venv` of msmodeling from the environment and then looks for `vllm` and `ais_bench`. Therefore, succeeding with `--help` in the current shell alone is not sufficient.
 
@@ -178,9 +193,15 @@ The log should show the paths of `deployment command vllm` and `deployment comma
 
 Run the following OptiX commands in the repository root directory. Place the Python configuration of AISBench in the **AISBench package directory in the deployment environment**. For a source installation, this is the corresponding configuration directory in the `benchmark` repository that you kept.
 
-## Step 2: Preparing the AISBench Configurations for P and D
+<a id="step-2-preparing-the-aisbench-configurations-for-p-and-d"></a>
 
-### 2.1 Copying the Model Configuration Provided by AISBench
+<a id="2-preparing-the-aisbench-configurations-for-p-and-d"></a>
+
+## 3 Preparing the AISBench Configurations for P and D
+
+<a id="21-copying-the-model-configuration-provided-by-aisbench"></a>
+
+### 3.1 Copying the Model Configuration Provided by AISBench
 
 First run the following in the deployment environment:
 
@@ -198,7 +219,9 @@ cp vllm_api_stream_chat.py optix_dsv4_proxy.py
 
 The three files are used for P, D, and the final Proxy benchmark respectively. Use the API type defined in the copied files, and modify the service address and the benchmark load separately as follows.
 
-### 2.2 Modifying the Fields in the New Files
+<a id="22-modifying-the-fields-in-the-new-files"></a>
+
+### 3.2 Modifying the Fields in the New Files
 
 Open the new files and modify the following fields in the model configuration in the `models` list. `model` is the **externally served model name**, while `path` is the **tokenizer/model directory**. The two are different.
 
@@ -229,7 +252,11 @@ ais_bench --models optix_dsv4_proxy --datasets gsm8k_gen_0_shot_cot_str_perf --s
 
 For `--models`, enter the short name of the file, that is, the file name without `.py`. Do not enter an absolute path. `--search` only checks whether the configurations can be found. Before the formal search, you should also confirm that these configurations can send requests normally.
 
-## Step 3: Copying the PD Disaggregation Template and Running the Search
+<a id="step-3-copying-the-pd-disaggregation-template-and-running-the-search"></a>
+
+<a id="3-copying-the-pd-disaggregation-template-and-running-the-search"></a>
+
+## 4 Copying the PD Disaggregation Template and Running the Search
 
 ```bash
 cp docs/zh/use_cases/examples/optix_pd_disaggregation/search.toml ./pd_search.toml
@@ -243,7 +270,7 @@ The template already contains the model, the main startup parameters, and the co
 | `[pd_disagg.decode.simulator_command_overrides]` | The model path, model name, and port of D are consistent with the D configuration of AISBench. |
 | `[pd_disagg] total_devices` | Change the example value 24 to the total number of devices available for the final deployment. |
 | The two `devices_per_instance` entries in `[pd_disagg]` | Both P and D use 8 devices in this example, which corresponds to TP=8 in the template. |
-| `[pd_disagg.prefill.benchmark_command_overrides] models` | P uses `optix_dsv4_prefill` created in Step 2. |
+| `[pd_disagg.prefill.benchmark_command_overrides] models` | P uses `optix_dsv4_prefill` created in Step 3. |
 | `[pd_disagg.decode.benchmark_command_overrides] models` | D uses `optix_dsv4_decode` instead. |
 
 **The serving startup parameters and benchmark configurations of P and D are already written in their respective phases.** To modify P, change the configuration under `pd_disagg.prefill`. To modify D, change the configuration under `pd_disagg.decode`. The `[vllm.command]` and `[ais_bench.command]` at the beginning of the file are used for plugin initialization. Keep them consistent with the model, address, and short name of P.
@@ -293,13 +320,17 @@ After the search is complete, also confirm whether the TTFT of P meets 3 seconds
 
 `pd_ratio=1/3` in the summary indicates the theoretical ratio. `instances.prefill=1` and `instances.decode=2` indicate that you are advised to deploy **1P + 2D** with the current resources. The results keep both ratios, but the tool does not automatically generate a textual explanation such as "32 devices are theoretically required while only 24 are available".
 
-Prefer the feasible combination closest to the theoretical ratio. The actual throughput of the complete service still needs to be verified in Step 5.
+Prefer the feasible combination closest to the theoretical ratio. The actual throughput of the complete service still needs to be verified in Step 6.
 
-## Step 4: Deploying P, D, and the Proxy Based on the Results
+<a id="step-4-deploying-p-d-and-the-proxy-based-on-the-results"></a>
+
+<a id="4-deploying-p-d-and-the-proxy-based-on-the-results"></a>
+
+## 5 Deploying P, D, and the Proxy Based on the Results
 
 Use the PD deployment solution for your current environment to configure the P/D instances, the KV cache transmission, and the Proxy. The OptiX search results provide the parameters and the numbers, while the deployment tool still starts the complete cluster.
 
-**KV cache transmission note:** The example in Step 3 uses a single instance in PD aggregation mode to simulate the P and D phases separately and does not involve KV cache transmission between P/D instances. Therefore, the search template does not include the related transmission parameters. When you manually start the complete PD service, you need to add the KV cache transmission parameters to the startup command of each P and D instance according to the current vLLM-Ascend version and the PD deployment solution, and use them together with the routing configuration of the Proxy.
+**KV cache transmission note:** The example in Step 4 uses a single instance in PD aggregation mode to simulate the P and D phases separately and does not involve KV cache transmission between P/D instances. Therefore, the search template does not include the related transmission parameters. When you manually start the complete PD service, you need to add the KV cache transmission parameters to the startup command of each P and D instance according to the current vLLM-Ascend version and the PD deployment solution, and use them together with the routing configuration of the Proxy.
 
 | Deployment Item | How to Fill It in |
 |---|---|
@@ -308,7 +339,7 @@ Use the PD deployment solution for your current environment to configure the P/D
 | Batch parameters | Use the `MAX_NUM_BATCHED_TOKENS` and `MAX_NUM_SEQS` from the search results of P and D respectively. For the other parameters, use the startup configuration of that phase. |
 | Device IDs and ports | Assign devices and independent ports to each instance, and configure the routing in the Proxy. |
 
-For example, `MAX_NUM_BATCHED_TOKENS=16384` of P corresponds to `--max-num-batched-tokens 16384`, and `MAX_NUM_SEQS=64` of D corresponds to `--max-num-seqs 64`. `CONCURRENCY`, `NUM_PROMPTS`, and `REQUESTRATE` are used for benchmarks and are not added to the vLLM startup command. The concurrency of the complete service still needs to be verified through the Proxy in Step 5.
+For example, `MAX_NUM_BATCHED_TOKENS=16384` of P corresponds to `--max-num-batched-tokens 16384`, and `MAX_NUM_SEQS=64` of D corresponds to `--max-num-seqs 64`. `CONCURRENCY`, `NUM_PROMPTS`, and `REQUESTRATE` are used for benchmarks and are not added to the vLLM startup command. The concurrency of the complete service still needs to be verified through the Proxy in Step 6.
 
 If the recommendation is `1P + 2D`, you can assign devices 0 to 7 to P1, devices 8 to 15 to D1, and devices 16 to 23 to D2. This device ID assignment is only for demonstration.
 
@@ -320,13 +351,17 @@ curl http://192.0.2.10:8000/v1/chat/completions \
   -d '{"model":"dsv4","messages":[{"role":"user","content":"Hello"}],"max_tokens":16}'
 ```
 
-## Step 5: Benchmarking the Complete PD Service Through the Proxy
+<a id="step-5-benchmarking-the-complete-pd-service-through-the-proxy"></a>
 
-Even if you reuse a deployed service, this step still checks whether `vllm` and `ais_bench` are available at startup. Therefore, you need to complete the deployment command check in Step 1 first.
+<a id="5-benchmarking-the-complete-pd-service-through-the-proxy"></a>
 
-Open `optix_dsv4_proxy.py` created in Step 2, change `host_ip` and `host_port` to the IP address and port of the Proxy, and enter the model name that the Proxy provides externally in `model` (`dsv4` in this example). If `url` in the file is not empty, update it to the actual API address of the Proxy as well.
+## 6 Benchmarking the Complete PD Service Through the Proxy
 
-For `path`, enter the same model/tokenizer directory that the benchmark machine can read. Keep `max_out_len` and the sampling parameters consistent with the D configuration in Step 2.
+Even if you reuse a deployed service, this step still checks whether `vllm` and `ais_bench` are available at startup. Therefore, you need to complete the deployment command check in Step 2 first.
+
+Open `optix_dsv4_proxy.py` created in Step 3, change `host_ip` and `host_port` to the IP address and port of the Proxy, and enter the model name that the Proxy provides externally in `model` (`dsv4` in this example). If `url` in the file is not empty, update it to the actual API address of the Proxy as well.
+
+For `path`, enter the same model/tokenizer directory that the benchmark machine can read. Keep `max_out_len` and the sampling parameters consistent with the D configuration in Step 3.
 
 **The benchmark address of AISBench is determined by this Python file. Modifying `[vllm.command] host/port` in the TOML file does not automatically synchronize the change to AISBench.**
 
@@ -337,7 +372,7 @@ cp docs/zh/use_cases/examples/optix_pd_disaggregation/fine_tune.toml ./pd_fine_t
 uv run msmodeling optix --mode standard -e vllm -b ais_bench -c ./pd_fine_tune.toml
 ```
 
-This step uses the deployed service, skips PSO, and starts fine-tuning from a concurrency of 24 and 96 requests. The request rate is fixed at 0, that is, **no limit on the sending rate**. In this step, `CONCURRENCY.dtype` is `int`, and the concurrency is adjusted within the integer range of 20 to 32 for at most 10 fine-tuning rounds. Step 3, by contrast, uses the concurrency candidates 20, 24, 28, and 32. In both steps, the number of requests changes with the concurrency by a factor of 4. This step checks TTFT and TPOT, and does not search a limited request rate.
+This step uses the deployed service, skips PSO, and starts fine-tuning from a concurrency of 24 and 96 requests. The request rate is fixed at 0, that is, **no limit on the sending rate**. In this step, `CONCURRENCY.dtype` is `int`, and the concurrency is adjusted within the integer range of 20 to 32 for at most 10 fine-tuning rounds. Step 4, by contrast, uses the concurrency candidates 20, 24, 28, and 32. In both steps, the number of requests changes with the concurrency by a factor of 4. This step checks TTFT and TPOT, and does not search a limited request rate.
 
 View the measured rows (`real_evaluation=true`) in `result/pd_dsv4_fine_tune/store/data_storage_*.csv`:
 
@@ -349,13 +384,17 @@ View the measured rows (`real_evaluation=true`) in `result/pd_dsv4_fine_tune/sto
 | throughput(requests/s) | Among the measured rows that meet both the success rate and the latency targets, select the row with the higher throughput |
 | CONCURRENCY, NUM_PROMPTS | Record the concurrency and the number of requests corresponding to this row |
 
-If the targets are still not met when the concurrency drops to 20, no suitable load has been found in the current range. You can expand the concurrency range or configure a limited request rate instead. For details, see the [detailed description of PD disaggregation search](../use_cases/optix_pso_pd_disaggregation.md).
+If the targets are still not met when the concurrency drops to 20, no suitable load has been found in the current range. You can expand the concurrency range or configure a limited request rate instead. For details, see the [detailed description of PD disaggregation search](../use_cases/optix_pd_step_by_step.md).
 
-## FAQ
+<a id="faq"></a>
+
+<a id="6-faq"></a>
+
+## 7 FAQ
 
 | Symptom | Check First |
 |---|---|
-| The deployment commands cannot be found, or they resolve to the msmodeling virtual environment | Confirm as described in Step 1 that the commands are installed outside the `.venv` of msmodeling. For a separate environment, set `OPTIX_DEPLOY_PATH` to the root directory of the environment that contains `bin/`, and then run the check command in 1.4. |
+| The deployment commands cannot be found, or they resolve to the msmodeling virtual environment | Confirm as described in Step 2 that the commands are installed outside the `.venv` of msmodeling. For a separate environment, set `OPTIX_DEPLOY_PATH` to the root directory of the environment that contains `bin/`, and then run the check command in 2.4. |
 | A new model short name cannot be found | Check whether the file is in a model configuration directory that AISBench can search and whether the file name is unique. Run `--search` first. |
 | The request is sent to an old address, or the model name is incorrect | Check `host_ip`, `host_port`, `model`, and any non-empty `url` in the model Python file. |
 | The modified serving parameters do not take effect | Check whether the search field of the corresponding phase is `config_position="run"`, and check the actual startup command in the log. |

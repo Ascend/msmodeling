@@ -13,7 +13,9 @@
 
 本文把一组可以独立启停、对外提供一个服务入口的部署作为一个“服务单元”。单机服务单元可以占用一台机器的多张卡；多机服务单元包含主节点及其 worker。后续的 QPS、卡数、机器数和 P:D 比例均按整个服务单元统计，单元内部的 DP、TP、EP 沿用本次测量的配置。
 
-## 第 1 步：准备 P、D 环境和测试负载
+<a id="第-1-步准备-pd-环境和测试负载"></a>
+
+## 1. 准备 P、D 环境和测试负载
 
 ### 1.1 确定本次测试配置
 
@@ -35,7 +37,7 @@
 
 ### 1.2 安装 OptiX 和压测工具
 
-在 P、D 各自的单机部署环境或多机主节点环境中，按照[环境准备步骤](optix_pso_pd_disaggregation.md#11-准备-vllm-部署环境)准备 vLLM、AISBench 和 OptiX，完成该指南第 1 步的部署命令检查。
+在 P、D 各自的单机部署环境或多机主节点环境中，准备可用的 vLLM、AISBench 和 OptiX。安装与验证可参考[环境准备与安装](../user_guide/optix/plugin_and_modes.md#4-环境准备与安装)和 [AISBench 官方仓库](https://github.com/AISBench/benchmark)，并按各侧实际环境检查部署命令。
 
 后续 `uv` 命令均在 msmodeling 仓库根目录执行。服务和 AISBench 使用各自的部署环境。
 
@@ -79,7 +81,9 @@ ais_bench --models optix_ratio_prefill --datasets gsm8k_gen_0_shot_cot_str_perf 
 ais_bench --models optix_ratio_decode --datasets gsm8k_gen_0_shot_cot_str_perf --search
 ```
 
-## 第 2 步：分别配置 P、D 参数搜索
+<a id="第-2-步分别配置-pd-参数搜索"></a>
+
+## 2. 分别配置 P、D 参数搜索
 
 ### 2.1 P 侧搜索配置
 
@@ -177,7 +181,9 @@ others = "--tensor-parallel-size 8 --data-parallel-size 1 --trust-remote-code --
 
 D 侧每组候选自动在同一服务上测评两轮，第一轮填充缓存、第二轮记录正式指标。保持 `use_request_rate_calibration=false`，固定两轮请求内容、顺序、请求数、输出长度和采样参数。需要更多预热轮次时，将 `benchmark_run_count` 设为更大的正整数，最后一轮计分。
 
-## 第 3 步：在各自设备上执行搜索
+<a id="第-3-步在各自设备上执行搜索"></a>
+
+## 3. 在各自设备上执行搜索
 
 ### 3.1 异构单机部署
 
@@ -270,7 +276,9 @@ uv run --no-sync msmodeling optix --mode standard -e multihost_infer -b ais_benc
 
 一个 P/D 单元包含几台机器，就记录几台机器的完整资源占用。例如上述两节点单元记录为“2 台、16 卡、全局 DP=2”，测得的 QPS 归属于整个单元。
 
-## 第 4 步：固定候选，测量用于配比的 QPS
+<a id="第-4-步固定候选测量用于配比的-qps"></a>
+
+## 4. 固定候选，测量用于配比的 QPS
 
 ### 4.1 选择并部署候选
 
@@ -367,7 +375,9 @@ ais_bench --models optix_ratio_decode --datasets gsm8k_gen_0_shot_cot_str_perf \
 | 时延 | 达标的 TTFT | 达标的 TPOT |
 | 请求吞吐 | `QPS_P`，req/s | `QPS_D`，req/s |
 
-## 第 5 步：手动计算 PD 配比
+<a id="第-5-步手动计算-pd-配比"></a>
+
+## 5. 手动计算 PD 配比
 
 按两侧处理能力平衡计算服务单元数量：
 
@@ -398,7 +408,9 @@ D 单元数 × 每 D 单元卡数 <= 可用于 D 的对应设备卡数
 
 选择资源允许的组合，记录单元数量、总机器数、各类设备卡数、服务参数和理论吞吐，作为完整 PD 部署的初始配置。
 
-## 第 6 步：部署完整 PD 服务并验证配比
+<a id="第-6-步部署完整-pd-服务并验证配比"></a>
+
+## 6. 部署完整 PD 服务并验证配比
 
 使用现有 PD 部署工具，按第 5 步选择的数量部署 P、D 和 Proxy：
 
@@ -406,7 +418,13 @@ D 单元数 × 每 D 单元卡数 <= 可用于 D 的对应设备卡数
 2. 配置 PD 通信参数、KV cache 传输和 Proxy 路由。
 3. 通过 Proxy 完成正常推理，再使用同一业务输入、目标输出长度和采样参数进行压测。
 
-参考[通过 Proxy 压测完整 PD 服务](optix_pso_pd_disaggregation.md#第-5-步通过-proxy-压测完整-pd-服务)，复制完整服务压测配置，将 AISBench 模型短名和地址设置为实际 Proxy，在主机或压测机执行：
+在 msmodeling 仓库根目录复制 [AISBench 完整服务微调模板](../use_cases/examples/optix_pd_disaggregation/fine_tune.toml)：
+
+```bash
+cp docs/zh/use_cases/examples/optix_pd_disaggregation/fine_tune.toml ./pd_fine_tune.toml
+```
+
+将模板的 `[vllm.command]` 地址、端口、模型路径和服务模型名，以及时延目标和负载范围改为实际值。复制前面准备的 D 侧 AISBench 模型配置作为 Proxy 配置，将 `host_ip`、`host_port` 改为可访问的 Proxy 地址和端口，模型名与服务一致；将模板中 `[ais_bench.command]` 的 `models` 改为该配置的短名。分步微调参数说明见[微调完整 PD 服务](../use_cases/optix_pd_step_by_step.md#4-微调完整-pd-服务)。配置完成后执行：
 
 ```bash
 uv run --no-sync msmodeling optix --mode standard -e vllm -b ais_bench \
