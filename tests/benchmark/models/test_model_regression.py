@@ -80,6 +80,8 @@ class BasePerfRegressionCase:
 class TextPerfRegressionCase(BasePerfRegressionCase):
     user_input: Optional[UserInputConfig] = None
     compilation_config: list[str] = field(default_factory=list)
+    pipeline_stage: Optional[int] = None
+    reference_decoder_layers: Optional[int] = None
     from_group: bool = False
     """Optional list of --compilation-config options to apply before running this case.
 
@@ -140,6 +142,19 @@ def _parse_total_time_s(table_result: str, performance_model_name: str = "analyt
     value = float(m.group(1))
     unit = m.group(2)
     return value * {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0}[unit]
+
+
+def _select_pipeline_stage_table(table_result: str, stage: int) -> tuple[str, int]:
+    match = re.search(
+        rf"^\[pipeline stage {stage} layers (\d+):(\d+)\]\n"
+        r"(.*?)(?=^\[pipeline (?:stage|transfer) |\Z)",
+        table_result,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise ValueError(f"Pipeline stage {stage} is missing from the simulation output")
+    start, end, stage_table = match.groups()
+    return stage_table, int(end) - int(start)
 
 
 def _is_baseline_time_acceptable(
@@ -265,7 +280,14 @@ def _run_case_simulation(case: BasePerfRegressionCase) -> tuple[str, float]:
         else:
             raise RuntimeError(f"Unexpected result type: {type(result)}")
 
+    simulated_decoder_layers = None
+    if isinstance(case, TextPerfRegressionCase) and case.pipeline_stage is not None:
+        table_result, simulated_decoder_layers = _select_pipeline_stage_table(table_result, case.pipeline_stage)
     actual_time_s = _parse_total_time_s(table_result, performance_model_name=table_performance_model_name)
+    if isinstance(case, TextPerfRegressionCase) and case.reference_decoder_layers is not None:
+        if not simulated_decoder_layers or case.reference_decoder_layers <= 0:
+            raise ValueError("reference_decoder_layers requires a pipeline stage and positive layer counts")
+        actual_time_s *= case.reference_decoder_layers / simulated_decoder_layers
     logger.info(
         "[%s] Actual total time (%s): %.6fs (%.3fms)",
         case.name,
@@ -358,12 +380,14 @@ def _build_text_case(data: dict, name: str, from_group: bool = False) -> TextPer
     ui_data = data.pop("user_input", {})
     if ui_data.get("model_id"):
         ui_data["model_id"] = resolve_offline_model_id(ui_data["model_id"])
-    for key in ("quantize_linear_action", "quantize_attention_action"):
-        if key in ui_data and isinstance(ui_data[key], str):
-            if key == "quantize_linear_action":
-                ui_data[key] = QuantizeLinearAction[ui_data[key]]
-            else:
-                ui_data[key] = QuantizeAttentionAction[ui_data[key]]
+    for key in ("quantize_linear_action", "quantize_non_expert_linear_action"):
+        if isinstance(ui_data.get(key), str):
+            ui_data[key] = QuantizeLinearAction[ui_data[key]]
+    if isinstance(ui_data.get("quantize_attention_action"), str):
+        ui_data["quantize_attention_action"] = QuantizeAttentionAction[ui_data["quantize_attention_action"]]
+    for key in ("draft_model_config_path", "profiling_database"):
+        if ui_data.get(key):
+            ui_data[key] = str(Path(__file__).resolve().parents[3] / ui_data[key])
     user_input = UserInputConfig(**ui_data)
     compilation_config = data.pop("compilation_config", [])
     return TextPerfRegressionCase(

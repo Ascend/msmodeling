@@ -1,0 +1,37 @@
+{
+  "type": "text",
+  "name": "kimi-k3-4k-prefill",
+  "description": "Kimi-K3 4K PP4 prefill stage 1. Initial empirical compute time 35.395 ms scaled from 23 to 25 decoder layers. Measured 25-layer forward 44.187 ms.",
+  "initial_time_s": 0.038473,
+  "baseline_time_s": 0.044187,
+  "pipeline_stage": 1,
+  "reference_decoder_layers": 25,
+  "user_input": {
+    "device": "ATLAS_800_A3_752T_128G_DIE",
+    "model_id": "moonshotai/Kimi-K3",
+    "world_size": 64,
+    "tp_size": 16,
+    "do_compile": true,
+    "quantize_linear_action": "W4A8_DYNAMIC",
+    "quantize_non_expert_linear_action": "W8A8_DYNAMIC",
+    "prefix_cache_hit_rate": 0,
+    "speculative_method": "dspark",
+    "num_speculative_tokens": 7,
+    "num_speculative_tokens_explicit": true,
+    "draft_model_config_path": "tensor_cast/runtime_configs/draft_configs/kimi-k3-dspark7.json",
+    "dspark_markov_rank": 256,
+    "dspark_markov_head": "vanilla",
+    "performance_model": [
+      "profiling"
+    ],
+    "profiling_database": "tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.27.1_torch2.10.0_cann9.1.0",
+    "decode": false,
+    "num_queries": 1,
+    "query_len": 276,
+    "context_length": 3724,
+    "pp_size": 4,
+    "dp_size": 1,
+    "ep_size": 16,
+    "dcp_size": 1
+  }
+}

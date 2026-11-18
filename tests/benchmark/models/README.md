@@ -114,6 +114,8 @@ Create a JSON file under the `cases/` directory. The filename should match the `
 | `initial_time_s` | `float` | `0.0` | Initial total time (seconds). Set `0` to skip initial comparison |
 | `baseline_time_s` | `float` | `0.0` | Baseline total time (seconds). Text case Actual may exceed this value by at most 5%, non-text case by at most 20%; both must be within `baseline_tolerance`. Set `0` to skip baseline comparison |
 | `initial_tolerance` | `float` | `0.10` | Tolerance vs initial time (10%) |
+| `pipeline_stage` | `int` | unset | Zero-based pipeline stage whose table supplies the total time and operator comparison |
+| `reference_decoder_layers` | `int` | unset | With `pipeline_stage`, scale the stage total by reference layers divided by simulated layers. Enter both time references using the reference layer count |
 | `baseline_tolerance` | `float` | `0.20` | Tolerance vs baseline time (20%) |
 | `operator_top_n` | `int` | `10` | Compare top-N most expensive operators |
 | `operator_tolerance` | `float` | `0.10` | Operator-level tolerance (10%) |

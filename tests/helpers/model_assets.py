@@ -33,6 +33,7 @@ _VENDORED_MODEL_CONFIG_DIRS: dict[str, str] = {
     "inclusionAI/Ling-flash-2.0": "ling_flash_2_0",
     "moonshotai/Kimi-K2-Thinking": "kimi_k2_thinking",
     "moonshotai/Kimi-K2.5": "kimi_k2_5",
+    "moonshotai/Kimi-K3": "kimi_k3",
     "Qwen/Qwen2.5-7B": "qwen2_5_7b",
     "Qwen/Qwen3-0.6B": "qwen3_dense_0_6b",
     "Qwen/Qwen3-8B": "qwen3_dense_8b",

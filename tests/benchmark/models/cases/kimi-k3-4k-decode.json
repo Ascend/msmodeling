@@ -1,0 +1,39 @@
+{
+  "type": "text",
+  "name": "kimi-k3-4k-decode",
+  "description": "Kimi-K3 DSpark 7 decode with a target verification window of 8 tokens. Initial empirical table total 77.716 ms and measured forward 87.41059 ms.",
+  "initial_time_s": 0.077716,
+  "baseline_time_s": 0.08741059,
+  "compilation_config": [
+    "enable_multistream"
+  ],
+  "user_input": {
+    "device": "ATLAS_800_A3_752T_128G_DIE",
+    "model_id": "moonshotai/Kimi-K3",
+    "world_size": 64,
+    "tp_size": 16,
+    "do_compile": true,
+    "quantize_linear_action": "W4A8_DYNAMIC",
+    "quantize_non_expert_linear_action": "W8A8_DYNAMIC",
+    "prefix_cache_hit_rate": 0,
+    "speculative_method": "dspark",
+    "num_speculative_tokens": 7,
+    "num_speculative_tokens_explicit": true,
+    "draft_model_config_path": "tensor_cast/runtime_configs/draft_configs/kimi-k3-dspark7.json",
+    "dspark_markov_rank": 256,
+    "dspark_markov_head": "vanilla",
+    "performance_model": [
+      "profiling"
+    ],
+    "profiling_database": "tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.27.1_torch2.10.0_cann9.1.0",
+    "decode": true,
+    "num_queries": 32,
+    "query_len": 8,
+    "context_length": 5000,
+    "pp_size": 1,
+    "dp_size": 4,
+    "ep_size": 64,
+    "dcp_size": 16,
+    "enable_shared_expert_tp": true
+  }
+}
