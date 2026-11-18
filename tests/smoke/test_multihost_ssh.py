@@ -64,7 +64,7 @@ def test_load_modules_rebinds_fabric_config_after_stale_plugin_import(monkeypatc
     stale = importlib.import_module("multihost_inference_optimization.ssh_remote_tools")
     assert stale.FabricConfig is object
     _config, ssh = _load_modules()
-    ssh.SshRemote("worker").conn
+    ssh.SshRemote("worker", ssh_user="runner").conn
     assert ssh.FabricConfig is not object
 
 
@@ -98,6 +98,14 @@ class TestMultihostSsh(unittest.TestCase):
             "configure passwordless SSH in the optimizer's runtime environment.",
         )
 
+    def test_missing_ssh_user_is_rejected(self):
+        # ssh_user no longer defaults to root: omitting it (or leaving it empty) must
+        # fail instead of silently logging in as a privileged account.
+        for node in ({"host": "worker"}, {"host": "worker", "ssh_user": ""}):
+            with self.subTest(node=node):
+                with self.assertRaisesRegex(ValueError, "missing 'ssh_user'"):
+                    self.config.NodeConfig.from_dict(node)
+
     def test_legacy_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cluster.toml"
@@ -130,7 +138,7 @@ class TestMultihostSsh(unittest.TestCase):
     def test_authentication_failure_propagates_without_retry(self):
         with patch.object(self.ssh, "Connection") as connection:
             connection.return_value.run.side_effect = RuntimeError("authentication failed")
-            remote = self.ssh.SshRemote("worker")
+            remote = self.ssh.SshRemote("worker", ssh_user="runner")
             with self.assertRaisesRegex(RuntimeError, "authentication failed"):
                 remote.run("true")
             connection.return_value.run.assert_called_once_with("true")
@@ -140,7 +148,9 @@ class TestMultihostSsh(unittest.TestCase):
             conn = connection.return_value
             conn.run.return_value.failed = False
             conn.run.return_value.stdout = "123\n"
-            remote = self.ssh.SshRemote("worker", docker_container_id="container", docker_use_sudo=True)
+            remote = self.ssh.SshRemote(
+                "worker", ssh_user="runner", docker_container_id="container", docker_use_sudo=True
+            )
             remote.run("echo ready", hide=True)
             conn.run.assert_called_with("sudo -n docker exec container sh -c 'echo ready'", hide=True)
             remote.run("mkdir -p /tmp/scripts", container_exec=False)
@@ -160,13 +170,13 @@ class TestMultihostSsh(unittest.TestCase):
 
     def test_direct_execution_without_sudo(self):
         with patch.object(self.ssh, "Connection") as connection:
-            remote = self.ssh.SshRemote("worker")
+            remote = self.ssh.SshRemote("worker", ssh_user="runner")
             remote.run("echo ready", timeout=10)
             connection.return_value.run.assert_called_once_with("echo ready", timeout=10)
 
     def test_direct_execution_with_sudo(self):
         with patch.object(self.ssh, "Connection") as connection:
-            remote = self.ssh.SshRemote("worker", docker_use_sudo=True)
+            remote = self.ssh.SshRemote("worker", ssh_user="runner", docker_use_sudo=True)
             remote.run("echo ready", hide=True)
             connection.return_value.run.assert_called_once_with("sudo -n echo ready", hide=True)
 

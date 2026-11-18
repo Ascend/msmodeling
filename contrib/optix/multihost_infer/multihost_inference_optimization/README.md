@@ -2,7 +2,9 @@
 
 vLLM 多机混合部署插件，基于 **多节点 DP（Data Parallel）+ headless** 方案：node 主节点对外提供 API 服务并承载一个模型副本，work 节点以 `--headless` 仅作工作节点（不对外提供 API），通过 RPC 接收任务。配合 PSO 优化器自动寻优 vLLM 服务参数。
 
-> **部署前提**：优化器进程与 node 主节点**运行在同一台机器**上。因此 node 节点的启动脚本在本机以子进程方式拉起（无需 SSH，配置中也无需填写 SSH 信息），work 节点则通过 SSH 远程拉起。健康检查走 `127.0.0.1:<port>`。
+> **部署前提**：优化器进程运行在控制节点（近端）；node 主节点与 work 节点都部署在远端，统一通过 SSH 远程拉起。node 主节点对外提供 API 服务，健康检查走 `http://<node_ip>:<port>`。node 与 work 一样，需在 `config.toml` 中配置 SSH 信息并保证免密登录。
+>
+> **通道安全**：控制机到 node 的 `<port>` 需要网络可达；该健康检查通道为**明文 HTTP、无认证**，请置于可信网络内使用，或自行通过反向代理 / TLS 加固。详见 [SECURITY.md](../../../../docs/zh/legal/SECURITY.md) 通信矩阵。
 
 ## 基础知识
 
@@ -16,17 +18,14 @@ vLLM 多机混合部署插件，基于 **多节点 DP（Data Parallel）+ headle
                                     │ HTTP  /v1/completions、/health
                                     ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  node 主节点（与优化器同机）                                  │
+│  node 主节点（远端）                                          │
 │                                                               │
-│   ┌─────────────────────────┐                                 │
-│   │  PSO 优化器             │  本地子进程                     │
-│   │  msserviceprofiler      │──────────────┐                  │
-│   │  optimizer              │  bash -l     │                  │
-│   └───────────┬─────────────┘  start_node.sh                  │
-│               │ 轮询 127.0.0.1:<port>/health                  │
-│               │ + 匹配就绪日志行                ▼               │
-│               │            ┌──────────────────────────────┐   │
-│               └───────────▶│  API Server                  │   │
+│       （由优化器经 SSH + scp / nohup start_node.sh 拉起）    │
+│                                                               │
+│       （优化器经 HTTP 轮询 http://<node_ip>:<port>/health，  │
+│         + 匹配就绪日志行）                                  │
+│                            ┌──────────────────────────────┐   │
+│                            │  API Server                  │   │
 │                            │  --host 0.0.0.0 --port PORT  │   │
 │                            │  --api-server-count N        │   │
 │                            └───────────────┬──────────────┘   │
@@ -249,7 +248,10 @@ HCCL_OP_EXPANSION_MODE = "AIV"
 
 [[vllm_mix.node]]
 host = "<node_ip>"               # 主节点 IP，例如 192.168.0.10
+ssh_port = 22
+ssh_user = "<ssh_user>"
 # nic_name = "<nic_name>"  # 可选，不配置时寻优前自动探测（detect_nic.py）
+# docker_container_id = "<container_id>"  # 可选，在容器内运行主节点
 
 [[vllm_mix.workers]]
 host = "<worker_ip>"             # 工作节点 IP，例如 192.168.0.11
@@ -343,7 +345,9 @@ value = 1
 
 ### SSH 认证方式
 
-本插件**仅支持免密登录**。用户须自行保证：在优化器实际运行的机器或容器内，以运行优化器的同一操作系统用户，能够按配置的 `host`、`ssh_port`、`ssh_user` 无交互登录每个 worker 的 SSH 目标。
+本插件**仅支持免密登录**。用户须自行保证：在优化器实际运行的机器或容器内，以运行优化器的同一操作系统用户，能够按配置的 `host`、`ssh_port`、`ssh_user` 无交互登录 node 与每个 worker 的 SSH 目标。
+
+> **运行用户建议**：`ssh_user` 为必填项，请配置为远端节点上的**非 root 普通用户**，该用户需具备 sshd 免密登录、写 `/tmp/vllm`、执行 vllm 的权限（配置 `docker_container_id` 时还需具备操作 docker 的权限）。出于权限最小化考虑，生产/共享环境请勿使用 root 等高权限账户，详见 [SECURITY.md](../../../../docs/zh/legal/SECURITY.md) 的「运行用户建议」。
 
 插件复用运行环境中的 SSH agent 或本地 SSH 密钥，不接收、保存或传递登录密码、私钥内容或私钥口令。密钥由用户在插件之外管理；使用带口令的私钥时，须提前加载到优化器可访问的 SSH agent 中。SSH 连接、文件上传和网卡探测均使用同一免密认证方式，认证失败时不会回退到密码登录。
 
@@ -370,7 +374,9 @@ printf 'ssh exit code: %s\n' "$rc"
 
 启用 `docker_use_sudo = true` 时，用户还须为插件执行的远端命令配置免密 sudo 权限。插件使用 `sudo -n`，没有相应权限会直接失败，不会请求或传递 sudo 密码。
 
-**旧配置迁移**：删除节点配置中的 `password`（包括明文、Base64 或空字符串）以及 `ssh_password`、`private_key`、`key_filename`、`pkey`、`passphrase` 等认证字段。配置加载时会拒绝这些字段并提示迁移；SSH 配置仅保留主机、端口和用户名，免密认证由用户在运行环境中配置。
+> **`docker_container_id` 授权范围**：配置后，优化器会先在宿主机 `/tmp/vllm` 写入并改权限（要求 ssh 账号对宿主机有写权限），再在容器内通过 `docker exec` 执行启动与清理脚本、通过 `docker cp` 写入文件。因此该字段**只应对控制机账号可管理的容器使用**：账号需具备 `docker exec` / `docker cp` 权限（`docker_use_sudo = true` 时还需免密 `sudo -n docker ...`）。在共享宿主机上，请勿对非本工具管理的容器填写该字段。
+
+**旧配置迁移**：删除节点配置中的 `password`（包括明文、Base64 或空字符串）以及 `ssh_password`、`private_key`、`key_filename`、`pkey`、`passphrase` 等认证字段。配置加载时会拒绝这些字段并提示迁移；SSH 配置仅保留主机、端口和用户名，免密认证由用户在运行环境中配置。另外 `ssh_user` 现为**必填**字段：旧版缺省时隐式使用 `root`，升级后若不加 `ssh_user` 会直接加载失败，请为 node 与每个 worker 显式补上非 `root` 普通用户（见上方「运行用户建议」）。
 
 为保证多机寻优不受控制节点环境影响，插件使用 `config.toml` 中显式配置的 worker IP、端口和用户，默认不加载
 控制节点的 `~/.ssh/config` 或 `/etc/ssh/ssh_config`。SSH agent 和标准默认密钥仍可用于免密认证；`Host` 别名、
@@ -378,12 +384,17 @@ printf 'ssh exit code: %s\n' "$rc"
 
 ### 节点配置字段说明
 
-**node 主节点**（`[[vllm_mix.node]]`）与优化器同机，本地拉起，无需 SSH 信息：
+**node 主节点**（`[[vllm_mix.node]]`）与 work 节点一样，通过 SSH 远程拉起：
 
-| 字段       | 必填 | 说明                                                                               |
-| ---------- | ---- | ---------------------------------------------------------------------------------- |
-| `host`     | 是   | 主节点 IP，作为所有节点的`--data-parallel-address`                                 |
-| `nic_name` | 否   | 通信网卡名（HCCL / GLOO / TP socket 绑定）；不配置时寻优前自动探测，见"网卡名探测" |
+| 字段                  | 必填 | 说明                                                                                |
+| --------------------- | ---- | ----------------------------------------------------------------------------------- |
+| `host`                | 是   | 主节点 IP，作为所有节点的`--data-parallel-address` 与健康检查地址                    |
+| `ssh_port`            | 否   | SSH 端口（默认 22）                                                                  |
+| `ssh_user`            | 是   | SSH 登录用户名，建议使用非 root 普通用户（需具备 sshd 免密登录、写 /tmp/vllm、执行 vllm 的权限）                                                              |
+| `docker_container_id` | 否   | 配置后通过`docker exec / docker cp` 操作容器；仅用于本工具管理的容器，授权范围见 "SSH 认证方式"                                          |
+| `nic_name`            | 否   | 通信网卡名（HCCL / GLOO / TP socket 绑定）；不配置时寻优前自动探测，见"网卡名探测" |
+
+> **node 的 `host` 身兼两职**：它既是 SSH 登录目标，又会被渲染成 `--data-parallel-address`（所有 worker 连它做 DP 握手）与健康检查地址，因此该地址需同时满足「SSH 可登录」「容器内可绑定」「对 worker 可达」。若 node 跑在容器里，容器须使用**宿主机网络**（`--net=host`）或其它可路由网络；**桥接网络（默认）下这两个角色会冲突**——容器私有 IP 对 worker 不可路由，宿主机 IP 又无法在桥接容器内 bind，最终会卡在 DP 握手（与用 docker exec 还是容器自带 sshd 进入无关）。
 
 **集群级字段**（`[vllm_mix]`，作用于所有节点）：
 
@@ -401,8 +412,10 @@ printf 'ssh exit code: %s\n' "$rc"
 | `host`                | 是   | 服务器 IP，作为该节点的`LOCAL_IP`                  |
 | `nic_name`            | 否   | 通信网卡名；不配置时寻优前自动探测，见"网卡名探测" |
 | `ssh_port`            | 否   | SSH 端口（默认 22）                                |
-| `ssh_user`            | 否   | SSH 用户名（默认 root）                            |
-| `docker_container_id` | 否   | 配置后通过`docker exec / docker cp` 操作容器       |
+| `ssh_user`            | 是   | SSH 登录用户名，建议使用非 root 普通用户（需具备 sshd 免密登录、写 /tmp/vllm、执行 vllm 的权限）                            |
+| `docker_container_id` | 否   | 配置后通过`docker exec / docker cp` 操作容器；仅用于本工具管理的容器，授权范围见 "SSH 认证方式"       |
+
+> **独占节点假设**：本插件假定 node 与每个 worker 都是**仅供本寻优使用的独占节点**——它在每个周期开始前与停止/启动失败时，会按进程名清理 vllm 残留（`stop_vllm_process.sh vllm`，实际为 `pgrep -i -f vllm` + `kill -9`），会连带清掉命令行里含 `vllm` 的任何进程。请勿在共享节点或跑着其它 vllm / 诊断进程的机器上使用，详见「停止流程」。
 
 ---
 
@@ -416,7 +429,7 @@ printf 'ssh exit code: %s\n' "$rc"
 
 1. 用配置中的默认参数（model、TP、DP、MAX_NUM_SEQS 等）在多机环境上能**正常启动 vllm serve**
 2. `min`/`max` 范围只包含物理上可行的值（例如 8 卡机器不要把 TP 设为 16）
-3. 优化器运行环境到各 worker 已配置并验证 SSH 免密登录，NPU 通信正常（参考上方"多节点部署通信验证"章节）
+3. 优化器运行环境到 node 与各 worker 已配置并验证 SSH 免密登录，NPU 通信正常（参考上方"多节点部署通信验证"章节）
 
 建议在寻优前先手动执行一次验证：
 
@@ -449,16 +462,16 @@ msserviceprofiler optimizer -e multihost_infer -b evalscopeperf --backup
 
 - **Stage 0 探测网卡名**：为每个未在 `config.toml` 中配置 `nic_name` 的节点探测其 IP 对应的网卡名（详见下方"网卡名探测"）。仅在第一个寻优周期执行一次，结果缓存复用
 - **Stage 1 生成脚本**：依据 `config.toml` 与 `template.sh`，为主节点生成 `start_node.sh`、各 worker 生成 `start_work_{i}.sh`。寻优变量与上一步探测到的网卡名在此阶段注入（详见下方"寻优变量注入"）
-- **Stage 2 上传脚本**：将 `script_template/` 全部文件 + 对应 `start_work_{i}.sh` scp 到各 worker 的 `/tmp/vllm/`
-- **Stage 3 残留清理**：在各 worker 上执行清理脚本，并 kill 本机 node 残留 vllm 进程
-- **Stage 4 启动 node**：本机以子进程 `bash -l start_node.sh` 拉起主节点（DP 协调者），非阻塞
+- **Stage 2 上传脚本**：将 `script_template/` 全部文件 + `start_node.sh` scp 到 node 的 `/tmp/vllm/`，`script_template/` 全部文件 + 对应 `start_work_{i}.sh` scp 到各 worker 的 `/tmp/vllm/`
+- **Stage 3 残留清理**：在 node 与各 worker 上执行清理脚本，兜底清理残留 vllm 进程
+- **Stage 4 启动 node**：SSH 远程以 `nohup` 后台拉起 `start_node.sh` 主节点（DP 协调者），非阻塞
 - **Stage 5 启动 worker**：各 worker 通过 SSH `nohup` 后台拉起 `start_work_{i}.sh`，非阻塞
-- **快速失败检查**：每个 worker 启动后等待约 3s 回探进程是否存活，起步即崩则抓日志尾部统一报错
-- **健康等待**：优化器轮询 `127.0.0.1:<port>/health`，200 后再匹配 node 启动日志中的就绪关键词（`ready_log_pattern`），确认整集群就绪
+- **快速失败检查**：node 与每个 worker 启动后等待约 3s 回探进程是否存活，起步即崩则抓日志尾部统一报错
+- **健康等待**：优化器轮询 `http://<node_ip>:<port>/health`，200 后再匹配 node 启动日志中的就绪关键词（`ready_log_pattern`），确认整集群就绪
 
 > **为什么先 node 再 worker**：所有节点的 `--data-parallel-address` 都指向 node，node 是 DP 握手的协调者。先拉起协调者，再让各 worker 连入 RPC 端口，rendezvous 更稳。两步均为非阻塞启动，进程在各节点上**并发运行**。
 >
-> **RPC 端口**：`--data-parallel-rpc-port` 不再硬编码。`build_shell_scripts.py` 在生成脚本时统一定一次值，渲染进所有节点脚本（node 监听、worker 连接，必须一致）。取值优先级为 `--dp-rpc-port` > `config.toml` 的 `[vllm_mix].data_parallel_rpc_port` > 本机在 `[20000, 32000)` 内自动挑选的空闲端口。默认不配置即每个寻优周期换一个空闲端口，避免上一周期残留进程或 `TIME_WAIT` 让固定端口起不来。
+> **RPC 端口**：`--data-parallel-rpc-port` 不再硬编码。`build_shell_scripts.py` 在生成脚本时统一定一次值，渲染进所有节点脚本（node 监听、worker 连接，必须一致）。取值优先级为 `--dp-rpc-port` > `config.toml` 的 `[vllm_mix].data_parallel_rpc_port` > 优化器在 `[20000, 32000)` 内自动挑选的空闲端口。默认不配置即每个寻优周期换一个空闲端口，避免上一周期残留进程或 `TIME_WAIT` 让固定端口起不来。注意：该自动挑选是在优化器（近端）机器上探测的空闲端口，node 现为远端部署，若该端口恰在 node 上被占用会起不来，届时请在 `[vllm_mix].data_parallel_rpc_port` 显式指定。
 >
 > **健康判定**：在多节点 DP 架构下，一个请求需所有节点协同才能完成。node 的 `/health` 在 worker 未就绪时也可能返回 200，因此 `health()` 在 200 之后会再匹配 node 启动日志中的就绪关键词（`ready_log_pattern`，默认 `Application startup complete`），命中才判定为 `running`。**不再发真实推理请求**——真实请求会预热模型 / 触发 CUDA Graph 捕获，污染后续 benchmark 首个请求的延迟测量。
 >
@@ -466,8 +479,16 @@ msserviceprofiler optimizer -e multihost_infer -b evalscopeperf --backup
 
 ### 停止流程
 
-1. 停止本机 node 进程（按追踪到的 PID 定向 kill 及其子进程）
+1. 在 node 上执行 `stop_vllm_process.sh` 兜底清理残留（按进程名 `pkill -9 -i -f`）
 2. 在各 worker 上执行 `stop_vllm_process.sh` 兜底清理残留（按进程名 `pkill -9 -i -f`）
+
+> **清理范围与独占假设**：`stop_vllm_process.sh vllm` 用 `pgrep -i -f`（大小写不敏感、匹配完整命令行）做子串匹配后 `kill -9`，因此**命令行里只要含有 `vllm` 的进程都会被清掉**——包括 `grep vllm`、`vim vllm_config.py`、`tail -f /var/log/vllm.log`，以及你手工起的其它 vllm 实验。该清理在每个寻优周期**开始前**与**停止/启动失败时**都会触发；本插件假定 node/worker 为**仅供本寻优使用的独占节点**，共享节点上请勿使用。
+
+### 运行日志与远端路径信息
+
+优化器运行时会通过 SSH 拉取 node/worker 的启动日志（含启动失败时的 traceback 尾部）与健康检查响应，并写入优化器近端的运行日志及 `--backup` 目录下的产物。这些内容可能包含远端节点的内部信息：模型权重绝对路径、`docker` 容器 ID、HCCL 的 IP 与端口、CANN / conda 的本地安装路径等。
+
+这些信息不含登录凭据（密码、私钥等字段在配置加载时即被拒绝）。如需避免把远端业务域的路径信息带回控制机并落盘，请在寻优完成后按需清理运行日志与 `--backup` 产物。
 
 ### 网卡名探测
 
@@ -489,7 +510,7 @@ msserviceprofiler optimizer -e multihost_infer -b evalscopeperf --backup
 
 探测在哪里执行：
 
-- **node 主节点**：与优化器同机，直接本地调用
+- **node 主节点**：与 work 一样，`detect_nic.py` 上传到节点的 `/tmp/ms_optix_detect_nic.py`，用该节点自己的 Python 执行并回读结果；配了 `docker_container_id` 时优先在容器内执行
 - **work 工作节点**：`detect_nic.py` 上传到节点的 `/tmp/ms_optix_detect_nic.py`，用**该节点自己的 Python** 执行并回读结果。依次尝试 `python3` / `python`；配了 `docker_container_id` 时优先在容器内执行（vllm 进程实际所在的网络命名空间），失败再回退宿主机
 
 > **探测时机**：只在第一个寻优周期执行一次，结果按 host 缓存。网卡拓扑在寻优过程中不会变，后续周期直接复用，不重复付 SSH 开销。

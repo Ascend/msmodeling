@@ -24,11 +24,9 @@ scripts can no longer detect the NIC name on the spot with `ip -o addr show`. Ev
 does have Python, though, so detection happens uniformly **before the startup scripts
 are generated**:
 
-- node (master): same machine as the optimizer, so detect_nic.get_ifname_by_ip is
-  called directly in-process;
-- work (workers): detect_nic.py is uploaded to the remote node, run with that node's own
-  Python, and the NIC name is read back from stdout (in docker mode it is run inside the
-  container first, falling back to the host on failure).
+- every node (master and workers): detect_nic.py is uploaded to the remote node, run with
+  that node's own Python, and the NIC name is read back from stdout (in docker mode it is
+  run inside the container first, falling back to the host on failure).
 
 Results are cached per host in the module-level _NIC_CACHE, so the whole optimization run
 pays the SSH cost only during the first cycle and later cycles hit the cache.
@@ -102,7 +100,7 @@ def _pick_ifname(stdout: str) -> Optional[str]:
 
 
 def _detect_local(host: str) -> Optional[str]:
-    """Local detection (the node master runs on the same machine as the optimizer)."""
+    """Local detection (only for nodes that run on the same machine as the optimizer)."""
     try:
         # The same dual import as build_shell_scripts: use the package name when
         # available, otherwise fall back to a direct same-directory import (the package
@@ -203,9 +201,8 @@ def resolve_nic_names(config) -> Dict[str, str]:
     """Detect the NIC names of every node in the cluster and return {host: nic_name}.
 
     - config: a cluster_config.Config instance;
-    - rank 0 ([[vllm_mix.node]]) shares a machine with the optimizer, so it uses local
-      detection;
-    - each worker uses remote detection over SSH.
+    - rank 0 ([[vllm_mix.node]]) and every worker now run on remote machines, so all use
+      remote detection over SSH.
 
     Raises ValueError as soon as any node fails (a missing NIC name makes HCCL/GLOO bind
     to the wrong interface, and failing loudly before optimization starts beats letting
@@ -213,7 +210,8 @@ def resolve_nic_names(config) -> Dict[str, str]:
     """
     nodes: List = []
     if config.node is not None:
-        nodes.append((config.node, True))
+        # The master node is now remote too, so its NIC is detected over SSH like a worker.
+        nodes.append((config.node, False))
     for worker in config.workers:
         nodes.append((worker, False))
 

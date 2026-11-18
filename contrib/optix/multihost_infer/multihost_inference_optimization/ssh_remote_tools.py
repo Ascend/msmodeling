@@ -16,6 +16,7 @@
 
 import os
 import shlex
+from enum import Enum
 from typing import Optional
 
 from fabric import Config as FabricConfig
@@ -29,6 +30,21 @@ class DockerCopyError(RuntimeError):
     Raised separately from upload failures so callers that can still work with the
     host-side copy (e.g. NIC detection falling back to the host) can tell the two apart.
     """
+
+
+class ProcessLiveness(Enum):
+    """Three-way result of a remote process liveness probe.
+
+    - ALIVE: the probe command ran and the target process exists.
+    - DEAD: the probe command ran and the target process does not exist.
+    - UNKNOWN: the probe could not be performed (e.g. an SSH transport error), so
+      there is no verdict. Pollers should treat this as "keep waiting" rather than
+      interpreting it as the process having exited.
+    """
+
+    ALIVE = "alive"
+    DEAD = "dead"
+    UNKNOWN = "unknown"
 
 
 class SshRemote:
@@ -68,8 +84,8 @@ class SshRemote:
     def __init__(
         self,
         host: str,
+        ssh_user: str,
         ssh_port: int = 22,
-        ssh_user: str = "root",
         docker_container_id: Optional[str] = None,
         docker_use_sudo: bool = False,
     ):
@@ -198,21 +214,36 @@ class SshRemote:
         logger.info(f"[{node_label}] started (pid={pid})")
         return pid, log_file
 
+    def probe_process_alive(self, pid) -> ProcessLiveness:
+        """Probe whether the host process is alive, returning a three-way verdict.
+
+        Mirrors is_process_alive() (kill -0 on the host-side PID) but keeps a
+        definitive "process does not exist" separate from a failed probe: a transport
+        error (network flap, sshd rate limiting, dropped connection) maps to UNKNOWN
+        instead of being folded into a DEAD verdict, so periodic pollers can keep
+        waiting rather than abort on a transient SSH failure.
+        """
+        if pid is None:
+            return ProcessLiveness.DEAD
+        try:
+            result = self.conn.run(f"kill -0 {int(pid)}", hide=True, warn=True, timeout=10)
+        except Exception as e:
+            logger.warning(f"[{self.machine_key}] liveness probe failed for pid={pid}: {e}")
+            return ProcessLiveness.UNKNOWN
+        return ProcessLiveness.ALIVE if result.ok else ProcessLiveness.DEAD
+
     def is_process_alive(self, pid) -> bool:
         """Check whether the process on the host is alive.
 
         The PID returned by background is a host-side PID (nohup ... & echo $! runs under
         conn.run, i.e. on the host), so liveness is probed with kill -0 on the host rather
         than inside the container.
+
+        A transport error is reported as False together with a genuine "process not
+        found"; callers that must not abort on a transient SSH failure should use
+        probe_process_alive() to tell the two apart.
         """
-        if pid is None:
-            return False
-        try:
-            result = self.conn.run(f"kill -0 {int(pid)}", hide=True, warn=True, timeout=10)
-            return result.ok
-        except Exception as e:
-            logger.warning(f"[{self.machine_key}] liveness probe failed for pid={pid}: {e}")
-            return False
+        return self.probe_process_alive(pid) == ProcessLiveness.ALIVE
 
     def tail_file(self, path: str, lines: int = 30) -> str:
         """Read the tail of a log file on the host (startup logs are written on the host by nohup)."""
@@ -228,7 +259,7 @@ class SshRemote:
         return SshRemote(
             host=node.host,
             ssh_port=getattr(node, 'ssh_port', 22),
-            ssh_user=getattr(node, 'ssh_user', 'root'),
+            ssh_user=node.ssh_user,
             docker_container_id=getattr(node, 'docker_container_id', None),
             docker_use_sudo=docker_use_sudo,
         )

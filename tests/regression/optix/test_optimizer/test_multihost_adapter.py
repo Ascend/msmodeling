@@ -148,9 +148,11 @@ chips_per_node=8
 data_parallel_rpc_port=20000
 [[vllm_mix.node]]
 host="node0"
+ssh_user="runner"
 nic_name="eth0"
 [[vllm_mix.workers]]
 host="node1"
+ssh_user="runner"
 nic_name="eth0"
 ''',
         encoding="utf-8",
@@ -170,14 +172,16 @@ nic_name="eth0"
         config=SimpleNamespace(env={}, workers=[object()], chips_per_node=8),
         set_build_scripts_dir=lambda _: None,
         get_build_scripts_dir=lambda: scripts,
+        upload_node_script=lambda: None,
         upload_all_scripts=lambda: None,
+        cleanup_node=lambda: None,
         cleanup_all_workers=lambda: None,
         start_workers=lambda _: None,
     )
     sim.process_name = ""
     sim._get_output_dir = lambda: scripts
     sim._resolve_nic_names = lambda: {"node0": "eth0", "node1": "eth0"}
-    sim._launch_node_local = lambda: None
+    sim._launch_node_remote = lambda: None
 
     def build(cmd, **_):
         monkeypatch.setattr(sys, "argv", cmd[1:])

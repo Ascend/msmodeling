@@ -18,7 +18,7 @@
 single source of truth for this plugin's configuration.
 
 Structure of config.toml:
-    [[vllm_mix.node]]      Master node (same machine as the optimizer, launched locally, no SSH info needed)
+    [[vllm_mix.node]]      Master node (launched remotely over SSH, same as workers)
     [[vllm_mix.workers]]   Worker nodes (launched remotely over SSH)
     [vllm_mix.env]         Static environment variables exported into every generated startup script
     docker_use_sudo        Whether commands are prefixed with non-interactive sudo -n
@@ -44,8 +44,8 @@ class NodeConfig:
     """Configuration for a single node; the attributes match the fields SshRemote.from_node reads."""
 
     host: str
+    ssh_user: str
     ssh_port: int = 22
-    ssh_user: str = "root"
     docker_container_id: Optional[str] = None
     nic_name: Optional[str] = None
 
@@ -63,7 +63,16 @@ class NodeConfig:
             )
         # Keep only known fields, ignoring other extra keys in config.toml
         valid = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in valid})
+        filtered = {k: v for k, v in data.items() if k in valid}
+        # ssh_user is required: a missing/empty value must fail explicitly instead of
+        # silently falling back to a privileged account (see docs/zh/legal/SECURITY.md).
+        if not filtered.get("ssh_user"):
+            raise ValueError(
+                "missing 'ssh_user' in node configuration; set it to the non-root OS "
+                "user that runs vLLM on the node (passwordless SSH must be configured). "
+                "See the plugin README node configuration fields."
+            )
+        return cls(**filtered)
 
 
 def _normalize_env_value(value: Any) -> str:

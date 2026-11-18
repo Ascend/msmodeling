@@ -5,7 +5,7 @@ docker_use_sudo = false
 
 [vllm_mix]
 chips_per_node = 8              # A3=16, A2=8; used by build_shell_scripts.py to compute dp_size_local
-#data_parallel_rpc_port = 13389  # Optional, the DP handshake RPC port; when unset, a free port is picked automatically each optimization cycle
+#data_parallel_rpc_port = 13389  # Optional, the DP handshake RPC port; when unset, a free port is auto-picked each cycle. NOTE: auto-pick probes only on the control machine — if the node may have that port occupied, set it explicitly here.
 
 # Static environment variables exported into every generated startup script.
 # Booleans render as lowercase true/false; numbers and strings are kept as-is.
@@ -18,12 +18,15 @@ HCCL_OP_EXPANSION_MODE = "AIV"
 
 [[vllm_mix.node]]
 host = "<node_ip>"              # Master node IP, e.g. 192.168.0.10
+ssh_port = 22                   # SSH port (default 22)
+ssh_user = "<ssh_user>"         # SSH login user (required); use a non-root user that can run vllm
 #nic_name = "<nic_name>"  # Optional; when unset, detected automatically before optimization (detect_nic.py)
+#docker_container_id = "<container_id>"  # Optional; run the node inside a container on this host
 
 [[vllm_mix.workers]]
 host = "<worker_ip>"            # Worker node IP, e.g. 192.168.0.11
 ssh_port = 22
-ssh_user = "<ssh_user>"
+ssh_user = "<ssh_user>"         # SSH login user (required); use a non-root user that can run vllm
 # Passwordless SSH must be configured by the user; do not put credentials in this file.
 #nic_name = "<nic_name>"  # Optional; when unset, detected automatically before optimization (detect_nic.py)
 docker_container_id = "<container_id>"

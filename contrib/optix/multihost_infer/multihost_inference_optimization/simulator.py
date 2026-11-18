@@ -15,15 +15,16 @@
 # -------------------------------------------------------------------------
 
 import subprocess
+import time
 from typing import Optional, Tuple
 from loguru import logger
 from optix.config.config import get_settings, OptimizerConfigField
 from optix.config.constant import ProcessState, Stage
 from optix.optimizer.interfaces.simulator import SimulatorInterface
 from optix.optimizer.utils import close_file_fp
-from optix.io_utils import open_file
 from multihost_inference_optimization.settings import MultiHostCommandConfig
 from multihost_inference_optimization.vllm_worker_manager import VLLMWorkerManager
+from multihost_inference_optimization.ssh_remote_tools import ProcessLiveness
 from multihost_inference_optimization.nic_resolver import resolve_nic_names
 import json
 import shutil
@@ -92,25 +93,46 @@ class MultiHostSimulator(SimulatorInterface):
         # Per-node NIC names {host: nic_name}: detected once before optimization starts
         # and reused in later cycles
         self._nic_names: Optional[dict] = None
-        # Cluster-ready latch for the current cycle, plus the carry-over log buffer feeding
-        # it. See _cluster_ready_from_log for why the match cannot be re-derived per poll.
+        # Cluster-ready latch for the current cycle. Once the master node's startup log
+        # shows the DP cluster has finished rendezvous, later polls skip the remote tail.
         self._cluster_ready: bool = False
-        self._ready_log_buffer: str = ""
-        self._ready_log_offset: int = 0
         self._ready_pattern_warned: bool = False
+        # Throttled remote-probe caches: health() runs at 1 Hz (scheduler.wait_simulate
+        # sleeps 1s per poll), so raw SSH liveness/tail probes would fire up to 3x per
+        # second for the whole startup window. Cache the last liveness verdict and the
+        # readiness-tail read time so the SSH round-trips are bounded instead.
+        self._node_liveness: Optional[ProcessLiveness] = None
+        self._node_liveness_at: float = 0.0
+        self._ready_tail_at: float = 0.0
+        # Last remote log tail served to error-scanning callers (get_last_log), cached for
+        # _READY_TAIL_INTERVAL to avoid a second 1 Hz SSH read of the same log the readiness
+        # check already polls; keyed by line count because callers request different sizes.
+        self._last_log_cache: Optional[str] = None
+        self._last_log_number: Optional[int] = None
+        self._last_log_at: float = 0.0
 
     @property
     def base_url(self) -> str:
+        """The service health endpoint. The master node now runs on a remote machine,
+        so the check targets the node's host IP rather than the loopback address.
         """
-        Get the service's base url property
-        Returns:
+        node = self.remote_executor.config.node
+        host = node.host if node is not None else "127.0.0.1"
+        return f"http://{host}:{self.config.command.port}/health"
 
-        """
-        return f"http://127.0.0.1:{self.config.command.port}/health"
+    # Remote tail line count for the readiness check: the ready line ("Application
+    # startup complete") is printed once shortly after /health turns 200, so a generous
+    # tail is enough without the old local offset/buffer bookkeeping.
+    _READY_LOG_TAIL_LINES = 500
 
-    # Bounded tail kept between polls so a ready pattern split across two read chunks is
-    # still matched, without letting the buffer grow for the life of the service.
-    _READY_LOG_BUFFER_LIMIT = 65536
+    # health() is polled at 1 Hz, so each remote probe type is throttled independently:
+    # - SSH kill -0 liveness every 5s (startup windows are minutes-long, so a worst-case
+    #   5s delay in noticing a real exit is negligible and halves the probe rate vs 1 Hz);
+    # - the SSH log re-read for the ready pattern every 3s after /health turns 200 (the
+    #   ready line is printed once; re-reading a 500-line tail every second just re-ships
+    #   the same bytes).
+    _LIVENESS_PROBE_INTERVAL = 5.0
+    _READY_TAIL_INTERVAL = 3.0
 
     def _cluster_ready_from_log(self) -> bool:
         """Return True when the node's startup log shows the DP cluster is fully ready.
@@ -121,6 +143,14 @@ class MultiHostSimulator(SimulatorInterface):
         """
         if self._cluster_ready:
             return True
+
+        # Throttle the ready-pattern log read: health() polls at 1 Hz, but the ready
+        # line appears once, so re-reading the tail more often than _READY_TAIL_INTERVAL
+        # only re-ships the same 500 lines over SSH. Skip the read between ticks.
+        now = time.monotonic()
+        if now - self._ready_tail_at < self._READY_TAIL_INTERVAL:
+            return False
+        self._ready_tail_at = now
 
         pattern = self.remote_executor.config.ready_log_pattern
         try:
@@ -135,70 +165,80 @@ class MultiHostSimulator(SimulatorInterface):
             self._cluster_ready = True
             return True
 
-        # Accumulate across polls as well: a chunk boundary can fall in the middle of the
-        # ready line, so matching only the newest chunk could miss it permanently.
-        # Read through a cursor of our own, not get_log()
-        if self.run_log and Path(self.run_log).exists():
-            try:
-                with open_file(self.run_log, "r", encoding="utf-8", errors="ignore") as f:
-                    f.seek(self._ready_log_offset)
-                    self._ready_log_buffer += f.read()
-                    self._ready_log_offset = f.tell()
-            except (UnicodeError, OSError) as e:
-                # health() is polled before the log is flushed; retry from the same offset.
-                logger.debug(f"failed reading node startup log for readiness check: {e}")
-        if compiled.search(self._ready_log_buffer) is None:
-            # Keep only a bounded tail, enough for a pattern to straddle a chunk boundary,
-            # so a long-running service does not grow this buffer without limit.
-            if len(self._ready_log_buffer) > self._READY_LOG_BUFFER_LIMIT:
-                self._ready_log_buffer = self._ready_log_buffer[-self._READY_LOG_BUFFER_LIMIT :]
-            return False
-
-        logger.info("DP cluster reported ready (matched ready_log_pattern in the node startup log)")
-        self._cluster_ready = True
-        # The buffer has done its job; drop it so the matched text is not retained.
-        self._ready_log_buffer = ""
-        return True
+        tail = self.remote_executor.tail_node_log(lines=self._READY_LOG_TAIL_LINES)
+        if compiled.search(tail):
+            logger.info("DP cluster reported ready (matched ready_log_pattern in the node startup log)")
+            self._cluster_ready = True
+            return True
+        return False
 
     def health(self) -> ProcessState:
-        """
-        Get the current state of the service.
-        The current implementation uses the basic vllm url.
-        Returns: None
+        """Get the current state of the service.
 
-        When vllm serve on the master node has started but the worker node processes have
-        not, the master's /health endpoint usually still responds normally. So once
-        /health returns 200, readiness is confirmed by matching ``ready_log_pattern``
-        against the node's own startup log (see _cluster_ready_from_log) — by default
-        uvicorn's "Application startup complete" line, which fires only after the DP
-        engine has finished rendezvous with all workers. This avoids sending a real
-        inference request, which would warm up the model and pollute the first benchmark
-        request's latency.
-
+        The master node runs remotely, so there is no local subprocess to poll (calling
+        super().health() would dereference self.process == None). Instead: fail fast if
+        the remote node no longer lives, then probe the HTTP endpoint on the node's host,
+        and finally confirm the whole DP cluster is ready by matching ready_log_pattern
+        in the node's remote startup log (see _cluster_ready_from_log). This avoids
+        sending a real inference request, which would warm up the model and pollute the
+        first benchmark request's latency.
         """
-        last_process_stage = self.process_stage
-        process_res = super().health()
-        if process_res.stage == Stage.error:
-            return process_res
+        # Only a definitive DEAD verdict aborts the cycle. A transient SSH probe failure
+        # (UNKNOWN) must not be read as "the master process exited", otherwise a single
+        # network flap / sshd rate-limit during a poll would cancel the whole run.
+        # The SSH kill -0 probe is throttled (_LIVENESS_PROBE_INTERVAL); between probes
+        # the last verdict is reused, so a cached DEAD still aborts, and a cached
+        # ALIVE/UNKNOWN keeps waiting without an SSH round-trip every poll.
+        now = time.monotonic()
+        if now - self._node_liveness_at >= self._LIVENESS_PROBE_INTERVAL:
+            self._node_liveness = self.remote_executor.node_liveness()
+            self._node_liveness_at = now
+        if self._node_liveness == ProcessLiveness.DEAD:
+            return ProcessState(
+                stage=Stage.error,
+                info="master node process is not running (exited or failed to start)",
+            )
         try:
             res = requests.get(self.base_url, timeout=10)
         except requests.exceptions.RequestException as e:
-            if last_process_stage.stage == Stage.start:
+            if self.process_stage.stage == Stage.start:
                 return ProcessState(stage=Stage.start, info=str(e))
             return ProcessState(stage=Stage.error, info=str(e))
-        else:
-            if res.status_code == 200:
-                if self._cluster_ready_from_log():
-                    return ProcessState(stage=Stage.running)
-                else:
-                    # The master is healthy but the cluster is not yet working together
-                    # (the DP-ready log line has not appeared), so keep waiting
-                    return ProcessState(stage=Stage.start, info="Health OK but cluster not fully ready")
-            # 503 means the service process has started but is not ready yet (e.g. the
-            # model is still loading), which should count as "starting" and keep waiting
-            if res.status_code == 503:
-                return ProcessState(stage=Stage.start, info=f"return code {res.status_code}. text {res.text}")
-            return ProcessState(stage=Stage.error, info=f"return code {res.status_code}. text {res.text}")
+        if res.status_code == 200:
+            if self._cluster_ready_from_log():
+                return ProcessState(stage=Stage.running)
+            # The master is healthy but the cluster is not yet working together
+            # (the DP-ready log line has not appeared), so keep waiting.
+            return ProcessState(stage=Stage.start, info="Health OK but cluster not fully ready")
+        # 503 means the service process has started but is not ready yet (e.g. the
+        # model is still loading), which should count as "starting" and keep waiting.
+        if res.status_code == 503:
+            return ProcessState(stage=Stage.start, info=f"return code {res.status_code}. text {res.text}")
+        return ProcessState(stage=Stage.error, info=f"return code {res.status_code}. text {res.text}")
+
+    def get_last_log(self, number: int = 5, *, retry: bool = True):
+        """Tail the master node's remote startup log for error scanning.
+
+        The optimizer's service health-check hooks call get_last_log() on every poll to
+        detect error patterns, so this path is hot at ~1 Hz. The remote tail is cached for
+        _READY_TAIL_INTERVAL (keyed by ``number``, since callers ask for different line
+        counts), bringing this path's SSH rate in line with _cluster_ready_from_log's 3s
+        throttled read of the same file. Falls back to the base local-file implementation
+        (empty) when no remote log is known yet.
+        """
+        now = time.monotonic()
+        if (
+            self._last_log_cache is not None
+            and self._last_log_number == number
+            and now - self._last_log_at < self._READY_TAIL_INTERVAL
+        ):
+            return self._last_log_cache
+
+        tail = self.remote_executor.tail_node_log(lines=number)
+        self._last_log_cache = tail or super().get_last_log(number, retry=retry)
+        self._last_log_number = number
+        self._last_log_at = now
+        return self._last_log_cache
 
     def update_command(self):
         self.command = MultihostCommand(self.config.command).command
@@ -335,19 +375,18 @@ class MultiHostSimulator(SimulatorInterface):
         logger.info(f"Build shell scripts done:\n{result.stdout.strip()}")
 
     def before_run(self, run_params: Optional[Tuple[OptimizerConfigField]] = None):
-        # Create the log file for the local node process (read by health/get_last_log).
-        # Note: this class does not reuse the base class before_run's command parameter
-        # substitution logic (multi-node parameters are injected through the generated
-        # scripts) and only needs the log file, so it is created separately here.
+        # Create a local log file for compatibility with the base class bookkeeping
+        # (backup/persist/remove all reference self.run_log). The master node now logs to
+        # a remote nohup file, read over SSH via get_last_log/_cluster_ready_from_log.
         self.run_log_fp, self.run_log = tempfile.mkstemp(prefix="ms_serviceparam_optimizer_")
         self.run_log_offset = 0
         # A fresh log file means the previous cycle's ready signal no longer applies: this
-        # cycle's cluster has to prove itself ready again.
+        # cycle's cluster has to prove itself ready again, and cached remote-log snippets
+        # from the previous cycle's (different) log file must not be served.
         self._cluster_ready = False
-        self._ready_log_buffer = ""
-        # Rewind with it: a stale offset would start reading the new, shorter log past its
-        # end and skip the ready line.
-        self._ready_log_offset = 0
+        self._last_log_cache = None
+        self._last_log_number = None
+        self._last_log_at = 0.0
 
         try:
             # Generate the per-node startup scripts (from config.toml and template.sh),
@@ -355,111 +394,47 @@ class MultiHostSimulator(SimulatorInterface):
             logger.debug("build shell scripts")
             self._build_shell_scripts(run_params)
 
+            logger.debug("uploading scripts to the master node...")
+            self.remote_executor.upload_node_script()
             logger.debug("uploading scripts to worker servers...")
             self.remote_executor.upload_all_scripts()
 
             logger.debug("checking and cleaning residual processes...")
+            self.remote_executor.cleanup_node()
             self.remote_executor.cleanup_all_workers()
         except Exception:
             close_file_fp(self.run_log_fp)
             self.run_log_fp = None
             raise
 
-    # A Unix domain socket path cannot exceed sizeof(sockaddr_un.sun_path), 108 bytes
-    # including the NUL terminator, so 107 usable characters. vLLM's DP Coordinator binds a
-    # ZMQ ipc:// socket named "<cwd>/<uuid4>", which spends 1 separator + 36 UUID characters
-    # on top of the working directory.
-    _UNIX_SOCKET_PATH_MAX = 107
-    _DP_SOCKET_NAME_BUDGET = 1 + 36
+    # The remote node runs from the fixed /tmp/vllm working directory so the DP
+    # Coordinator's ZMQ ipc socket stays under the Unix domain socket path limit; see
+    # VLLMWorkerManager.start_node for the canonical explanation.
 
-    def _resolve_node_work_dir(self) -> str:
-        """Pick the working directory for the local node process.
+    def _launch_node_remote(self):
+        """Launch start_node.sh over SSH on the remote master node (non-blocking).
 
-        vLLM's DP Coordinator creates its ZMQ ipc:// socket relative to the process's cwd,
-        and a Unix socket path is hard-limited to 107 characters by the kernel. The generated
-        scripts live under the per-cycle backup directory (``.../back_up/default_001/1/
-        Reproduce``), which is already deep enough that appending a UUID overflows that limit
-        and makes the coordinator die with ZMQError before the engine ever starts.
-
-        Nothing actually requires the process to run from the script's directory: the script
-        is invoked by absolute path and does not reference relative paths. So the cwd only
-        needs to be a real directory short enough to leave room for the socket name, which is
-        checked here rather than assumed.
+        The master node no longer shares a machine with the optimizer: it is launched with
+        the same SSH machinery as the workers, and health() probes it by host IP instead of
+        127.0.0.1. The remote nohup log path is remembered so health() and get_last_log()
+        read readiness/errors over SSH.
         """
-        budget = self._UNIX_SOCKET_PATH_MAX - self._DP_SOCKET_NAME_BUDGET
-        candidates = [Path(self.remote_executor.get_build_scripts_dir())]
-
-        work_path = getattr(self, "work_path", None)
-        if work_path:
-            candidates.append(Path(work_path))
-
-        for candidate in candidates:
-            if candidate.is_dir() and len(str(candidate)) <= budget:
-                return str(candidate)
-
-        # Every candidate is too long (a deep checkout, a long user name). Fall back to a
-        # short private directory under the system temp dir so the coordinator can bind.
-        fallback = Path(tempfile.gettempdir()) / "ms_optix_dp"
-        fallback.mkdir(parents=True, exist_ok=True, mode=0o700)
-        resolved = str(fallback)
-        if len(resolved) > budget:
-            # Nothing left to try: report the real constraint instead of letting vLLM fail
-            # with an opaque ZMQError deep inside the coordinator.
+        pid, log_file = self.remote_executor.start_node()
+        if pid is None:
             raise RuntimeError(
-                f"cannot find a working directory short enough for vLLM's DP Coordinator ipc socket: "
-                f"{resolved!r} leaves no room within the {self._UNIX_SOCKET_PATH_MAX}-character "
-                f"Unix socket path limit. Set TMPDIR to a shorter path."
-            )
-        logger.warning(
-            f"Script and work directories are too long for the DP Coordinator ipc socket "
-            f"(limit {budget} characters); running the node from {resolved} instead."
-        )
-        return resolved
-
-    def _launch_node_local(self):
-        """Launch start_node.sh in the background on the local machine (the node that shares a machine with the optimizer).
-
-        The node serves the API to the outside and health() probes it via 127.0.0.1:port,
-        so it is launched non-blockingly with subprocess.Popen and the process is handed to
-        the base class's self.process, which makes the self.process.poll() logic in
-        health()/stop() work.
-        """
-        node_script = Path(self.remote_executor.get_build_scripts_dir()) / "start_node.sh"
-        if not node_script.is_file():
-            raise RuntimeError(f"node startup script not found: {node_script}")
-
-        # Reuse the base class's log file mechanism: before_run already created self.run_log
-        log_path = self.run_log
-        cmd = ["bash", "-l", str(node_script)]
-        work_dir = self._resolve_node_work_dir()
-        logger.info(f"[start_node] launching locally: {' '.join(cmd)}, log={log_path}, cwd={work_dir}")
-
-        # Close the fd left behind by mkstemp in before_run and hand the subprocess an
-        # append-mode handle instead, to avoid leaking the fd
-        if self.run_log_fp is not None:
-            try:
-                os.close(self.run_log_fp)
-            except OSError:
-                pass
-            self.run_log_fp = None
-
-        if log_path:
-            with open(log_path, "a", encoding="utf-8") as log_fp:
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=log_fp,
-                    stderr=subprocess.STDOUT,
-                    cwd=work_dir,
-                )
-        else:
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
-                cwd=work_dir,
+                f"failed to start the remote master node "
+                f"({getattr(self.remote_executor.node, 'host', '<unknown>')}); "
+                f"check SSH access to the node"
             )
         self.process_stage = ProcessState(stage=Stage.start)
-        logger.info(f"[start_node] started locally, pid={self.process.pid}")
+        logger.info(f"[start_node] started remotely, pid={pid}, log={log_file}")
+
+        # Fail-fast: a missing conda env, a port conflict, or a script error would
+        # otherwise stay hidden until health() hits the wait timeout.
+        if not self.remote_executor.probe_node_alive(pid, log_file):
+            raise RuntimeError(
+                f"master node exited right after start; log tail:\n{self.remote_executor.tail_node_log(lines=30)}"
+            )
 
     def run(self, run_params: Optional[Tuple[OptimizerConfigField]] = None, **kwargs):
         """Launch the whole DP cluster non-blockingly and return immediately; health() decides when the cluster is ready.
@@ -468,24 +443,25 @@ class MultiHostSimulator(SimulatorInterface):
         self.before_run must be invoked explicitly here to generate and upload the scripts
         and clean up leftovers.
 
-        Startup order: start the local node first (the DP coordinator that
+        Startup order: start the master node first over SSH (the DP coordinator that
         data-parallel-address points at), then launch each worker in the background over
         SSH. Both are non-blocking, so the processes run concurrently.
         """
-        # Clean up leftover vllm processes on the local node
+        # Clean up leftover vllm processes on the optimizer machine (defensive; the node
+        # no longer runs locally, so this is typically a no-op).
         if self.process_name:
             try:
                 self.kill_residual_process(self.process_name)
             except Exception as e:
                 logger.error(f"Failed to kill residual process. {e}")
 
-        # Generate the scripts, upload them to the workers, clean up worker leftovers
+        # Generate the scripts, upload them to the node and workers, clean up leftovers
         # (and create self.run_log)
         self.before_run(run_params)
 
         try:
-            # 1. Launch the node (master) locally, non-blocking
-            self._launch_node_local()
+            # 1. Launch the master node over SSH, non-blocking
+            self._launch_node_remote()
             # 2. Launch all worker nodes in the background over SSH, non-blocking
             self.remote_executor.start_workers(run_params)
         except Exception as e:
@@ -494,7 +470,8 @@ class MultiHostSimulator(SimulatorInterface):
             raise
 
     def stop(self, del_log: bool = True):
-        # Stop the local node process (the base class kills self.process specifically)
-        super().stop(del_log)
-        # Clean up leftover processes on all worker nodes
+        # Stop the remote master node first, then all worker nodes.
+        self.remote_executor.cleanup_node()
         self.remote_executor.cleanup_all_workers()
+        # The base class cleans up the local log file and (now absent) local process handle.
+        super().stop(del_log)
