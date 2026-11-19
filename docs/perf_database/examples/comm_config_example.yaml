@@ -1,5 +1,5 @@
 # comm_config.yaml — 通信配置表
-# 路径: tensor_cast/performance_model/perf_database/data/{device}/hccl/{cann_version}/comm_config.yaml
+# 路径: tensor_cast/performance_model/profiling_database/data/{device}/hccl/{cann_version}/comm_config.yaml
 #
 # 映射验证来源:
 #   - DSV3 Decode Profiling (32 卡): hcom_allReduce_(82x), HcomAllGather(164x),

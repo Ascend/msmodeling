@@ -1,5 +1,5 @@
 # op_mapping.yaml — 算子映射表 (Production-ready)
-# 路径: tensor_cast/performance_model/perf_database/data/{device}/vllm_ascend/{version}/op_mapping.yaml
+# 路径: tensor_cast/performance_model/profiling_database/data/{device}/vllm_ascend/{version}/op_mapping.yaml
 #
 # 映射方法论 (遵循 tutorial/OP_PLUGIN_MAPPING_TUTORIAL.md):
 #   每条映射遵循完整证据链, 证据写入 notes 字段:

@@ -22,7 +22,7 @@ By running models on "virtual" hardware, TensorCast provides detailed performanc
 
 - Out-of-the-box support for Hugging Face transformer models.
 - Support for multiple hardware accelerator devices through simple configuration.
-- Operator-level execution time: estimated using extensible models, such as analytic roofline models, empirical data, or machine learning-based predictors.
+- Operator-level execution time: estimated using extensible models, such as analytic Roofline models, empirical data, or machine learning-based predictors.
 - Memory footprint: tracks total and peak memory allocation.
 - Computational characteristics: analyzes the floating point operations (FLOPs) and memory access volume of each operator.
 - Advanced scheduling simulation: models complex execution patterns, such as concurrent computation across multiple streams.

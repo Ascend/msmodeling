@@ -68,29 +68,29 @@ The process of developing a custom plugin is as follows:
 
 ### Customizing a Service Framework
 
-1. Inherit from `optix.optimizer.simulator.SimulatorInterface`, and implement the `base_url` and `data_field` properties and the `update_command` method. Example:
+1. Inherit from `optix.optimizer.interfaces.simulator.SimulatorInterface`, and implement the `base_url` property and the `update_command` method. Example:
 
     ```python
-    class optix.optimizer.simulator.SimulatorInterface()
-        Bases: ABC
-        # Operations on the service framework. This class manages service-related functions
-        abstract property data_field: Tuple[OptimizerConfigField] | None
-            # Obtain the data field attribute
-            Returns: Optional[Tuple[OptimizerConfigField]]
-        abstract property setter data_field: Tuple[OptimizerConfigField] | None
-            # Set the data field attribute
-            Returns: None
-        abstract update_command() → None
-            # Update the service startup command based on data_field before service startup. Update the self.command attribute
-            Returns: None
-        update_config(params: Tuple[OptimizerConfigField] | None = None) → bool
-            # Update the service configuration file or other configurations based on the input parameter values, to apply new parameter values to the configuration
-            Args:
-                #params: Tuple of tuning parameters, each defined by its value and config_position
-            Returns: bool, indicating whether the update succeeds or fails.
-        abstract stop()
-            # Perform any other necessary preparation during runtime
-            Returns: None
+    from optix.optimizer.interfaces.simulator import SimulatorInterface
+
+
+    class VllmSimulator(SimulatorInterface):
+        """Adapter for a vLLM service framework.
+
+        ``data_field``, ``update_config`` and ``stop`` are provided by the base
+        classes and work as they are. Implement the required abstract members
+        below.
+        """
+
+        @property
+        def base_url(self) -> str:
+            # Return the health-check URL of the vLLM service.
+            ...
+
+        def update_command(self) -> None:
+            # Build the service startup command from data_field before startup
+            # and update self.command.
+            ...
     ```
 
 2. Register the service framework in the `__init__.py` file. Example:
@@ -104,39 +104,30 @@ The process of developing a custom plugin is as follows:
 
 ### Customizing a Performance Benchmark Tool
 
-1. Inherit from `optix.optimizer.benchmark.BenchmarkInterface` and implement the `data_field` property and `get_performance_index` methods.
+1. Inherit from `optix.optimizer.interfaces.benchmark.BenchmarkInterface` and implement the `update_command` method and the `get_performance_index` method.
 Example:
 
     ```python
-    class optix.optimizer.benchmark.BenchmarkInterface():
-        Bases: ABC
-        property num_prompts: Tuple[OptimizerConfigField] | None
-            # Obtain the number of data retrieval requests
-            Returns: Optional[Tuple[OptimizerConfigField]]
+    from optix.optimizer.interfaces.benchmark import BenchmarkInterface
+    from optix.config.config import PerformanceIndex
 
-        property setter num_prompts: Tuple[OptimizerConfigField] | None
-            # Set the number of data retrieval requests
-            Returns: None
 
-        property data_field: Tuple[OptimizerConfigField] | None
-            # Obtain the data field attribute
-            Returns: Optional[Tuple[OptimizerConfigField]]
+    class VllmBenchMark(BenchmarkInterface):
+        """Adapter for a vLLM benchmark tool.
 
-        abstract property setter data_field: Tuple[OptimizerConfigField] | None
-            # Set the data field attribute
-            Returns: None
+        ``data_field``, ``num_prompts`` and ``stop`` are provided by the base
+        classes and work as they are. Implement the required abstract members
+        below.
+        """
 
-        abstract get_performance_index() → PerformanceIndex
-            # Retrieve performance metrics
-            #Returns: metric data
+        def update_command(self) -> None:
+            # Build the benchmark startup command from data_field before startup
+            # and update self.command.
+            ...
 
-        abstract stop()
-            # Perform any other necessary preparation during runtime
-            Returns: None
-
-        abstract update_command() → None
-            # Update the service startup command based on data_field before service startup. Update the self.command attribute
-            Returns: None
+        def get_performance_index(self) -> PerformanceIndex:
+            # Collect and return the performance metrics.
+            ...
     ```
 
 2. Register the benchmark tool in the `__init__.py` file. Example:
@@ -174,7 +165,7 @@ Example:
 
 5. Use the plugin.
 
-    You can specify which plugin modules to use via the CLI arguments of OptiX.
+    You can specify which plugin modules to use via the OptiX CLI arguments.
     For example, after registering the service framework `vllm_infer` and the benchmark tool `vllm_infer_benchmark`, check whether they appear in the supported services and benchmark tools.
 
     ```bash

@@ -79,7 +79,7 @@ optional arguments:
 
 示例：
 
-- 基本用法
+- 基本用法（在仓库根目录执行）
 
 ```bash
 python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml

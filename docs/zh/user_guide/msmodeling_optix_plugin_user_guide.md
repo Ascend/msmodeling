@@ -68,29 +68,27 @@
 
 ### 自定义服务框架
 
-1. 继承optix.optimizer.simulator.SimulatorInterface，实现base_url和data_field property，实现update_command方法等。例如：
+1. 继承optix.optimizer.interfaces.simulator.SimulatorInterface，实现base_url property和update_command方法等。例如：
 
     ```python
-    class optix.optimizer.simulator.SimulatorInterface()
-        Bases: ABC
-        #操作服务框架。用于操作服务相关功能。
-        abstract property data_field: Tuple[OptimizerConfigField] | None
-            #获取data field 属性 
-            Returns: Optional[Tuple[OptimizerConfigField]]
-        abstract property setter data_field: Tuple[OptimizerConfigField] | None
-            #设置data field 属性 
-            Returns: None
-        abstract update_command() → None
-            #服务启动前根据data_field更新服务启动命令。更新self.command属性。
-            Returns: None
-        update_config(params: Tuple[OptimizerConfigField] | None = None) → bool
-            #根据参数更新服务的配置文件，或者其他配置，服务启动前根据传递的参数值 修改配置文件。使得新的配置生效。
-            Args:
-                #params: 调优参数列表，是一个元组，根据其中每一个元素的value和config position进行定义
-            Returns: bool，返回更新成功或者失败。
-        abstract stop()
-            #运行时，其他的准备工作。 
-            Returns: None
+    from optix.optimizer.interfaces.simulator import SimulatorInterface
+
+
+    class VllmSimulator(SimulatorInterface):
+        """vLLM 服务框架适配实现。
+
+        ``data_field``、``update_config``、``stop`` 已由基类提供且可直接工作，
+        仅需实现下方必需的抽象成员。
+        """
+
+        @property
+        def base_url(self) -> str:
+            # 返回 vLLM 服务的健康检查 URL。
+            ...
+
+        def update_command(self) -> None:
+            # 服务启动前根据 data_field 更新启动命令，并写入 self.command。
+            ...
     ```
 
 2. 并在 `__init__.py` 文件中注册服务框架，例如：
@@ -104,39 +102,28 @@
 
 ### 自定义性能测试工具
 
-1. 继承optix.optimizer.benchmark.BenchmarkInterface，实现data_field property，get_performance_index方法等。
+1. 继承optix.optimizer.interfaces.benchmark.BenchmarkInterface，实现update_command方法和get_performance_index方法等。
 例如：
 
     ```python
-    class optix.optimizer.benchmark.BenchmarkInterface():
-        Bases: ABC
-        property num_prompts: Tuple[OptimizerConfigField] | None
-            #获取数据的请求数
-            Returns: Optional[Tuple[OptimizerConfigField]]
-            
-        property setter num_prompts: Tuple[OptimizerConfigField] | None
-            #设置获取数据的请求数
-            Returns: None
-            
-        property data_field: Tuple[OptimizerConfigField] | None
-            #获取data field属性 
-            Returns: Optional[Tuple[OptimizerConfigField]]
-            
-        abstract property setter data_field: Tuple[OptimizerConfigField] | None
-            #设置data field属性 
-            Returns: None
-        
-        abstract get_performance_index() → PerformanceIndex
-            #获取性能指标 
-            #Returns: 指标数据类
-        
-        abstract stop()
-            #运行时，其他的准备工作。 
-            Returns: None
-        
-        abstract update_command() → None
-            #服务启动前根据data_field更新服务启动命令。更新self.command属性。 
-            Returns: None
+    from optix.optimizer.interfaces.benchmark import BenchmarkInterface
+    from optix.config.config import PerformanceIndex
+
+
+    class VllmBenchMark(BenchmarkInterface):
+        """vLLM 性能测试工具适配实现。
+
+        ``data_field``、``num_prompts``、``stop`` 已由基类提供且可直接工作，
+        仅需实现下方必需的抽象成员。
+        """
+
+        def update_command(self) -> None:
+            # 启动前根据 data_field 生成测评工具启动命令，并写入 self.command。
+            ...
+
+        def get_performance_index(self) -> PerformanceIndex:
+            # 采集并返回性能指标。
+            ...
     ```
 
 2. 并在 `__init__.py` 文件中注册 benchmark，例如：

@@ -79,7 +79,7 @@ Parameters:
 
 Example:
 
-- Basic usage
+- Basic usage (run from the repository root)
 
 ```bash
 python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml

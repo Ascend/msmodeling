@@ -6,7 +6,7 @@
 >
 > **This service is intended for single-user, single-host use only.** Do not run it on a multi-user shared host. If the service process runs with high privileges (root/administrator), it poses a local privilege escalation risk.
 
-This document is intended for everyday Modeling users and developers who are about to integrate the project. It helps you quickly understand what the tool can do, how to launch simulations from the Web UI or the CLI, how to interpret results, and how to configure parameters for different business scenarios.
+This document is intended for everyday msModeling users and developers who are about to integrate the project. It helps you quickly understand what the tool can do, how to launch simulations from the Web UI or the CLI, how to interpret results, and how to configure parameters for different business scenarios.
 
 If you only want to start the Web UI, run the launcher in the repository root (with the venv activated):
 
@@ -32,7 +32,7 @@ After startup, open `http://127.0.0.1:5173` in your browser. The frontend automa
 
 ## 1 Tool Positioning
 
-Modeling is a simulation tool for model inference performance analysis. Its core capabilities include:
+msModeling is a simulation tool for model inference performance analysis. Its core capabilities include:
 
 - Predict operator latency, memory usage, communication overhead, and overall inference time based on device profiles without real hardware or a full environment for running a real LLM.
 - Support LLM text inference, VL multimodal inference, Diffusion Transformer inference for video generation, and serving throughput optimization.
