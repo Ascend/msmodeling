@@ -9,19 +9,25 @@ Layer 2 升级规则见 `./agent.md`「失败恢复」。
 
 ## 输入
 
-每轮候选生成前必须读取当前 run 目录的：
+每轮候选生成前必须读取当前 run 目录的**摘要 + 最近两轮**（不要全量读历史，见下方预算说明）：
 
 1. `context.json` — 本轮环境事实、负载、约束、目标和搜索空间；历史输入读取对应 `context.round-N.json`。
-2. `summary.md` — 所有过往轮次摘要、趋势、失败分析（可以只读摘要，数值以
-   results 为准）。
-3. 全部 `candidates.round-N.json`（含 directions）与 `results.round-N.json` —
+2. `summary.md` — 所有过往轮次摘要、趋势、失败分析（数值以 results 为准，摘要只用于定位）。
+3. **最近 2 轮**的 `candidates.round-N.json`（含 directions）与 `results.round-N.json` —
    结构化 trial 数据，尤其是上一轮的 `failure` 字段（含
    `category/sub_category/suggested_action/offending_params`）。执行由
    `msmodeling optix` agent 模式（`optimizer_strategy="agent"`）完成，原始
    vLLM/benchmark log **不贴进这些 JSON**（由 optix 另行落盘保存）；本阶段只读
-   结构化字段，不读原始 log。
-4. `context.source.config_toml` 指向的配置文件——参数定义、固定配置与实际命令。
-5. 按目标路由读取的方法卡——推荐起点、组合条件与回退动作。
+   结构化字段，不读原始 log。跨轮对比需要的更早数据，用
+   `metrics_gate.py compare --run-dir <run>` 一次性算完，不要把所有历史 JSON 读进上下文。
+4. `dimension_index.json`（`check_dimensions.py --init-index` 生成，每轮更新）——
+   哪些搜索维度已测、测了几轮、哪些从未移动；**没有它就无法判断"是否收敛"**。
+5. `context.source.config_toml` 指向的配置文件——参数定义、固定配置与实际命令。
+6. 按目标路由读取的方法卡——推荐起点、组合条件与回退动作。
+
+> 读入预算（S5）：全量读 20 轮 candidates/results 在实测 run 中占用了大量上下文
+> 却只重复看到同几个配置。历史趋势交给 `summary.md` 与 `metrics_gate.py` 的统计输出，
+> 本阶段只保留"最近 2 轮 + 维度矩阵"作为决策输入。
 
 ## 本轮分析记录
 
@@ -32,7 +38,7 @@ Layer 2 升级规则见 `./agent.md`「失败恢复」。
 
 | 作用域 | 必填字段 | 内容 |
 |---|---|---|
-| `directions[]` | `evidence_analysis` | 读取的证据及发现，包括来源、具体指标、失败或约束事实；区分已验证事实与未验证假设。 |
+| `directions[]` | `evidence_analysis` | 读取的证据及发现，包括来源、具体指标、失败或约束事实；区分已验证事实与未验证假设。**首句必须先给出 `metrics_gate.py breakdown --run-dir <run>` 的结论**（S1）：延迟项占比、`ρ(fitness, 吞吐)`、以及 `OK/WEAK/DEGRADED`。判 `DEGRADED` 时写「本轮 fitness 只反映吞吐」，并在 directions 中声明「各配置组间延迟差异不可判」。 |
 | `directions[]` | `refs_analysis` | 读取的知识点（goals 路由、relationships 组合校验、方法卡的前提与边界），以及证据如何匹配知识、为何选择或排除方向；经验建议冲突时记录裁决依据。 |
 | `directions[]` | `candidates_analysis` | `search_space` 新增、修改、删除项的名称、前后定义及依据；候选取值、默认继承项、校验与回退动作。空间未变更时明确写明。 |
 | 顶层 | `routing_review.hypothesis` | 本轮瓶颈假设，一句话陈述；延续上一轮假设时须写明延续关系。 |
@@ -42,6 +48,34 @@ Layer 2 升级规则见 `./agent.md`「失败恢复」。
 `directions[]` 的三个字段均为**非空字符串**，正文可用简短段落或 Markdown，不要求
 固定标题、表格或子模板。只记录与该方向有关的分析；`evidence_refs` 继续保留真实
 来源的文件路径，分析文字中也应说明来源。完整 JSON 示例见「候选格式」。
+
+### 判定门：什么算「提升」（S3，强制）
+
+任何"A 比 B 好 x%"的结论，必须先过这道门，否则只能写「不可分辨」：
+
+```text
+metrics_gate.py compare --run-dir <run> --metric generate_speed --arm a=<子串> --arm b=<子串>
+```
+
+| compare 输出 | 允许的表述 |
+|---|---|
+| `VERDICT: real_gain`（差值 ≥ 2σ 且样本量够） | "A 比 B 高 x%（σ=x%，n=…）" |
+| `VERDICT: within_noise` | **只能写"两个配置组相差 x%，小于 2σ（σ=x%），不可分辨"**，禁止写"提升/下降" |
+| `VERDICT: insufficient` | 不得下结论；所需样本量在预算内才按 `required_repetitions` 补测 |
+| `VERDICT: noise_dominant` / `unmeasurable`（退出码 4） | 噪声过大、不可判定：终止 run，final_report 记录，不补测 |
+
+- σ 由同配置重复轮的极差/d2 与 MAD 取大者估计，来源优先 run 目录的 `noise_band.json`
+  （Round 0 校准，见 SKILL.md「PD 分离部署的强制约束」第 4 条；历史 run 回退 `context.noise_band`）；
+  缺失时用本 run 内同配置重复组池化（中位数）。单样本配置组自身的极差是 0，
+  不能当 σ 用 —— 否则任何 0.1% 的抖动都会被判成"显著"。校准 σ 超过 5% 可信上限
+  时 `compare` 拒绝判定（重新校准，或 `--noise-ack-wide` 人工确认后继续）。
+- 同配置重复组内部相对差异 > 5% 时（例如两个实验配置组的 `params` 恰好完全一致被归成一组），
+  该组不参与噪声底估计，脚本会在 `noise` 行说明来源。
+- 重复次数按 `n ≈ 2(z_α + z_β)²σ²/Δ²` 反推，`compare` 直接给出 `n_required`；
+  举量级：σ≈0.5% 时每种配置只测 2 次只能判 ~1.5%，判 0.5% 每种配置约需 9 次（以脚本按本 run σ 算出的为准）。
+- 相邻轮 A/B 交替（A-B-A）时，`compare` 会给配对 σ 和配对数——配对优先于独立样本。
+- `--arm NAME=CANDIDATE_ID`：先精确匹配 `candidate_id`，匹配不到才退化为子串匹配，
+  避免 `r3` 顺带命中 `r7-repeat-r3`。
 
 ### routing_review 填写与校验规则
 
@@ -106,6 +140,13 @@ Layer 2 升级规则见 `./agent.md`「失败恢复」。
    `./environment-preparation.md`）声明的**可搜项**才可进候选生成；冻结项
    （业务给定并发 C、输入/输出长度、既定部署项等，已钉死进 config.toml）不得
    成为候选参数或方向的 `target_params`；已登记的 TOML 字段仍须保留在空间中，以常量默认值参与装配。
+5. **维度预算与基线口径（S5）**：生成候选前跑
+   `check_dimensions.py --run-dir <run>`（上限默认由预算均分，脚本会打印来源）。
+   `over_budget` 的维度本轮必须换维度；`uncovered` 维度优先补齐（前提是方法卡
+   证明它对本轮瓶颈层有效）。同一维度连续 3 个 trial 仍 `within_noise` 时，
+   结论是"该维度在此配置下无效应"，写进 `dimension_index.json` 的 `retired`，
+   不得继续加试。基线候选取知识库方法卡的推荐起点（不是随手挑的默认值），
+   需要归因时用同轮 A/B 对照；**禁止用明显劣化的"稻草人"配置当基线**去制造提升幅度。
 
 ### 每轮搜索空间
 
@@ -125,6 +166,19 @@ Layer 2 升级规则见 `./agent.md`「失败恢复」。
 2. 本 run 实测结果（`results.round-*.json`）。案例或其他来源附带的实测声明不算本 run 实测。
 3. 方法卡正文的适用条件与组合约束。
 4. 官方案例配置与方法卡推荐起点；采用时在 rationale 说明依据。
+5. **负载口径指纹核对（S6）**：案例/历史结论的数字（提升幅度、参数优劣）绑定其口径指纹
+   （prefix cache 开关与命中率结构、并发、输入/输出长度、temperature）。与当前 run 指纹
+   不一致时降级为「仅参考」——不得直接作为收益预期、基线依据或「已被复测否定」结论引用
+   （现成反例：MNBT_prefill 32768 与 γ≥5 在 pc0 与 pc90 口径下结论相反）。指纹不一致时
+   在 rationale 写明口径差异与降级理由。
+6. **历史负结果条目（negative 分区）**：`knowledge/case-knowledge/cases/negative/` 的条目
+   绑定「参数 + 场景指纹 + 对照实测 + 置信度 + 未验证场景」。裁决规则：当前 run 指纹与条目
+   一致（模型同、部署形态同、负载口径同或近似）→ 作「已被复测否定」的强先验，该参数默认排除出
+   本 run 空间；确需触碰时在 rationale 给出与条目场景的差异依据，并按单变量对照设计执行。
+   指纹不一致 → 与官方案例同级「仅参考」，不得采信其下「已否定/已验证」结论。条目与方法卡
+   冲突时以方法卡为准（条目是单场景实测，方法卡是机制与适用条件）；`confidence: low`
+   条目只作方向提示，不得作排除依据。本 run 收尾时由 `scripts/export_negative_knowledge.py`
+   自动回写新负结果，保持先验随场景更新。
 
 案例参数与方法卡约束冲突时以方法卡为准：先按方法卡约束生成候选，把案例写法列为后续轮次的
 单变量对照方向，本 run 实测更优后方可保留；裁决过程写入 rationale。
@@ -263,7 +317,10 @@ Layer 2 升级规则见 `./agent.md`「失败恢复」。
 
 - 首轮根据环境准备阶段复检通过的基础配置生成基线候选，建立参照；
 - 探索靠跨轮的 directions 规划保证覆盖（见 candidates 协议），不靠同轮堆候选；
-- 结果异常、漂移或久未复测时，下一轮重跑基线候选确认稳定性。
+- 结果异常、漂移或久未复测时，下一轮重跑基线候选确认稳定性；但复测纪律让位于空间覆盖：
+  仍有 ≥2 个未覆盖维度时优先探索（复测统一放到收敛前验证阶段），同配置基线候选在整个
+  run 只作为「首轮基线」出现一次，后续重复基线仅用于漂移确认，不得占用搜索轮
+  （无基线分支的起点质量见 `./agent.md`「无基线冷起点质量」）。
 
 ### 诊断点候选（`trial_type: "diagnosis"`）
 
@@ -413,6 +470,24 @@ fitness = 0.4 * (gen_speed_target / speed)         # 吞吐项，量级通常 2-
   已执行轮次 ≥ `min_rounds`（默认 4）、已完成 trial ≥ `min_trials`（默认 4）。
   agent 模式每轮固定 1 个候选，两个门等价，取较大者生效。
   任一不满足时输出"覆盖率不完整"及原因，**继续下一轮**，不收敛。
+- **维度覆盖条件（S5，新增，必须满足才可宣称收敛）**：
+  `check_dimensions.py --run-dir <run>` 必须 exit 0。它检查三个事实——
+  ① `search_space` 里每个可动维度是否至少移动到过 2 个取值；
+  ② 是否有**未被触碰**的维度（`uncovered` / `pinned_off_default`）；
+  ③ 是否有**单维度 trial 数超上限**（`over_budget`）。上限默认按
+  `context.budgets.max_trials ÷ 可动维度数` 均分（下限 2），可用
+  `--max-trials-per-dim` 显式指定，脚本会打印上限及其来源。
+  典型反例（某次 PD 64k 场景，20 trial / 9 个可动维度）：单个维度打了 20 个
+  trial，而 `MAX_NUM_SEQS_decode`、`GPU_MEMORY_UTILIZATION_decode` 一次未动，
+  报告却写"收敛"。未移动的维度必须在 `dimension_index.json` 标 `retired` 并写理由
+  （例如"该维度在 prefill 阶段无作用"），否则不得宣称收敛。
+  另一类 finding 是 `pinned_off_default`：所有 trial 都用同一个非默认值（如
+  `MAX_NUM_SEQS_prefill` 全程 64，而空间 `default=128`）——这不是"探索过"，
+  而是空间默认值与实际使用值不一致，要么改 `default`，要么标 `constant`。
+- **提前终止（escalation，S5）**：`routing_review.hypothesis` 指向的瓶颈层若无任何
+  `search_space` 字段可覆盖（例如判断瓶颈在调度器，但空间里没有调度器参数），
+  连续 2 轮之后必须终止并出 `final_report.md` 说明"空间不覆盖瓶颈"，
+  不得为凑满 `max_rounds` 反复重测同一维度。
 - 两个条件都满足才输出"收敛退出"并停止；跑满 `[agent_optimizer].max_rounds`
   （默认 32）自然终止。
 - **时间预算**：`[agent_optimizer].time_limit_minutes` 限制每次单轮执行（默认
@@ -423,11 +498,26 @@ fitness = 0.4 * (gen_speed_target / speed)         # 吞吐项，量级通常 2-
   重新计算全局 trial 累计耗时。该字段包含本轮历次成功、失败及重试的已完成
   trial 耗时；`trials[].elapsed_s` 只记录本次执行的单个 trial，不再另行累加。
   该口径不包含 baseline、Agent 分析及进程间等待时间，不能作为整个任务的墙钟耗时。
+  **单轮上限 ≠ 全局预算（S5）**：`time_limit_minutes` 只约束单轮，跨轮总时长必须在
+  Round 0 记录起始墙钟并在 `summary.md` 顶部维护"已用/剩余"，把 baseline 部署与
+  轮间重部署计入。PD 场景下每次 trial 都要重起 P/D 实例，部署通常占墙钟一半以上，
+  预算是算"部署 + 压测"的，不能按压测时长估算还能跑几轮。
   预算耗尽或不足以完成下一次执行时，Agent
   不再启动新轮或重试，并执行 `export_best_config.py` 和生成 `final_report.md`。
 
 > **注意**：collect_context 不控制上述参数——其同名预算旗标仅作信息记录，
 > 运行时以 config.toml `[agent_optimizer]` 为准。
+
+- **最优配置采信纪律（S3 补充，export_best_config 与 final_report 前强制）**：最优配置存在
+  同配置复测样本时，采信数字取复测**中位数**口径；最优 trial 单轮值与复测中位数偏差 > 3σ 时
+  判离群——best_result 与 final_report 用中位数数字并显式标注离群轮次与偏差。机械规则
+  （如"并列取先出现者"）选出的最优配置若带离群数字，必须在报告里拆开「配置是否更优」
+  （复测中位数对比）与「单轮峰值」两个口径，不得用离群单轮值宣称收益（实例：某 pc0
+  run 最优配置单轮 gen 比同配置复测中位数高 5.9% 而 σ 仅 0.2%，该收益经 4 次复测确认不成立）。
+
+**说明**：报告 §六 方案 8 的执行判据——「最优配置 vs 同配置复测中位数偏差 ≤ 3×σ」是
+`metrics_gate.py compare` 的 2σ 判据在导出侧的加强版（最优配置的数字会被下游直接引用，
+用 3σ 降低误伤离群标注的概率，超过即降级中位数口径）。
 
 ## 收尾
 

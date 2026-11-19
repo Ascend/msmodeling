@@ -167,7 +167,7 @@ def validate_routing_review(data: dict, refs_texts: list[str]) -> tuple[list[str
     for layer in layers:
         if layer not in LAYER_DIRS:
             violations.append(
-                f"routing_review.l1_layers_matched 含未知机制层“{layer}”：层名须与 method-index.md 分层标题一致。"
+                f"routing_review.l1_layers_matched 含未知机制层“{layer}”：层名须与 method-index.md 分层标题一致（合法层名：{'、'.join(LAYER_DIRS)}）。"
             )
     for layer, reason in deferred.items():
         if layer not in layers:
@@ -412,6 +412,42 @@ def validate_trial_types(data: dict) -> None:
             raise ValueError("Replace candidate diagnostic_only with direction trial_type: diagnosis")
 
 
+def _warn_speculative_family(context: dict, candidates: list) -> None:
+    """S6 (mtp.md §5.6): warn when MTP is enabled but its mechanism-family knobs are absent.
+
+    Non-blocking by design: gamma is not an isolated knob — draft eager and capture
+    alignment are independent increment sources. Missing them must be declared in
+    candidates_analysis, otherwise gamma-saturation claims are unverified.
+    """
+    try:
+        space_params = {item.get("name", "") for item in _space_items(context.get("search_space") or {})}
+    except Exception:
+        return
+    gamma_names = {"num_speculative_tokens", "num_speculative_tokens_prefill", "num_speculative_tokens_decode"}
+    family_markers = ("enforce_eager", "cudagraph_capture_sizes", "recompute_scheduler")
+    enabled = False
+    for cand in candidates or []:
+        if not isinstance(cand, dict):
+            continue
+        for name, value in (cand.get("params") or {}).items():
+            if name in gamma_names:
+                try:
+                    if float(value) > 0:
+                        enabled = True
+                except (TypeError, ValueError):
+                    enabled = True
+    if not enabled:
+        return
+    missing = [m for m in family_markers if not any(m in p for p in space_params)]
+    if missing:
+        print(
+            "⚠ validate_candidates: MTP 机制单元联动字段未登记进 search_space（mtp.md §5.6）: "
+            f"{missing}。γ 不是孤立旋钮——draft eager 与 capture 对齐 (γ+1) 是独立增量来源；"
+            "若本轮不探索，须在 candidates_analysis 声明「联动字段未探索」，不得据此宣称 γ 饱和。",
+            file=sys.stderr,
+        )
+
+
 def validate_round(data: dict, run_dir: Path, round_no: int) -> None:
     """Check the exact space consumed by the next optix process."""
     validate_trial_types(data)
@@ -554,6 +590,7 @@ def validate_round(data: dict, run_dir: Path, round_no: int) -> None:
             )
             active_fields = map_param_with_value(position, tuple(resolved))
             prepare_multihost_fields(simulator, active_fields)
+    _warn_speculative_family(context, candidates)
 
 
 def main() -> int:

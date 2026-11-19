@@ -23,6 +23,19 @@ agent 多机混部使用原 `multihost_infer` 插件；进入该场景先读 [�
 
 agent PD 分离先读 [PD 部署搜索约定](references/pd.md)，使用原 `vllm_pd` 插件。
 
+**PD 分离部署的强制约束（违反会导致预检失败或运行期死锁；细则与逐条恢复见 references/pd.md「故障恢复手册」）**：
+
+1. 一轮只许成功一次：同轮成功后不可重跑；验证重复（winner/baseline 各按 gate 反推次数，最少 2）各占新轮次；
+   同轮递增 `--attempt` 仅用于失败重试。被拒/失败的 attempt 会留下 config/deployment 文件，重跑必须递增 attempt。
+2. 逐轮例行：先 `run_pd_round.py ... --prepare-only` 干跑通过，再后台真跑（nohup，日志落 run 目录）。
+3. 验证阶段的前置顺序不可颠倒：`export_best_config.py`（产 `best_result.json`）→
+   `pd_workflow.py init-verification`（产 `pd_verification_budget.json`）→ verification 轮；
+   缺少前置产物时，配置生成会直接报错拒绝。
+4. `context.json` 是框架独占资产：禁止手工增删键（noise_band 等写 run 目录独立文件，如 `noise_band.json`；
+   框架 preflight 会重写 context 并剥离未知键，手改必触发 sha 校验失败）。恢复一律用框架快照
+   `context.round-N.attempt-M.json` 覆盖回写，并换新 attempt。
+5. 运行目录不得建在 msmodeling 源码树内（runner 与配置生成器都会拒绝）。
+
 三种模式共享同一条前置链（见下「共享前置流程」），差异只在执行分支。
 
 ## Agent 决策与参数来源

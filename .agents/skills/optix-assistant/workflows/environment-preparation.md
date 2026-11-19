@@ -89,10 +89,23 @@ SHA-256，检查与部署环境的兼容性，禁止宣称已固定版本。归�
 
    **agent 模式特有的额外要求**（全自动/交互式都必须做）：
 
-   - 寻优目标：`tpot_slo` / `ttft_slo`（单位秒）必填且 > 0 → 必须问用户目标值
-     （即使有默认值也要确认，禁止静默填）→ `config_preflight --ttft-slo <x> --tpot-slo <y>`；
-     用户无概念时按 `../references/benchmark.md` §6.3 典型场景模板给建议值，
-     标注"按典型场景建议，请确认"。
+   - 寻优目标：`tpot_slo`（单位秒）**只能由用户给出**（TTFT 不作为 SLO 门禁约束，
+     preflight 不校验 ttft_slo）。
+     - `tpot_slo` 缺失即停止本轮（不进 trial），禁止 agent 代填，也禁止用"典型场景模板"顶替用户值；
+       用户主动要求建议时，可按 `../references/benchmark.md` §6.3 给参考区间，
+       但落盘的值必须是用户确认的那一个（标注"按典型场景建议，请确认"，确认后照抄原话）。
+     - 提供正值 SLO 回填时必须声明来源：
+       `config_preflight --tpot-slo <y> --slo-source user --slo-note "<用户原话>"`
+       → 同时写出 `<run_dir>/slo_provenance.json`；此后 `--check-only` 会校验配置里的
+       SLO 与登记值一致（不一致即失败，SLO 只能由用户变更）。
+     - 灵敏度门禁（S1）：判据不是"SLO 比实测大几倍"，而是无量纲灵敏度
+       **elasticity = penalty × 实测中位数 / SLO**（即 `d ln(cost)/d ln(t)`）。
+       elasticity 低于 0.5 时，实测值变化 1% 只让该惩罚项变化不到 0.5%——
+       与噪声同量级，等于把该项变成常数，fitness 只剩吞吐一个变量。
+       preflight 会按本 run 已跑出的成功 trial 中位数与 config 里的 penalty 现算，
+       判据与具体模型、场景、run 无关；阈值可用 `--slo-min-elasticity` 调整。
+       确属用户给定的宽松值时，追加 `--slo-ack-wide "<确认人 + 依据>"` 人工确认后继续，
+       并在 `final_report.md` 写明"本轮 fitness 不含有效延迟约束"。
    - 轮数 / trial / 时间预算 → 与用户确认，在步骤 5 写入 optix 实际读取的 config.toml：
      `config_preflight --set-max-rounds <N> --set-max-trials <N> --set-time-limit-minutes <N>`
      （写入 `[agent_optimizer]`，是 optix 运行终止的真实依据；
@@ -158,6 +171,11 @@ SHA-256，检查与部署环境的兼容性，禁止宣称已固定版本。归�
      拓扑核算及不匹配处理按 case Skill；仅忽略不适用的并行取值，其他参数逐项核对。不整套照搬、不硬拼两条快照。
    - 有 `kind: method_card_positive`：不当启动命令；对照「改动 + 结果数字」，
      规则见 case-knowledge SKILL。
+   - **负结果条目匹配（与官方案例同批，强制）**：官方案例收集完成后执行
+     `python <SKILL_ROOT>/knowledge/case-knowledge/scripts/search_cases.py --negative --model <前缀>`，
+     只扫 `cases/negative/` 负结果条目。命中条目按 `../workflows/data-analysis.md`
+     「知识参考优先级」第 6 条裁决：指纹一致 → 对应参数默认排除出本 run 空间，排除
+     决定与依据写入步骤 5 的「未采用项原因」；指纹不一致 → 仅参考。
    - 无可采用案例时继续步骤 5，由目标路由与方法卡确定基础配置。
 
 5. **方法核对与集中写入配置（阻塞项）**：
@@ -234,6 +252,15 @@ SHA-256，检查与部署环境的兼容性，禁止宣称已固定版本。归�
 
    参数类型、默认值、并行资源、投机配置及 benchmark 一致性均通过后继续。
 
+7.5 **NPU 现场清零检查与干扰防护（阻塞项，S6）**：
+   - 基线部署与首轮压测前、每次复测/验收前，用 `npu-smi info` 核对全部主机（PD 场景含
+     D 侧主机）NPU 进程清零（以空闲基线显存作参照，如 ~3.4GB/卡）。
+   - 发现非本任务进程：先报告用户，经明确授权后处置；**pkill 主进程后必须清理
+     `VLLM::Worker` / `EngineCore` 孤儿进程**（实例：孤儿占用 58.5GB HBM 挤死 P 侧部署；
+     容器内 PID ≠ 宿主 PID，统一在宿主侧用 ps/pkill 定位）。
+   - 外部会话反复复活干扰（如其他测试 case 循环拉起）时可用周期性 pkill 防护脚本压制，
+     但属破坏性动作，必须用户明确授权，且复测窗口结束后终止防护；终版验收前必须
+     「杀链 + 清孤儿 + 重启部署」从零干净跑。
 8. **进入 Round 1 优化**：按 `./data-analysis.md`「每轮搜索空间」建立空间，再生成首轮候选。
    每轮 1 个候选，首轮基于步骤 7 复检通过的基础配置建立基线。
 

@@ -17,6 +17,7 @@
 """Ownership: lib. Shared helpers for optix-assistant scripts."""
 
 import json
+import math
 import os
 import hashlib
 import re
@@ -24,7 +25,7 @@ import shlex
 import tomlkit
 from pathlib import Path
 from math import isclose
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 __all__ = [
     "read_json",
@@ -42,6 +43,10 @@ __all__ = [
     # config_writer / config_preflight, single implementation)
     "table_or_create",
     "bad_json_tokens",
+    # noise_band 校验（metrics_gate compare 与 export_negative_knowledge 共用）
+    "MAX_PLAUSIBLE_SIGMA",
+    "extract_noise_band",
+    "validate_noise_sigma",
 ]
 
 
@@ -56,6 +61,22 @@ def write_json(path: Path, data: Dict[str, Any]):
 
 def load_context(run_dir: Path) -> Dict[str, Any]:
     return read_json(run_dir / "context.json")
+
+
+def find_run_dir(explicit: str) -> Path:
+    """显式路径优先；否则在 CWD/.agent_optimizer/runs 下发现唯一含 context.json 的 run。"""
+    if explicit:
+        path = Path(explicit)
+        if not path.exists():
+            raise SystemExit(f"ERROR: run dir not found: {path}")
+        return path
+    runs = Path.cwd() / ".agent_optimizer" / "runs"
+    if not runs.exists():
+        raise SystemExit("ERROR: no .agent_optimizer/runs under CWD; pass --run-dir")
+    candidates = sorted(p for p in runs.iterdir() if (p / "context.json").exists())
+    if len(candidates) != 1:
+        raise SystemExit(f"ERROR: {len(candidates)} run dirs under {runs}; pass --run-dir")
+    return candidates[0]
 
 
 def convert_numeric(value: float, dtype: str):
@@ -415,3 +436,85 @@ def load_cluster_topology(path: str | None = None) -> Dict[str, Any]:
             for key, value in (section.get("env") or {}).items()
         },
     }
+
+
+#: noise_band 校准 σ 的可信上限（相对值）。与 metrics_gate 的 5% 同一标准：
+#: 同一个阈值已经用来判定「同配置组不算重复测量」，校准值自己超限就按校准失败处理。
+MAX_PLAUSIBLE_SIGMA = 0.05
+
+
+def extract_noise_band(run_dir: Path) -> Tuple[Dict[str, Any], str]:
+    """噪声校准读取的统一入口：run 目录 ``noise_band.json`` 优先（SKILL.md「PD 分离部署的强制约束」第 4 条）。
+
+    兼容未包装对象与 ``{"noise_band": {...}}`` 两种包装；历史 run 回退
+    ``context.noise_band``。返回 ``(band, source)``，source ∈
+    ``{"noise_band.json", "context.noise_band", ""}``；解析失败一律返回空 dict
+    （调用方按「无校准」处理，不在读取层抛异常）。
+    """
+    band_path = Path(run_dir) / "noise_band.json"
+    if band_path.exists():
+        try:
+            raw = json.loads(band_path.read_text(encoding="utf-8"))
+            band = raw.get("noise_band") if isinstance(raw, dict) else None
+            band = band or (raw if isinstance(raw, dict) else {})
+            if isinstance(band, dict) and band:
+                return band, "noise_band.json"
+        except (OSError, ValueError):
+            pass
+    context_path = Path(run_dir) / "context.json"
+    if context_path.exists():
+        try:
+            band = json.loads(context_path.read_text(encoding="utf-8")).get("noise_band") or {}
+            if isinstance(band, dict) and band:
+                return band, "context.noise_band"
+        except (OSError, ValueError):
+            pass
+    return {}, ""
+
+
+def validate_noise_sigma(value: Any, max_sigma: float = MAX_PLAUSIBLE_SIGMA) -> Dict[str, Any]:
+    """校验 noise_band 里的单个 σ 值（compare 与负结果导出共用）。
+
+    σ 是 Round 0 写入的普通 JSON 值，没有可信区间校验时，一次校准抖动或格式错误
+    就能让整个 run 判不出任何差异（σ=50% 时 +13.61% 的真实差异也判 within_noise），
+    或反向把噪声级差异判成 real_gain。返回::
+
+        {"status": "missing"|"ok"|"zero"|"error",
+         "sigma": float,          # error/missing 时为 0.0
+         "error": str,            # status=error 时的具体原因
+         "warning": str,          # status=zero 时的提示
+         "ackable": bool}         # True = 负数/超上限，可用 --noise-ack-wide 人工确认后继续；
+                                  # False = 格式非法（数据损坏必须修复，不可 ack）
+    """
+    if value is None:
+        return {"status": "missing", "sigma": 0.0, "error": "", "warning": "", "ackable": False}
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return {
+            "status": "error",
+            "sigma": 0.0,
+            "error": "不是数值（bool/字符串/列表/嵌套对象均不接受）",
+            "warning": "",
+            "ackable": False,
+        }
+    sigma = float(value)
+    if not math.isfinite(sigma):
+        return {"status": "error", "sigma": 0.0, "error": "不是有限数（NaN/inf）", "warning": "", "ackable": False}
+    if sigma < 0:
+        return {"status": "error", "sigma": 0.0, "error": f"为负数（σ={sigma}）", "warning": "", "ackable": True}
+    if sigma == 0:
+        return {
+            "status": "zero",
+            "sigma": 0.0,
+            "error": "",
+            "warning": "为 0，视为确定性测量 —— 请确认校准没有漏测波动",
+            "ackable": False,
+        }
+    if sigma > max_sigma:
+        return {
+            "status": "error",
+            "sigma": sigma,
+            "error": f"超过可信上限 {max_sigma * 100:g}%（校准失败：疑似混入不同配置/部署或 warmup 样本）",
+            "warning": "",
+            "ackable": True,
+        }
+    return {"status": "ok", "sigma": sigma, "error": "", "warning": "", "ackable": False}

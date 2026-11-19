@@ -34,7 +34,7 @@ records config_toml_sha256; never modify the TOML during an active run.
     python skills/optix-assistant/scripts/config_preflight.py --check-only --config <path>
     # Round-0 write examples: back-fill before collect_context records the hash
     python skills/optix-assistant/scripts/config_preflight.py --config <path> --set-model /weights/qwen
-    python skills/optix-assistant/scripts/config_preflight.py --config <path> --set-agent-mode --ttft-slo 3.0
+    python skills/optix-assistant/scripts/config_preflight.py --config <path> --set-agent-mode --tpot-slo 0.05
     # write run-time budgets into config.toml [agent_optimizer] — the actual
     # termination source of truth for optix agent mode
     python skills/optix-assistant/scripts/config_preflight.py --config <path> \
@@ -49,10 +49,12 @@ import os
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import sys
 import time
 from pathlib import Path
+from math import isclose
 from typing import Any, Dict, List
 
 import tomlkit
@@ -68,6 +70,22 @@ _INPUT_OUTPUT_FLAGS = {"--input-len", "--random-input-len", "--output-len", "--r
 
 #: 24 小时全局预算上限（分钟）—— 与 collect_context --time-limit-minutes 默认值一致
 MAX_TIME_LIMIT_MINUTES = 1440
+
+#: SLO 只能由用户给出：回填时必须声明来源并记录用户原话，否则视为 agent 自行编造。
+SLO_SOURCES = ("user",)
+
+#: SLO 宽松到失去区分力时用无量纲灵敏度判断，而不是与基线比倍数：
+#:
+#: 该值（elasticity）就是"实测值变化 1% 时惩罚项变化几个百分点"。噪声量级约
+#: 0.5%，所以 elasticity × 1% 低于噪声时，这一项在任何候选之间都近似常数 ——
+#: 此时 fitness 只剩吞吐一个变量。判据与具体 run、模型、场景无关，只取决于
+#: SLO、惩罚系数和本 run 的实测水平。
+SLO_MIN_ELASTICITY = 0.5
+#: PerformanceTuner.__init__ 的默认惩罚系数（config 未写时 optix 用的就是它）
+DEFAULT_PENALTY = {"tpot_penalty": 3.0}
+
+#: 与结果目录并列保存的 SLO 来源凭证（不写入 config.toml，避免 optix 解析未知键）
+SLO_PROVENANCE_FILE = "slo_provenance.json"
 
 #: 显式指定的卡号环境变量（可写在 launch_env.sh 或 shell 环境）
 _VISIBLE_DEVICES_ENV = "ASCEND_RT_VISIBLE_DEVICES"
@@ -221,18 +239,34 @@ def check_completeness(
                 "或配置 dataset_name/dataset_path"
             )
 
-    # --- 寻优目标（TPOT/TTFT 硬约束）必填 ---------------------------------------
-    for slo_key in ("tpot_slo", "ttft_slo"):
-        slo = config.get(slo_key)
-        if slo is None or slo == "" or str(slo).strip() in _PLACEHOLDER_VALUES:
-            errors.append(f"{slo_key} 未设置 —— 需用户确认寻优目标（TPOT/TTFT SLO，单位秒）")
-        else:
-            try:
-                if float(slo) <= 0:
-                    errors.append(f"{slo_key}={slo} 必须大于 0（单位秒）")
-            except (TypeError, ValueError):
-                errors.append(f"{slo_key}={slo!r} 不是有效数值（单位秒）")
-
+    # --- 寻优目标：TPOT SLO 必填 ------------------------------------------------
+    # PD 场景 fitness 读 [pd_disagg.<phase>].tpot_slo（PdDisaggPhaseConfig 默认
+    # 0.05）——顶层键不生效。只校验顶层会出现「gate 接受的顶层值与实际生效的
+    # 阶段默认值不同源」（检视 202103638），校验必须对齐真实键位。
+    pd_phases = pd_phase_sections(config)
+    if pd_phases:
+        for phase in pd_phases:
+            label = f"[pd_disagg.{phase}].tpot_slo"
+            slo = (config.get("pd_disagg") or {}).get(phase, {}).get("tpot_slo")
+            if slo is None or slo == "" or str(slo).strip() in _PLACEHOLDER_VALUES:
+                errors.append(f"{label} 未设置 —— PD 场景 TPOT SLO 按阶段配置（单位秒），需用户确认")
+            else:
+                try:
+                    if float(slo) <= 0:
+                        errors.append(f"{label}={slo} 必须大于 0（单位秒）")
+                except (TypeError, ValueError):
+                    errors.append(f"{label}={slo!r} 不是有效数值（单位秒）")
+    else:
+        for slo_key in ("tpot_slo",):
+            slo = config.get(slo_key)
+            if slo is None or slo == "" or str(slo).strip() in _PLACEHOLDER_VALUES:
+                errors.append(f"{slo_key} 未设置 —— 需用户确认寻优目标（TPOT SLO，单位秒）")
+            else:
+                try:
+                    if float(slo) <= 0:
+                        errors.append(f"{slo_key}={slo} 必须大于 0（单位秒）")
+                except (TypeError, ValueError):
+                    errors.append(f"{slo_key}={slo!r} 不是有效数值（单位秒）")
     if config.get("optimizer_strategy", "pso") != "agent":
         errors.append('optimizer_strategy 未设为 "agent" —— agent 寻优不会启用，需确认切换到 agent 模式')
     else:
@@ -744,7 +778,6 @@ def _print_confirmation_table(
     print(f"benchmark 工具  : {benchmark}                            [--benchmark]")
     print(f"输入/输出       : {io_desc or '-'}                       [vllm_benchmark.command.others / dataset]")
     print(f"TPOT SLO        : {config.get('tpot_slo', '-')}s         [tpot_slo]")
-    print(f"TTFT SLO        : {config.get('ttft_slo', '-')}s         [ttft_slo]")
     print(f"校准开关        : {calib_desc}                            [use_request_rate_calibration]")
     print(f"使用卡数        : {world_desc}                           [--world-size]")
     print(f"指定卡号        : {cards_desc}")
@@ -775,6 +808,48 @@ def _set_section_value(content: str, section_header: str, key: str, value: Any) 
         table = table_or_create(table, part)
     table[key] = value
     return tomlkit.dumps(doc)
+
+
+def pd_phase_sections(config: Dict[str, Any]) -> List[str]:
+    """config 里实际存在的 ``[pd_disagg.<phase>]`` 阶段（prefill/decode 顺序在前）。
+
+    PD 场景 fitness 读阶段键（pd_phase 的 PerformanceTuner 按
+    ``getattr(settings.pd_disagg, phase)`` 取 SLO），顶层键不参与 fitness。
+    """
+    pd = config.get("pd_disagg")
+    if not isinstance(pd, dict):
+        return []
+    phases = [p for p in ("prefill", "decode") if isinstance(pd.get(p), dict)]
+    phases += [k for k in pd if isinstance(pd.get(k), dict) and k not in phases]
+    return phases
+
+
+def _content_pd_phases(content: str) -> List[str]:
+    """从 TOML 文本里找 ``[pd_disagg.<phase>]`` 阶段（apply_backfill 的文本侧入口）。"""
+    phases: List[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[pd_disagg.") and stripped.endswith("]"):
+            phase = stripped[len("[pd_disagg.") : -1].strip().strip('"').strip("'")
+            if phase and phase not in phases:
+                phases.append(phase)
+    return phases
+
+
+def effective_tpot_slo(config: Dict[str, Any]) -> tuple[Any, str]:
+    """fitness 实际消费的 TPOT SLO 值与键位置。
+
+    PD 配置取 ``[pd_disagg.decode].tpot_slo``（TPOT 门禁的典型承载阶段，decode
+    优先、缺失回退首个阶段）；单服务取顶层 ``tpot_slo``。返回 ``(value, label)``，
+    label 用于错误信息里指明真实键位。
+    """
+    phases = pd_phase_sections(config)
+    if phases:
+        for phase in phases:
+            if phase == "decode":
+                return (config["pd_disagg"][phase].get("tpot_slo"), f"[pd_disagg.{phase}].tpot_slo")
+        return (config["pd_disagg"][phases[0]].get("tpot_slo"), f"[pd_disagg.{phases[0]}].tpot_slo")
+    return (config.get("tpot_slo"), "tpot_slo")
 
 
 def _set_command_value(content: str, engine: str, key: str, value: Any) -> str:
@@ -820,10 +895,14 @@ def apply_backfill(content: str, args: argparse.Namespace, engine: str) -> str:
         content = _set_command_value(content, engine, "served_model_name", args.set_served_name)
     if args.set_bench is not None:
         content = _set_bench_dataset(content, args.set_bench, getattr(args, "benchmark", "ais_bench"))
-    if args.ttft_slo is not None:
-        content = set_top_level_value(content, "ttft_slo", args.ttft_slo)
     if args.tpot_slo is not None:
-        content = set_top_level_value(content, "tpot_slo", args.tpot_slo)
+        if _content_pd_phases(content):
+            # PD 场景：fitness 只消费 [pd_disagg.<phase>].tpot_slo，顶层键不生效——
+            # 回填写到每个阶段，保证门禁校验的键与 fitness 实际用的键同源
+            for phase in _content_pd_phases(content):
+                content = _set_section_value(content, f"[pd_disagg.{phase}]", "tpot_slo", args.tpot_slo)
+        else:
+            content = set_top_level_value(content, "tpot_slo", args.tpot_slo)
     # 运行时预算写入 config.toml [agent_optimizer] —— optix 的真实终止依据；
     # 只写 context.json 的预算不会被 optix 消费
     for key in ("max_rounds", "max_trials", "time_limit_minutes"):
@@ -872,6 +951,166 @@ def load_toml_from_str(content: str) -> Dict[str, Any]:
     return tomllib.loads(content)
 
 
+def _run_dir_for(run_id: str) -> Path:
+    """optix 解析的 run 目录（与 .agent_optimizer/runs/<run_id> 对齐）。"""
+    return Path.cwd() / ".agent_optimizer" / "runs" / run_id
+
+
+def _latency_baseline(run_dir: Path) -> tuple[float | None, float | None, int]:
+    """全部成功 trial 的 (TTFT 中位数, TPOT 中位数, 样本数)：SLO 灵敏度的比较基准。
+
+    用中位数而不是"第一轮"或"最差样本"：早期轮次可能本身就是异常配置，
+    单点取值的偶然性会让判据随 run 波动。样本数为 0 时返回 (None, None, 0)。
+    """
+    ttft_values: List[float] = []
+    tpot_values: List[float] = []
+    for path in sorted(run_dir.glob("results.round-*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for trial in payload.get("trials") or []:
+            perf = trial.get("performance") or {}
+            if trial.get("error") or not perf.get("generate_speed"):
+                continue
+            ttft = perf.get("time_to_first_token")
+            tpot = perf.get("time_per_output_token")
+            if ttft and tpot:
+                try:
+                    ttft_values.append(float(ttft))
+                    tpot_values.append(float(tpot))
+                except (TypeError, ValueError):
+                    continue
+    if not ttft_values:
+        return None, None, 0
+    return (
+        statistics.median(ttft_values),
+        statistics.median(tpot_values),
+        len(ttft_values),
+    )
+
+
+def check_slo_provenance(
+    config: Dict[str, Any],
+    run_dir: Path,
+    source: str = "",
+    note: str = "",
+    ack_wide: str = "",
+    min_elasticity: float = SLO_MIN_ELASTICITY,
+) -> tuple[List[str], List[str]]:
+    """TPOT SLO 必须由用户给出，且不得宽松到使惩罚项失去区分力。
+
+    返回 ``(errors, warnings)``。仅在本轮显式回填 SLO 或已存在来源凭证时生效，
+    避免影响历史 run 与测试夹具。
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if source and source not in SLO_SOURCES:
+        errors.append(f"--slo-source={source!r} 不受支持：SLO 只能由用户给出（可选值 {list(SLO_SOURCES)}）")
+    if source in SLO_SOURCES and not note.strip():
+        errors.append(
+            "--slo-source user 必须同时给出 --slo-note（记录用户原话），否则事后无法区分「用户给的」与「agent 代填的」"
+        )
+
+    baseline_ttft, baseline_tpot, samples = _latency_baseline(run_dir)
+    # PD 场景按阶段键取 fitness 实际消费的 SLO（decode 优先），单服务取顶层
+    slo_value, slo_label = effective_tpot_slo(config)
+    checks = ((slo_value, slo_label, "tpot_penalty", baseline_tpot),)
+    for slo_raw, key, penalty_key, baseline in checks:
+        try:
+            slo = float(slo_raw)
+        except (TypeError, ValueError):
+            continue
+        if slo <= 0:
+            continue
+        if baseline is None or baseline <= 0:
+            # Round 0 回填 SLO 时 run 目录还没有成功 trial：灵敏度门禁无法评估。
+            # 静默 continue 会让用户分不清「未评估」与「评估合格」。
+            warnings.append(
+                f"{key}={slo}s 的实测基线不可用（run 目录暂无成功 trial），灵敏度门禁本轮未评估；"
+                "首轮结果产生后请复跑 config_preflight --check-only 补做校验"
+            )
+            continue
+        try:
+            penalty = float(config.get(penalty_key) or DEFAULT_PENALTY[penalty_key])
+        except (TypeError, ValueError):
+            penalty = DEFAULT_PENALTY[penalty_key]
+        elasticity = penalty * baseline / slo
+        if elasticity >= min_elasticity:
+            continue
+        message = (
+            f"{key}={slo}s 相对本 run 实测中位数 {baseline:.4g}s（{samples} 个成功 trial）"
+            f"的灵敏度只有 {elasticity:.2f}（= penalty {penalty:g} × 实测/SLO），"
+            f"低于下限 {min_elasticity:g}：实测值变化 1% 时该惩罚项只变化 "
+            f"{elasticity:.2f}%，与噪声同量级，等于常数"
+        )
+        if ack_wide.strip():
+            warnings.append(f"{message}；已按 --slo-ack-wide 记录人工确认：{ack_wide.strip()}")
+        else:
+            errors.append(f"{message}。请与用户确认目标值；若确属用户给定，追加 --slo-ack-wide \"<确认人/依据>\" 复跑")
+    return errors, warnings
+
+
+def write_slo_provenance(run_dir: Path, config: Dict[str, Any], source: str, note: str, ack_wide: str = "") -> Path:
+    """把 SLO 来源写进 run 目录（不写 config.toml，避免 optix 解析未知键）。"""
+    payload: Dict[str, Any] = {
+        "tpot_slo": effective_tpot_slo(config)[0],
+        "source": source,
+        "note": note.strip(),
+        "wide_ack": ack_wide.strip() or None,
+        "recorded_by": "config_preflight.py",
+    }
+    phases = pd_phase_sections(config)
+    if phases:
+        payload["tpot_slo_by_phase"] = {
+            f"[pd_disagg.{phase}]": (config.get("pd_disagg") or {}).get(phase, {}).get("tpot_slo") for phase in phases
+        }
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / SLO_PROVENANCE_FILE
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def check_slo_provenance_file(config: Dict[str, Any], run_dir: Path) -> List[str]:
+    """已登记凭证时，校验 config 里的 SLO 未被事后改动。"""
+    path = run_dir / SLO_PROVENANCE_FILE
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [f"{path} 解析失败 —— 重跑 SLO 回填以重建来源凭证"]
+    errors: List[str] = []
+
+    def _mismatch(label: str, recorded: Any, current: Any):
+        """未登记（旧凭证/部分回填）不算篡改，当前值由 completeness 把关。"""
+        if recorded is None:
+            return None
+        try:
+            same = isclose(float(recorded), float(current), rel_tol=1e-9, abs_tol=1e-12)
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            return (
+                f"{label} 当前为 {current!r}，与登记的用户给定值 {recorded!r} 不一致 —— "
+                "SLO 只能由用户变更，需重新确认来源"
+            )
+        return None
+
+    current_value, current_label = effective_tpot_slo(config)
+    problem = _mismatch(current_label, payload.get("tpot_slo"), current_value)
+    if problem:
+        errors.append(problem)
+    for label, recorded in (payload.get("tpot_slo_by_phase") or {}).items():
+        phase = str(label).removeprefix("[pd_disagg.").removesuffix("]")
+        current = (config.get("pd_disagg") or {}).get(phase, {}).get("tpot_slo")
+        problem = _mismatch(label, recorded, current)
+        if problem:
+            errors.append(problem)
+    return errors
+
+
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="optix-assistant config.toml preflight (self-contained).")
     parser.add_argument("--config", default="optix/config.toml", help="Path to config.toml")
@@ -910,8 +1149,30 @@ def main(argv: List[str] | None = None) -> int:
         type=int,
         help="Back-fill [agent_optimizer].time_limit_minutes（单轮执行时间上限，分钟，≤1440；跨轮总预算由 agent 跨轮累计管理）",
     )
-    parser.add_argument("--ttft-slo", type=float, help="Back-fill ttft_slo")
-    parser.add_argument("--tpot-slo", type=float, help="Back-fill tpot_slo")
+    parser.add_argument(
+        "--tpot-slo",
+        type=float,
+        help="Back-fill tpot_slo（必须同时声明 --slo-source user --slo-note；"
+        "PD 配置写入 [pd_disagg.<phase>] 各阶段，fitness 只消费阶段键）",
+    )
+    parser.add_argument(
+        "--slo-source",
+        default="",
+        choices=list(SLO_SOURCES),
+        help="SLO 来源：只接受 user（SLO 由用户给出，agent 不得代填）",
+    )
+    parser.add_argument("--slo-note", default="", help="记录用户给出 SLO 时的原话，写入 run 目录 slo_provenance.json")
+    parser.add_argument(
+        "--slo-ack-wide",
+        default="",
+        help="SLO 灵敏度低于下限时的人工确认依据（确认人 + 原因）",
+    )
+    parser.add_argument(
+        "--slo-min-elasticity",
+        type=float,
+        default=SLO_MIN_ELASTICITY,
+        help="SLO 惩罚项对实测值的灵敏度下限（d ln(cost)/d ln(t)），低于该值视为常数项",
+    )
     parser.add_argument("--set-agent-mode", action="store_true", help="Set optimizer_strategy=agent")
     parser.add_argument(
         "--run-id",
@@ -956,7 +1217,6 @@ def main(argv: List[str] | None = None) -> int:
             args.set_model is not None,
             args.set_served_name is not None,
             args.set_bench is not None,
-            args.ttft_slo is not None,
             args.tpot_slo is not None,
             getattr(args, "set_max_rounds", None) is not None,
             getattr(args, "set_max_trials", None) is not None,
@@ -966,6 +1226,60 @@ def main(argv: List[str] | None = None) -> int:
     )
     # run-id 自动解析（显式 > 已有 > 自动生成），只在非校验模式下写入
     run_id = effective_run_id(config, args.run_id)
+    if getattr(args, "context", None):
+        # --context 指向 run 目录内的 context.json；run 目录可能不在 CWD 下
+        # （如 PD 轮次显式传入 root），灵敏度基线要从真实 run 目录找
+        run_dir = Path(args.context).resolve().parent
+    else:
+        run_dir = _run_dir_for(run_id)
+    slo_backfill = args.tpot_slo is not None
+
+    # --- S1 门禁：TPOT SLO 只能由用户给出，且不得宽松到使惩罚项失效 ------------
+    # 已知问题（run-20261028）：用户没给 SLO 时 agent 自填 ttft_slo=600s，
+    # preflight 只校验 "> 0" 就接受，20 轮全部在一个已退化的指标上排名。
+    slo_errors: List[str] = []
+    slo_warnings: List[str] = []
+    if slo_backfill and not args.check_only:
+        preview = dict(config)
+        if args.tpot_slo is not None:
+            if pd_phase_sections(config):
+                # PD 场景：回填预览写阶段键（与 apply_backfill 落盘位置一致），
+                # 灵敏度校验才能用 fitness 实际消费的 SLO
+                pd_cfg = dict(config.get("pd_disagg") or {})
+                for phase in pd_phase_sections(config):
+                    pd_cfg[phase] = dict(pd_cfg.get(phase) or {})
+                    pd_cfg[phase]["tpot_slo"] = args.tpot_slo
+                preview["pd_disagg"] = pd_cfg
+            else:
+                preview["tpot_slo"] = args.tpot_slo
+        if args.slo_source not in SLO_SOURCES:
+            slo_errors.append(
+                "--tpot-slo 回填必须同时给出 --slo-source user --slo-note \"<用户原话>\" —— "
+                "TPOT SLO 只能由用户给出，agent 不得代填"
+            )
+        else:
+            slo_errors, slo_warnings = check_slo_provenance(
+                preview, run_dir, args.slo_source, args.slo_note, args.slo_ack_wide, args.slo_min_elasticity
+            )
+    if args.check_only:
+        slo_errors.extend(check_slo_provenance_file(config, run_dir))
+        # 灵敏度判据只在回填分支跑，而回填时（Round 0）通常还没有实测基线——
+        # check-only 必须补评估，否则「首轮结果产生后复跑 --check-only 补做校验」
+        # 的提示永远落空。source/note 传空即跳过来源校验，只跑灵敏度。
+        sens_errors, sens_warnings = check_slo_provenance(
+            config, run_dir, "", "", args.slo_ack_wide, args.slo_min_elasticity
+        )
+        slo_errors.extend(sens_errors)
+        slo_warnings.extend(sens_warnings)
+    for message in slo_errors:
+        print(f"ERROR: {message}")
+    if slo_errors:
+        tail = "校验未通过" if args.check_only else "未写入任何配置"
+        print(f"FAIL: {len(slo_errors)} 项 SLO 来源/松弛度问题，{tail}")
+        return 1
+    for message in slo_warnings:
+        print(f"WARNING: {message}")
+
     if has_backfill and not args.check_only:
         content = path.read_text(encoding="utf-8")
         content = set_agent_run_id(content, run_id)
@@ -975,6 +1289,9 @@ def main(argv: List[str] | None = None) -> int:
             return rc
         print(f"✓ 已回填 {path}")
         config = load_toml(path)
+        if slo_backfill:
+            provenance = write_slo_provenance(run_dir, config, args.slo_source, args.slo_note, args.slo_ack_wide)
+            print(f"✓ 已记录 SLO 来源: {provenance}")
     if args.check_only or has_backfill:
         # agent 捕获此 run-id，用于 collect_context --run-id 保持一致
         print(f"run-id: {run_id}")

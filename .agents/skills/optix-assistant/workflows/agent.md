@@ -100,11 +100,71 @@ Round 0 完成环境准备后，Round N 按 A → B → C → D → E 执行；�
 ### Round 0（一次性）
 
 ```text
-环境与用户约束 → case-knowledge 案例收集 → 目标路由与读卡
-→ 基础配置及运行节集中写入 → 配置预检 → collect_context → 配置复检 → 进入 Round 1
+环境与用户约束（含负载口径声明，S6）→ case-knowledge 案例收集 → 目标路由与读卡
+→ 基础配置及运行节集中写入 → 配置预检 → collect_context → 配置复检
+→ 噪声校准 → 维度索引初始化 → 进入 Round 1
 ```
 
 Round 0 不建立搜索空间。配置或负载检查通过后，在 Round 1 步骤 B 由 agent 建立空间并生成候选。
+
+**负载口径声明与瓶颈预警（S6，Round 0 强制）**
+1. 启动前必须从用户/负载定义确认并写入 `summary.md` 的**口径指纹**：prefix cache 开关
+   （`--enable-prefix-caching` / `--no-enable-prefix-caching`）、数据集前缀共享结构与设计命中率
+   （如 pc0 = 内容互不相关、命中率 0；pc90 = 组内共享前缀占比 0.9）、并发口径、输入/输出长度、
+   temperature。案例结论与历史负知识引用一律先匹配该指纹（见 `./data-analysis.md`「知识参考优先级」）。
+   案例收集完成时（环境准备步骤 4）对 `knowledge/case-knowledge/cases/negative/` 做一次
+   **负结果条目匹配**（`search_cases.py --negative --model <前缀>`）：命中条目按
+   `./data-analysis.md`「知识参考优先级」第 6 条裁决——指纹一致 → 该参数默认排除出本 run
+   空间（R1 确需触碰时在 rationale 给出与条目场景的差异依据，并按单变量对照设计）；
+   指纹不一致 → 降级「仅参考」，不得作为排除依据。匹配命中与排除决定写入 `candidates_analysis`。
+2. 基线部署完成后（Round 1 步骤 B 前）立即做一次瓶颈定位与 SLO 余量诊断，写进 `candidates_analysis`：
+   ① prefill-bound 还是 decode-bound（对照 TTFT/TPOT 与 prefill 工作量估算）；② TTFT 余量 =
+   (SLO − 实测)/SLO。**余量 <20% 且输入 ≥16K 时，必须显式向用户报告「负载口径（prefix cache 命中
+   结构）可能是收益最大的优化方向，decode 侧优化空间正被 prefill 串行/SLO 限制」并给出口径调整建议**——
+   不得默默接受口径继续只搜 decode 参数（实例：pc0 + 64K 输入下 TTFT 余量 13%，γ/capture 类
+   decode 侧的全部优化空间被 P 侧串行 prefill 抵消，该 run 唯一有效增量是 γ=3；换 pc90 口径后同参数族
+   连续兑现）。若用户确认口径不可变，在 summary 记录该约束，后续瓶颈结论须绑定此口径。
+
+**噪声校准（S3，强制，完成前不得进 Round 1）**
+同一次部署内用同一配置连测 3 次，把三个指标的相对标准差写入
+run 目录的 `noise_band.json`（`context.json` 是框架独占资产，见 SKILL.md「PD 分离部署的强制约束」第 4 条；
+历史 run 的 `context.noise_band` 仅作回退）：
+
+```json
+"noise_band": {"generate_speed_sigma": 0.0052, "tpot_sigma": 0.004, "ttft_sigma": 0.02,
+               "samples": 3, "measured_round": 0}
+```
+
+- 没有这个数，任何 < 2σ 的差异都只能写"不可分辨"（`metrics_gate.py compare` 会这么判）。
+- σ 的大小取决于硬件、模型与负载，不同场景差别很大，**只能用本 run 实测**，
+  不能套用历史数值。校准成本是 3 次压测（不含部署），比后面为判不出效应而
+  反复重测同一维度便宜得多。
+- 校准值随负载形态变化即失效（换并发、换输入输出长度后重新校准），
+  并在 `noise_band` 里记 `measured_round`。
+- **σ > 5% 视为校准失败**（`metrics_gate.py compare` 会拒绝判定，退出码 2）：先检查
+  是否混入不同配置/部署或 warmup 样本，重测后再进 Round 1。确属高噪声场景需要人工确认继续时，
+  用 `compare --noise-ack-wide "<依据>"`，并把依据写进 summary——确认后若
+  2σ ≥ 目标效应或所需样本量超预算，脚本给 `noise_dominant`/`unmeasurable`
+  终止判定（退出码 4）：终止 run 并在 final_report 记录「噪声过大、不可判定」，
+  不要再按 `n_required` 补测。
+
+**无基线冷起点质量（S6）**：无基线/新模型分支下，起点不得用纯保守默认值拼装
+（MNS 64 / GMU 0.85 / γ=0 / MNBT_d 512 一类——实测这类起点离最优远，且会多耗 2 轮以上
+预算爬坡）。起点 = **安全上界探测起点**：MNS/GMU 按方法卡建议区间取上界（request-scheduling
+§5.1 可行上界、memory-budget 0.9），模型自带 MTP 头时 γ=3 起步（mtp.md §5.2/§5.3）；
+上界起点的 OOM 等风险由 Round 0 预检与首轮失败重试机制处理。基线候选只允许出现一次；同配置
+重复压测仅用于 Round 0 噪声校准与漂移确认，不得占用搜索轮（见 `./data-analysis.md`
+「每轮候选数量」）。
+
+**维度索引初始化（S5）**：`check_dimensions.py --run-dir <run> --init-index` 生成
+`dimension_index.json`，每个可动维度一条 `{"status": ..., "reason": ...}`；
+`status` 只允许 `active` / `covered` / `retired`，标 `retired` 必须写 `reason`。
+后续每轮结束后更新（`check_dimensions.py --run-dir <run>` 会指出未覆盖与超预算的维度，
+单维度 trial 上限默认由 `budgets.max_trials ÷ 可动维度数` 推导）。
+
+**预算区分（S5）**：`[agent_optimizer].time_limit_minutes` 是**单轮**上限。
+Round 0 必须在 `summary.md` 顶部写下任务起始墙钟与总预算，把 baseline 部署
+与每轮重部署（PD 场景下部署通常占墙钟一半以上）计入"已用"。
 
 ### Round N 主循环
 
@@ -229,7 +289,10 @@ Round N 已连续执行失败 2 次（首次执行 + 1 次重试），自动恢�
 
 ## 收敛与收尾（主 agent 职责）
 
-- 收敛决策（趋势 + 覆盖双条件判定）由主 agent 按 `./data-analysis.md`「收敛检测」执行。
+- 收敛决策（趋势 + 覆盖 + **维度覆盖** 三条件判定）由主 agent 按 `./data-analysis.md`「收敛检测」执行。
+- **宣称"已收敛"的前置门禁（S5）**：`check_dimensions.py --run-dir <run>` 必须 exit 0。
+  未 exit 0 时只能写"预算耗尽/提前终止"，并列出未覆盖或超预算的维度，
+  不得写"已收敛"。
 - 收敛退出或跑满预算后执行：
 
   ```bash
@@ -246,6 +309,19 @@ Round N 已连续执行失败 2 次（首次执行 + 1 次重试），自动恢�
   - `serve_command.json`：最优配置渲染的 vLLM serve 命令（argv + command；有环境覆盖时含 `env`，null 表示删除变量）
   - `serve_command.sh`：可直接执行的 `vllm serve` 启动脚本（final_report 从它复制命令）
 
+- **负结果沉淀（强制，紧随 export_best_config，在 final_report 之前）**：
+
+  ```bash
+  python <SKILL_ROOT>/scripts/export_negative_knowledge.py \
+    --run-dir .agent_optimizer/runs/<run_id>
+  ```
+
+  从 `dimension_index.json` 的 retired 条目 + `results.round-*.json` 对照实测生成负知识
+  条目，写入 `knowledge/case-knowledge/cases/negative/`（场景指纹 + 置信度 + 未验证场景，
+  见 `../knowledge/case-knowledge/SKILL.md`「negative 分区」）。无 retired 条目时为 no-op；
+  σ 缺失或幅度 < 2σ 时脚本默认跳过（`--force` 可入库但标 confidence: low）。禁止手工编造
+  条目；导出摘要（写入/跳过的条目数）写入 final_report「失败统计」。
+
 - Agent 生成 `final_report.md`，包含：
   - 基本信息（模型、引擎、硬件、轮次/trial 数、总耗时）
   - 最优结果（throughput、TPOT、对比基线提升）
@@ -256,6 +332,15 @@ Round N 已连续执行失败 2 次（首次执行 + 1 次重试），自动恢�
   - 每个关键参数的探索过程（引用具体轮次和数据）
   - 关键发现
   - 失败统计
+  - **统计可信度声明（S1/S3 强制）**：
+    ① `metrics_gate.py breakdown --run-dir <run>` 的四分量占比、`ρ(fitness, 吞吐)`
+    与 `OK/WEAK/DEGRADED` 判定（判 DEGRADED 时必须写明"本轮 fitness 只反映吞吐"）；
+    ② 每条"A 比 B 好 x%"的结论附带 `metrics_gate.py compare` 的
+    `VERDICT`（`real_gain` / `within_noise` / `insufficient`）与 σ、n；
+    ③ `noise_band.json` 的实际值（历史 run 的 `context.noise_band` 等效）；
+    ④ 最优配置的采信数字取同配置复测样本的中位数，
+    最优 trial 单轮值与复测中位数偏差 > 3σ 时判离群，按中位数报告并标注离群轮次。
+    没有这四项的提升声明一律删除，改写为"不可分辨"。
 
   **生成约束**：
   1. 每个参数的"探索过程"节必须引用具体轮次和数据，禁止虚泛描述。读取

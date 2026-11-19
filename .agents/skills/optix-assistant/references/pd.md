@@ -48,13 +48,26 @@ Round 0 使用 `collect_context.py --engine vllm --deployment pd`，其余模型
 
 ## 独立复测与导出
 
-预先约定至少两次基线与两次胜出配置的完整复测、独立验证预算和 median fitness 汇总口径。先执行一次 `export_best_config.py` 固定搜索胜出方案。复测候选的 params 必须完整复制原始基线或胜出 trial 的有效参数；配置生成脚本从对应归档原样重放 TOML，不重新规范化。复测仍使用相同负载及冻结配置；每次复测使用不同的新轮次，或在同轮使用不同的 `--attempt`；配置和对应清单保存在 `<run-dir>/`，不会覆盖已有文件。生成时用 `--purpose verification_baseline` 或 `--purpose verification_winner` 标注，不能将搜索中选出的成绩当作独立重复。沿用上游 trial_type 契约，diagnosis trial 不参与最佳导出，也不计入有效复测次数。
+重复次数**不是固定 2 次**，必须由 `noise_band` 与目标效应反推（S3）：先跑
+`metrics_gate.py compare --run-dir <run> --metric generate_speed --arm a=<子串> --arm b=<子串>`，
+脚本给出当前 σ 与所需重复数 `n ≈ 2(z_α + z_β)²σ²/Δ²`。举例：σ≈0.5% 时，
+同一配置只测 2 次只能分辨约 1.5% 的差异，判 0.5% 差异每种配置约需 9 次 —— 具体数值以脚本按
+本 run 实测 σ 算出的为准，不要照抄。样本量不足时结论写"不可分辨"，不写"提升"。
+A/B 相邻轮交替（A-B-A）可显著降低所需轮次，优先采用；`benchmark_run_count`
+建议 ≥ 2~3，单次 benchmark 的 TPOT/TTFT 波动不能当成配置差异。
+
+先执行一次 `export_best_config.py` 固定搜索胜出方案。复测候选的 params 必须完整复制原始基线或胜出 trial 的有效参数；配置生成脚本从对应归档原样重放 TOML，不重新规范化。复测仍使用相同负载及冻结配置；**每个复测轮次成功后该轮即封闭，重复必须各占新轮次**（同轮递增 `--attempt` 仅用于失败重试，成功轮重跑会被 `already succeeded` 拒绝）；配置和对应清单保存在 `<run-dir>/`，不会覆盖已有文件。生成时用 `--purpose verification_baseline` 或 `--purpose verification_winner` 标注，不能将搜索中选出的成绩当作独立重复。沿用上游 trial_type 契约，diagnosis trial 不参与最佳导出，也不计入有效复测次数。
 
 复测启动前写入独立预算 `pd_verification_budget.json`，例如：
 
 ```json
 {"required_repetitions":2,"aggregation":"median_fitness","max_trials":6,"time_limit_seconds":3600}
 ```
+
+上面 `required_repetitions:2` 只是格式示例，实际值必须按
+`metrics_gate.py compare` 的 `n_required` 填写，并在 `verification-plan.json`
+中写明 σ 来源（run 目录 `noise_band.json` 优先，历史 run 回退 `context.noise_band`，
+或同配置重复组池化）。
 
 预算首次执行时冻结，失败尝试同样计数；预算耗尽不得通过重新启动重置。示例数值需按实际部署耗时调整并事先确认。
 
@@ -127,3 +140,52 @@ python .agents/skills/optix-assistant/scripts/pd_workflow.py probe \
 阶段 TOML 基于运行环境准备并配置 `pd_disagg.<phase>` 测量覆盖项和目标字段；context 是独立的单服务上下文，candidate 是该上下文下经校验的单个候选。四个参数均为文件路径，需先准备文件；工具不会自动生成这些输入。设备 JSON 的内容为 `{"ssh_ip":"设备主机地址","gpu_ids":[0,1]}`；阶段服务参数中 TP 必须匹配卡数。命令必须在该设备主机、使用共享主 run 目录串行执行；不自动搬运模型或部署运行环境。agent 不能在控制节点直接操作另一台主机的卡号。软件/硬件事实缺失时容量记录不可声明跨任务缓存命中；D 缓存真实命中与设备释放仍需实机验收。
 
 阶段探测仅支持内置本机 vLLM 插件；服务启动前持久记录独立进程组，清理确认要求同一主机、用户和网络命名空间中，已记录的进程组及服务监听端口均已消失。中断后在原环境执行 `python .agents/skills/optix-assistant/scripts/pd_workflow.py recover-phase --run-dir <主run目录>`，再继续工作；检查失败不得复用资源。旧版没有清理身份的阶段记录无法自动确认，需人工检查并处理。
+
+## 故障恢复手册
+
+处置前保留现场证据（pd_deployments 归档、轮次日志），禁止删除任何 run 产物。逐轮例行先用
+`run_pd_round.py --prepare-only` 干跑，把失败挡在预检层（预检拒绝不消耗预算）。
+
+| 错误签名 | 根因 | 处置 |
+|---|---|---|
+| `Errno 2 ... pd_verification_budget.json`（trial 秒败） | 验证相缺独立预算文件 | `pd_workflow.py init-verification --run-dir <run-dir>` 生成后再跑 |
+| `Errno 2 ... best_result.json`（verification_winner） | 未先导出胜出方案 | 先 `export_best_config.py --run-dir <run-dir>` |
+| `Round N already succeeded; preserve its candidate and archived context` | 成功轮不可重跑 | 重复各占新轮次；候选 params 须与锚档案（baseline.json / best_result.json）逐字段一致 |
+| `Deployment manifest already exists; select a new attempt` | 被拒/失败 attempt 已留下 deployment.round-N.json | 换下一个 `--attempt`；旧文件是证据，勿删 |
+| `PD candidate does not match its generated deployment manifest` 或 `PD parameter X changed after deployment configuration generation` | context.json 的 round_manifest 仍是上一次 prepare 绑定的旧轮 | 用对应 `context.round-<旧轮>.attempt-<attempt>.json` 覆盖回 context.json，并换新 attempt |
+| `PD context changed during preflight` / `during preparation` | 手工编辑过 context.json（preflight 重写会剥离未知键，sha 前后不一致） | context.json 是框架独占资产，禁止手改；从框架快照恢复后换新 attempt |
+| `Future candidate round N exists` | 下一轮候选文件提前生成 | 等当前轮完成后再生成；已误生成的移出 run 目录留档（如改名 `.pending`） |
+| `routing_review.l1_layers_matched 含未知机制层` | 层名不在 method-index.md 分层标题中 | 使用报错中列出的合法层名 |
+| `Round N is unfinished` | 前序轮无成功 trial | 先修复/补跑前序轮再推进 |
+| PD 部署 P/D 握手时序竞争：WorkerProc init 反复失败、重启循环（每次 ~4 分钟，可能持续 35-70 分钟后才恢复） | MooncakeLayerwiseConnector 握手竞态 | 等待自愈（插件默认 max_restarts=60，可用 `OPTIX_PD_MAX_RESTARTS` 调节）；诊断只读 run.log 非 JSON 行；不要手动 kill 正在重启循环中的部署——它常在下一轮 restart 后自行恢复 |
+
+| `Skipping baseline - loaded checkpoint`（verification_baseline 空轮 fitness=∞，重试永远复现） | 上游 verification 状态机缺陷：baseline checkpoint 劫持 | 空轮无法产出有效结果且轮号连续性门禁被它永久阻塞：把空轮整目录移出轮序列归档 `abandoned-round-<N>/`（含 README 说明原因，**不删任何产物**），改用新轮 `verification_winner` 复测，或手动同管线复测（best_deployment 部署 → 三端 health 200 → 同参数 ais_bench → 读 csv；≥4 样本）。上游修复前 PD 场景 verification 以手动同管线替代，final_report 需注明 |
+
+预算语义：实际启动失败消耗次数，启动前预检拒绝不消耗；验证预算首次执行即冻结
+（`pd_verification_budget.frozen.json`），之后改预算文件无效。
+
+任务级预算覆盖（PD 编排）：`[agent_optimizer].max_trials` 的语义是「每轮候选数」，历史上被
+PD 编排器误用作全局 trial 预算且 `pd_budget.json` 首次生成即冻结。需要改任务级预算时，用
+环境变量 `OPTIX_PD_TOTAL_MAX_TRIALS` / `OPTIX_PD_TOTAL_TIME_SECONDS` 覆盖并重建冻结文件，
+不直接手改 budget 文件。
+
+## 无手工基线时的标准起点配置（S6）
+
+没有手工基线/官方案例可抄时，PD 场景的基础配置起点不得只由 TOML 保守默认值拼装
+（MNS 64 / GMU 0.85 / MNBT_d 512 / γ=0 / 无调度与执行特性——该起点离最优远，且执行/调度
+类起点参数在默认模板 others 里根本不存在，agent 全程无从感知）。起点按「基础配置 + 上界」组装，
+并全部登记进 search_space，供寻优探索或经复测排除：
+
+| 类别 | 字段 | 起点值 | 说明 |
+| --- | --- | --- | --- |
+| 调度类 | `--async-scheduling` | 开 | PD 长输入场景实测吞吐收益显著（pc90 口径 128MNS 起点配置 gen 236 vs 默认起点 138） |
+| 执行类 | addl `multistream_overlap_shared_expert` | 开（MoE） | 与 async-scheduling 独立增量 |
+| 执行类 | addl `recompute_scheduler_enable` | 开 | 与投机共存对照维度 |
+| 通信类 | `VLLM_ASCEND_ENABLE_FLASHCOMM1` | 1 | 通信路径优化 |
+| 批次上界 | `MAX_NUM_SEQS` | 128（P/D 对称） | 方法卡建议区间的上界，非保守默认 64 |
+| 显存上界 | `GPU_MEMORY_UTILIZATION` | 0.9 | memory-budget 建议区间的上界 |
+| 投机 | `--speculative-config` 完整结构化 | `{"method":"<模型MTP名>","num_speculative_tokens":3}`（模型有 MTP 头时） | {2,3} 起测，γ=3 为实测优选起点（methods/speculative/mtp.md §5.3）；必须结构化登记，禁止在 others 字符串中隐式拼接（container-flags 历史案例：隐式写法会静默失效） |
+
+这些是**起点不是定论**：每个起点字段按 data-analysis.md 维度覆盖纪律登记进 search_space
+并在预算内探索或经复测排除；口径指纹（pc0/pc90）不同时起点配置的收益可能完全不同（pc0 口径下 decode
+侧起点配置收益被 prefill 串行瓶颈掩盖）。

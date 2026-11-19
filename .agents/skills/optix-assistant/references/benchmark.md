@@ -176,7 +176,8 @@ python <SKILL_ROOT>/scripts/config_writer.py --config <config.toml> \
 | 长文本生成 | vllm_benchmark | 4096 / 512 | 500 | TTFT ≤ 5.0 / TPOT ≤ 0.15 |
 | 批量推理（离线） | ais_bench | —（datasets 配置定义） | 5000 | 可放宽，无实时约束 |
 
-> SLO 建议仅作引导起点：TTFT/TPOT 必须用户按业务确认（单位秒，`--ttft-slo`/`--tpot-slo`）。
+> SLO 建议仅作引导起点：TPOT SLO 必须用户按业务确认（单位秒，`--tpot-slo`）；
+> TTFT 不作为门禁约束时无需配置。
 
 ### 6.4 引导完成流程（回到 SKILL.md 共享前置链）
 

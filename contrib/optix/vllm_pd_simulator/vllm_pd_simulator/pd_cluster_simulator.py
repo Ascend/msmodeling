@@ -1515,7 +1515,7 @@ class PdClusterSimulator(SimulatorInterface):
         return new_pid
 
     def _wait_for_all_services(
-        self, node_infos: list, timeout: int = 7200, check_interval: int = 10, max_restarts: int = 2
+        self, node_infos: list, timeout: int = 7200, check_interval: int = 10, max_restarts: int = 60
     ) -> bool:
         """Monitor process liveness and health status of all nodes; return True when all are ready.
 
@@ -1526,7 +1526,13 @@ class PdClusterSimulator(SimulatorInterface):
             max_restarts: max restarts per node (applies to ALL exited nodes,
                           including those never healthy before — a node may exit
                           during initial startup before its first health check)
+
+        PD deployment handshake (MooncakeLayerwiseConnector) is racy and may cycle
+        WorkerProc init for tens of minutes before going green; default raised
+        2 -> 60 (optix acceptance run-20261109-qwen35-64k-pc90) and overridable via
+        OPTIX_PD_MAX_RESTARTS.
         """
+        max_restarts = int(os.environ.get("OPTIX_PD_MAX_RESTARTS", max_restarts))
         deadline = time.time() + timeout
         start_time = time.time()
         healthy_nodes: set = set()
