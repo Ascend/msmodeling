@@ -2405,6 +2405,45 @@ def test_shared_expert_spills_propagate_across_rounds():
     _assert_close(runtime.total_execution_time_s()[perf_model.name], 10.0)
 
 
+def test_shared_expert_spill_feedback_loop_raises():
+    """A spill tag fed by the spill's own output diverges; the resolver must fail loudly.
+
+    The lane stage consumes the spill output, so the tag it publishes can only be
+    resolved after the spill duration is known: every fixed-point round pushes the
+    wait further out (+100s per round here). After the round cap the wait (800s)
+    exceeds the serial total of all non-spill ops (101s), which cannot happen for a
+    legal wait graph; the resolver must raise instead of emitting a poisoned
+    timeline (issue #659: ~1e12 ms TPOT/TTFT with throughput 0).
+    """
+    durations_s = {
+        torch.ops.aten.relu.default: 1.0,  # routed work on stream 0
+        torch.ops.aten.sigmoid.default: 100.0,  # lane stage gated on the spill output
+    }
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def func(t):
+        routed = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        routed = torch.ops.aten.relu.default(routed)  # 0..1s
+        _ = torch.ops.tensor_cast._internal_record.default(routed, 0)
+
+        spill_wait = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        spill = torch.ops.tensor_cast._internal_spill.default(spill_wait, "shared_expert:gate_up", "loop-tag")
+        spill_done = torch.ops.tensor_cast._internal_record.default(spill, 0)
+        gate = torch.ops.tensor_cast._internal_record.default(spill_done, 0, "after-spill")
+
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [gate])
+        lane = torch.ops.aten.sigmoid.default(lane)
+        _ = torch.ops.tensor_cast._internal_record.default(lane, 2, "loop-tag")
+        return routed, lane, spill
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        func(x)
+
+    with pytest.raises(ValueError, match="multistream_overlap_shared_expert"):
+        runtime.total_execution_time_s()
+
+
 def test_shared_expert_lane_name_in_trace():
     durations_s = {torch.ops.aten.sigmoid.default: 1.0}
     perf_model = _fixed_duration_model(durations_s)

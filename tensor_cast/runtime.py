@@ -1036,8 +1036,40 @@ class Runtime(TorchDispatchMode):
                 break
             durations = next_durations
         else:
-            # Not converged inside the cap: keep the larger of the last two rounds so the
-            # returned wait can only over-estimate (never silently hide a real residual).
+            # Not converged inside the cap. The bound below is a conservative
+            # fail-closed guard, not a proof of divergence: a legal wait can nest
+            # other waits, so a wait above the serial total is not impossible in
+            # theory (deep tag chains that legitimately need more than the round
+            # cap). Two deliberate trade-offs:
+            # 1. The bound does NOT include the already-resolved waits: on a
+            #    diverging loop the previous round's waits are themselves
+            #    diverging (Bailing V3 VL, issue #659: sum(previous) ~ 7e10 s
+            #    would dwarf the worst wait ~ 9e8 s and mask the divergence), so
+            #    folding them in would let the poison validate itself.
+            # 2. The verdict uses the worst value across the last two rounds, so
+            #    an oscillating fixed point (large -> small -> large) cannot slip
+            #    past the guard on its small round.
+            # A legitimate deep-nesting model that exceeds the bound would fail
+            # closed with a clear message; that is preferred over silently
+            # emitting ~1e12 ms timelines that poison every downstream metric.
+            serial_total_s = sum(
+                event.perf_results[model_name].execution_time_s for event in self.event_list if not event.is_spill
+            )
+            worst_wait_s = max(
+                max(durations, default=0.0),
+                max(previous_durations, default=0.0),
+            )
+            if worst_wait_s > serial_total_s:
+                raise ValueError(
+                    "multistream_overlap_shared_expert spill waits did not converge and "
+                    f"exceed the physical bound ({worst_wait_s:.6f}s vs serial total "
+                    f"{serial_total_s:.6f}s): the shared-expert lane structure does not "
+                    "converge on this model (suspected spill-tag feedback loop). Disable "
+                    "--compilation-config multistream_overlap_shared_expert for this model "
+                    "(issue #659)."
+                )
+            # A diverged-but-bounded wait only over-estimates (never silently hides a
+            # real residual), so keep the larger of the last two rounds.
             durations = [max(current, nxt) for current, nxt in zip(previous_durations, durations)]
             logger.debug(
                 "shared-expert lane spill durations did not converge in %d rounds; "
