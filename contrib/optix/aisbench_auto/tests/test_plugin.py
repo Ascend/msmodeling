@@ -37,7 +37,7 @@ from optix.optimizer.errors import BenchmarkResultError
 def plugin(tmp_path, monkeypatch, request):
     script = tmp_path / "fake_aisbench.py"
     script.write_text(
-        """import json, sys\nfrom pathlib import Path\nargs = sys.argv[1:]\nassert args[args.index('--concurrency') + 1] == '64'\nassert args[args.index('--request_rate') + 1] == '0'\nout = Path('out/run/performances/model')\nout.mkdir(parents=True)\n(out / 'result.csv').write_text('Performance Parameters,Average\\nTTFT,120 ms\\nTPOT,2.5 ms\\n')\n(out / 'result.json').write_text(json.dumps({'Total Requests': {'total': 10}, 'Success Requests': {'total': 9}, 'Request Throughput': {'total': '4 req/s'}, 'Output Token Throughput': {'total': '200 token/s'}, 'Concurrency': {'total': 64}, 'Max Concurrency': {'total': 512}}))\n""",
+        """import json, sys\nfrom pathlib import Path\nargs = sys.argv[1:]\nassert args[args.index('--concurrency') + 1] == '64'\nassert args[args.index('--request_rate') + 1] == '0'\nout = Path('out/run/performances/model')\nout.mkdir(parents=True)\n(out / 'result.csv').write_text('Performance Parameters,Average\\nTTFT,120 ms\\nTPOT,2.5 ms\\n')\n(out / 'result.json').write_text(json.dumps({'Total Requests': {'total': 10}, 'Success Requests': {'total': 9}, 'Request Throughput': {'total': '4 req/s'}, 'Output Token Throughput': {'total': '200 token/s'}, 'Input Token Throughput': {'total': '400 token/s'}, 'Concurrency': {'total': 64}, 'Max Concurrency': {'total': 512}}))\n""",
         encoding="utf-8",
     )
     cfg = AisBenchAutoConfig(
@@ -75,6 +75,7 @@ def test_others_and_native_aisbench_reader(plugin):
     assert metrics.time_to_first_token == pytest.approx(0.12)
     assert metrics.time_per_output_token == pytest.approx(0.0025)
     assert metrics.generate_speed == 200
+    assert metrics.input_token_throughput == 400
     assert metrics.throughput == 4
     assert metrics.success_rate == 0.9
     assert plugin.get_best_concurrency() == 200
@@ -92,7 +93,7 @@ def result_script(plugin, rounds, *, tail="", markers=True):
         + "    dest = folder / 'performances' / 'model'\n"
         "    dest.mkdir(parents=True, exist_ok=True)\n"
         "    (dest / 'result.csv').write_text(f'Performance Parameters,Average\\nTTFT,{ttft} ms\\nTPOT,2.5 ms\\n')\n"
-        "    (dest / 'result.json').write_text(json.dumps({'Total Requests': {'total': 10}, 'Success Requests': {'total': 9}, 'Request Throughput': {'total': '4 req/s'}, 'Output Token Throughput': {'total': '200 token/s'}, 'Concurrency': {'total': 128}, 'Max Concurrency': {'total': 1000}}))\n"
+        "    (dest / 'result.json').write_text(json.dumps({'Total Requests': {'total': 10}, 'Success Requests': {'total': 9}, 'Request Throughput': {'total': '4 req/s'}, 'Output Token Throughput': {'total': '200 token/s'}, 'Input Token Throughput': {'total': '400 token/s'}, 'Concurrency': {'total': 128}, 'Max Concurrency': {'total': 1000}}))\n"
         + tail,
         encoding="utf-8",
     )

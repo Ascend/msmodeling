@@ -103,7 +103,7 @@ msmodeling optix --mode pd_disagg -e vllm -b ais_bench -c ./pd_search.toml
 
 ## 2. 结果文件说明
 
-输出 CSV 中的每一行对应一组参数。第一列 `case_id` 用于标识 Case，后续五列为性能指标。用户可以根据需求筛选满足要求的性能行，将 VLLM/MindIE 参数以及 vllm_benchmark/AISBench 的参数改为 CSV 中的数据即可。
+输出 CSV 中的每一行对应一组参数。第一列 `case_id` 用于标识 Case，后续六列为性能指标。用户可以根据需求筛选满足要求的性能行，将 VLLM/MindIE 参数以及 vllm_benchmark/AISBench 的参数改为 CSV 中的数据即可。
 
 |字段|说明|
 |---|---|
@@ -113,6 +113,7 @@ msmodeling optix --mode pd_disagg -e vllm -b ais_bench -c ./pd_search.toml
 |`time_per_output_token(s)`|TPOT 时延，单位为秒。|
 |`success_rate`|请求成功率，无量纲比例，取值为 0～1。|
 |`throughput(requests/s)`|测试吞吐，单位为请求数/秒。|
+|`input_token_throughput(tokens/s)`|输入 token 吞吐，单位为 token/秒。 |
 |`CONCURRENCY`|并发数。|
 |`REQUESTRATE(requests/s)`|发送速率，单位为请求数/秒。|
 |`error`|记录这次参数没有正常执行的原因，在发送错误时记录。|

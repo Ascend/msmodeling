@@ -127,7 +127,14 @@ class TestReadCsvS:
 
     @pytest.mark.parametrize("with_units", [False, True])
     def test_read_result_csv_restores_internal_fields(self, tmp_path, with_units):
-        headers = ["generate_speed", "time_to_first_token", "time_per_output_token", "throughput", "success_rate"]
+        headers = [
+            "generate_speed",
+            "time_to_first_token",
+            "time_per_output_token",
+            "throughput",
+            "success_rate",
+            "input_token_throughput",
+        ]
         if with_units:
             headers = [
                 "generate_speed(tokens/s)",
@@ -135,9 +142,10 @@ class TestReadCsvS:
                 "time_per_output_token(s)",
                 "throughput(requests/s)",
                 "success_rate",
+                "input_token_throughput(tokens/s)",
             ]
         csv_file = tmp_path / "data_storage_test.csv"
-        csv_file.write_text(",".join(headers) + "\n2000,0.3,0.04,4,0.95\n", encoding="utf-8")
+        csv_file.write_text(",".join(headers) + "\n2000,0.3,0.04,4,0.95,4000\n", encoding="utf-8")
 
         row = read_csv_s(csv_file).iloc[0]
 
@@ -146,6 +154,7 @@ class TestReadCsvS:
         assert row["time_per_output_token"] == 0.04
         assert row["throughput"] == 4
         assert row["success_rate"] == 0.95
+        assert row["input_token_throughput"] == 4000
 
     def test_read_nonexistent_raises(self, tmp_path):
         with pytest.raises(ValueError, match="Failed to read csv"):

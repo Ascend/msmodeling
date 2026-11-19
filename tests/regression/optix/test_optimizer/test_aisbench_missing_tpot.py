@@ -49,6 +49,7 @@ def aisbench_result(tmp_path):
                 "Success Requests": {"total": 18},
                 "Request Throughput": {"total": "4.0 req/s"},
                 "Output Token Throughput": {"total": "4.0 token/s"},
+                "Input Token Throughput": {"total": "1024.0 token/s"},
             }
         ),
         encoding="utf-8",
@@ -73,6 +74,7 @@ def test_missing_tpot_is_allowed_only_when_unscored(aisbench_result, penalty):
             assert result.success_rate == 1.0
             assert result.throughput == 4.0
             assert result.generate_speed == 4.0
+            assert result.input_token_throughput == 1024.0
 
 
 @pytest.mark.parametrize("penalty", [0.0, 1.0])

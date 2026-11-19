@@ -52,6 +52,7 @@ def aisbench_test_environment():
         "Success Requests": {"total": 84},
         "Request Throughput": {"total": "2.4221 req/s"},
         "Output Token Throughput": {"total": "1240.1267 token/s"},
+        "Input Token Throughput": {"total": "2480.2534 token/s"},
         "Concurrency": {"total": 40},
         "Max Concurrency": {"total": 100},
     }
@@ -172,6 +173,7 @@ class TestAisbench:
 
         performance_index = AisBench(config=config).get_performance_index()
         assert performance_index.generate_speed == 1240.1267
+        assert performance_index.input_token_throughput == 2480.2534
 
     @patch("optix.deploy_env.shutil.which")
     @patch('optix.optimizer.plugins.benchmark.AisBench.get_models_config_path')
@@ -204,6 +206,7 @@ def test_single_token_result_only_allows_missing_tpot_when_unscored(tmp_path, pe
                 "Success Requests": {"total": 16},
                 "Request Throughput": {"total": "4.0 req/s"},
                 "Output Token Throughput": {"total": "4.0 token/s"},
+                "Input Token Throughput": {"total": "1024.0 token/s"},
             }
         )
     )
@@ -223,6 +226,7 @@ def test_single_token_result_only_allows_missing_tpot_when_unscored(tmp_path, pe
             assert result.time_to_first_token == 0.15
             assert result.time_per_output_token is None
             assert result.throughput == 4.0
+            assert result.input_token_throughput == 1024.0
             assert result.success_rate == 1.0
 
 

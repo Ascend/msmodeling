@@ -244,6 +244,14 @@ class AisBench(BenchmarkInterface):
             performance_index.success_rate = success_req / total_requests
             output_average = _get_aisbench_summary_value(data, "Output Token Throughput")
             performance_index.generate_speed = float(output_average.split()[0])
+            try:
+                input_average = _get_aisbench_summary_value(data, "Input Token Throughput")
+            except ValueError as exc:
+                logger.debug(
+                    "AISBench Input Token Throughput is unavailable; leaving input_token_throughput unset: {}", exc
+                )
+            else:
+                performance_index.input_token_throughput = float(input_average.split()[0])
         return performance_index
 
     def get_measured_concurrency(self):
@@ -337,7 +345,12 @@ class VllmBenchMark(BenchmarkInterface):
                     logger.error(f"Failed in parse vllm benchmark result. file: {file}")
                     continue
 
+            performance_index = PerformanceIndex()
             performance_index.generate_speed = data.get("output_throughput", 0)
+            if "total_token_throughput" in data:
+                performance_index.input_token_throughput = (
+                    data["total_token_throughput"] - performance_index.generate_speed
+                )
             performance_index.time_to_first_token = data.get("mean_ttft_ms", 0) / MS_TO_S
             performance_index.time_per_output_token = data.get("mean_tpot_ms", 0) / MS_TO_S
             num_prompts = data.get("num_prompts", 1)

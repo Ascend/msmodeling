@@ -51,8 +51,7 @@ class DataStorage:
         benchmark=None,
     ):
         self.config = config
-        if not self.config.store_dir.exists():
-            self.config.store_dir.mkdir(parents=True, mode=0o750)
+        self.config.store_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
         self.save_file = self.config.store_dir.joinpath(f"data_storage_{RUN_TIME}.csv")
         self.metrics_save_file = self.config.store_dir.joinpath(f"metrics_samples_{RUN_TIME}.csv")
         self._case_counter = 0

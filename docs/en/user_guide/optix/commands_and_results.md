@@ -92,7 +92,7 @@ For the first run, you can copy the configuration and run it by following the co
 
 ## 2 Output File Description
 
-Each row in the output CSV corresponds to one group of parameters. The first column `case_id` identifies the Case, and the following five columns are performance metrics. You can filter the performance rows that meet your requirements as needed, and change the vLLM/MindIE parameters and the vllm_benchmark/AISBench parameters to the data in the CSV.
+Each row in the output CSV corresponds to one group of parameters. The first column `case_id` identifies the Case, and the following six columns are performance metrics. You can filter the performance rows that meet your requirements as needed, and change the vLLM/MindIE parameters and the vllm_benchmark/AISBench parameters to the data in the CSV.
 
 | Field | Description |
 | --- | --- |
@@ -102,6 +102,7 @@ Each row in the output CSV corresponds to one group of parameters. The first col
 | time_per_output_token(s) | TPOT latency, in seconds. |
 | success_rate | Request success rate, a dimensionless ratio from 0 to 1. |
 | throughput(requests/s) | Test throughput, in requests per second. |
+| input_token_throughput(tokens/s) | Input token throughput, in tokens per second. |
 | CONCURRENCY | Concurrency. |
 | REQUESTRATE(requests/s) | Send rate, in requests per second. |
 | error | Records the reason why the parameters were not executed properly this time. It is recorded when a send error occurs. |

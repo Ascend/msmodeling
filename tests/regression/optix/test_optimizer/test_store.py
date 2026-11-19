@@ -15,19 +15,42 @@
 # -------------------------------------------------------------------------
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from optix.config.config import (
     OptimizerConfigField,
     PerformanceIndex,
-    get_settings,
 )
 from optix.optimizer.store import DataStorage
 
 
 class TestDataStorage(unittest.TestCase):
-    def setUp(self):
-        self.data_storage = DataStorage(get_settings().data_storage, MagicMock(), MagicMock())
+    def test_init_when_store_directory_is_created_concurrently(self):
+        with TemporaryDirectory() as tmp_dir:
+            store_dir = Path(tmp_dir) / "store"
+            config = MagicMock(store_dir=store_dir)
+            original_mkdir = Path.mkdir
+
+            def concurrent_mkdir(path, *args, **kwargs):
+                if path == store_dir:
+                    original_mkdir(path, parents=True, exist_ok=True)
+                return original_mkdir(path, *args, **kwargs)
+
+            with patch.object(Path, "mkdir", concurrent_mkdir):
+                storage = DataStorage(config)
+
+            self.assertTrue(store_dir.is_dir())
+            self.assertEqual(storage.save_file.parent, store_dir)
+
+    def test_init_rejects_store_path_that_is_a_file(self):
+        with TemporaryDirectory() as tmp_dir:
+            store_path = Path(tmp_dir) / "store"
+            store_path.write_text("existing file", encoding="utf-8")
+            config = MagicMock(store_dir=store_path)
+
+            with self.assertRaises(FileExistsError):
+                DataStorage(config)
 
     @patch("optix.optimizer.store.open_file")
     @patch("optix.optimizer.store.csv")
@@ -39,7 +62,9 @@ class TestDataStorage(unittest.TestCase):
         mock_csv.writer.return_value = mock_writer
 
         config = MagicMock()
-        config.store_dir = Path("/tmp/fake/dir")
+        tmp_dir = TemporaryDirectory()
+        self.addCleanup(tmp_dir.cleanup)
+        config.store_dir = Path(tmp_dir.name) / "store"
         storage = DataStorage(config, MagicMock(), MagicMock())
         storage.save_file = MagicMock()
         storage.save_file.exists.return_value = True
@@ -230,6 +255,7 @@ class TestDataStorage(unittest.TestCase):
                 time_per_output_token=0.04,
                 success_rate=0.95,
                 throughput=4,
+                input_token_throughput=4000,
             )
             params = (OptimizerConfigField(name="REQUESTRATE", value=5),)
             storage.save(performance, params, fitness=0.5, duration=10)
@@ -242,6 +268,7 @@ class TestDataStorage(unittest.TestCase):
             self.assertEqual(rows[0]["time_to_first_token(s)"], "0.3")
             self.assertEqual(rows[0]["time_per_output_token(s)"], "0.04")
             self.assertEqual(rows[0]["throughput(requests/s)"], "4.0")
+            self.assertEqual(rows[0]["input_token_throughput(tokens/s)"], "4000.0")
             self.assertEqual(rows[0]["REQUESTRATE(requests/s)"], "5")
             self.assertEqual(rows[0]["duration(s)"], "10")
             self.assertEqual(rows[0]["success_rate"], "0.95")
@@ -254,9 +281,33 @@ class TestDataStorage(unittest.TestCase):
                 settings.return_value.slo_coefficient = 0.1
                 best = storage.get_best_result()
             self.assertEqual(best.iloc[0]["generate_speed"], 2000)
+            self.assertEqual(best.iloc[0]["input_token_throughput"], 4000)
             history = DataStorage.load_history_position(config.store_dir, {"REQUESTRATE": 5})
             self.assertEqual(len(history), 2)
+            self.assertEqual(history[0]["input_token_throughput"], 4000)
             self.assertEqual(history[0]["time_to_first_token"], 0.3)
+
+    def test_input_throughput_distinguishes_missing_from_zero(self):
+        import csv
+        import tempfile
+
+        import pandas as pd
+
+        from optix.common import read_csv_s
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = DataStorage(MagicMock(store_dir=Path(tmp_dir)))
+            storage.save(PerformanceIndex(), ())
+            storage.save(PerformanceIndex(input_token_throughput=0), ())
+
+            with storage.save_file.open(encoding="utf-8", newline="") as file:
+                rows = list(csv.DictReader(file))
+            self.assertEqual(rows[0]["input_token_throughput(tokens/s)"], "")
+            self.assertEqual(rows[1]["input_token_throughput(tokens/s)"], "0.0")
+
+            loaded = read_csv_s(storage.save_file)
+            self.assertTrue(pd.isna(loaded.iloc[0]["input_token_throughput"]))
+            self.assertEqual(loaded.iloc[1]["input_token_throughput"], 0)
 
     def test_save_appends_to_existing_file(self):
         import tempfile

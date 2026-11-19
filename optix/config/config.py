@@ -966,6 +966,7 @@ class PerformanceIndex(BaseModel):
     time_per_output_token: Optional[float] = None
     success_rate: Optional[float] = None
     throughput: Optional[float] = None
+    input_token_throughput: Optional[float] = None
     early_exit: bool = Field(
         default=False,
         description="Whether the benchmark was actually terminated by the early exit mechanism",

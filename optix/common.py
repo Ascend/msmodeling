@@ -28,18 +28,20 @@ _KEY_WORD = "HBM"
 
 # CSV labels describe stored values; no numeric conversion is performed.
 _SECONDS_UNIT = "s"
+_TOKENS_PER_SECOND_UNIT = "tokens/s"
 CSV_COLUMN_UNITS = {
-    "generate_speed": "tokens/s",
+    "generate_speed": _TOKENS_PER_SECOND_UNIT,
     "time_to_first_token": _SECONDS_UNIT,
     "time_per_output_token": _SECONDS_UNIT,
     "throughput": "requests/s",
+    "input_token_throughput": _TOKENS_PER_SECOND_UNIT,
     "REQUESTRATE": "requests/s",
     "duration": _SECONDS_UNIT,
     "early_exit_decision_elapsed_seconds": _SECONDS_UNIT,
     "estimated_time_saved_seconds": _SECONDS_UNIT,
-    "reference_generate_speed": "tokens/s",
-    "observed_generate_speed": "tokens/s",
-    "metrics_window_generate_speed": "tokens/s",
+    "reference_generate_speed": _TOKENS_PER_SECOND_UNIT,
+    "observed_generate_speed": _TOKENS_PER_SECOND_UNIT,
+    "metrics_window_generate_speed": _TOKENS_PER_SECOND_UNIT,
     "metrics_window_time_to_first_token": _SECONDS_UNIT,
     "metrics_window_time_per_output_token": _SECONDS_UNIT,
     "warmup_end_elapsed_seconds": _SECONDS_UNIT,

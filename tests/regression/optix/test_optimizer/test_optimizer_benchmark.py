@@ -125,6 +125,7 @@ class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
         self.json_path = self.test_dir / "result.json"
         json_data = {
             "output_throughput": 2000.0,
+            "total_token_throughput": 3000.0,
             "mean_ttft_ms": 600.0,
             "mean_tpot_ms": 140.0,
             "num_prompts": 10,
@@ -146,10 +147,32 @@ class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
         # Verify the result
         self.assertIsInstance(result, PerformanceIndex)
         self.assertEqual(result.generate_speed, 2000.0)
+        self.assertEqual(result.input_token_throughput, 1000.0)
         self.assertEqual(result.time_to_first_token, 0.6)
         self.assertEqual(result.time_per_output_token, 0.14)
         self.assertEqual(result.success_rate, 1.0)
         self.assertEqual(result.throughput, 4.0)
+
+    def test_missing_total_token_throughput_remains_none(self):
+        data = json.loads(self.json_path.read_text(encoding="utf-8"))
+        del data["total_token_throughput"]
+        self.json_path.write_text(json.dumps(data), encoding="utf-8")
+
+        result = self.benchmark.get_performance_index()
+        self.assertIsNone(result.input_token_throughput)
+
+    def test_missing_input_throughput_does_not_reuse_previous_result(self):
+        data = json.loads(self.json_path.read_text(encoding="utf-8"))
+        del data["total_token_throughput"]
+        data["output_throughput"] = 1000.0
+        missing_path = self.test_dir / "missing_total.json"
+        missing_path.write_text(json.dumps(data), encoding="utf-8")
+
+        with patch("optix.optimizer.plugins.benchmark.walk_files", return_value=[self.json_path, missing_path]):
+            result = self.benchmark.get_performance_index()
+
+        self.assertEqual(result.generate_speed, 1000.0)
+        self.assertIsNone(result.input_token_throughput)
 
 
 class TestVllmBenchMarkExtended(unittest.TestCase):
@@ -441,6 +464,7 @@ class TestAisBenchGetPerformanceIndex(unittest.TestCase):
                     "Success Requests": {"total": 95},
                     "Request Throughput": {"total": "4.5 req/s"},
                     "Output Token Throughput": {"total": "2000 tokens/s"},
+                    "Input Token Throughput": {"total": "4000 tokens/s"},
                 },
                 f,
             )
@@ -467,6 +491,7 @@ class TestAisBenchGetPerformanceIndex(unittest.TestCase):
         assert result.throughput == 4.5
         assert result.success_rate == 0.95
         assert result.generate_speed == 2000.0
+        assert result.input_token_throughput == 4000.0
 
 
 @pytest.mark.parametrize("summary_keys", [("total",), ("stable",), ("total", "stable")])
@@ -489,12 +514,14 @@ def test_aisbench_summary_concurrency(summary_keys, concurrency, expected):
 
 @pytest.mark.parametrize("summary_keys", [("total",), ("stable",), ("total", "stable")])
 @pytest.mark.parametrize("total_requests, success_requests", [(34, 34), (34, 30), (0, 0)])
-def test_aisbench_summary_performance(summary_keys, total_requests, success_requests):
+@pytest.mark.parametrize("input_throughput", [0.0, 1024.5])
+def test_aisbench_summary_performance(summary_keys, total_requests, success_requests, input_throughput):
     values = {
         "Total Requests": (total_requests, 100),
         "Success Requests": (success_requests, 50),
         "Request Throughput": ("3.357 req/s", "10 req/s"),
         "Output Token Throughput": ("1570.7643 token/s", "2000 token/s"),
+        "Input Token Throughput": (f"{input_throughput} token/s", "4096 token/s"),
     }
     data = {metric: dict(zip(summary_keys, results)) for metric, results in values.items()}
     bench = MagicMock()
@@ -511,9 +538,42 @@ def test_aisbench_summary_performance(summary_keys, total_requests, success_requ
     if total_requests:
         assert result.success_rate == pytest.approx(success_requests / total_requests)
         assert result.generate_speed == 1570.7643
+        assert result.input_token_throughput == input_throughput
     else:
         assert result.success_rate is None
         assert result.generate_speed is None
+        assert result.input_token_throughput is None
+
+
+@pytest.mark.parametrize("summary_keys", [("total",), ("stable",), ("total", "stable")])
+@pytest.mark.parametrize("input_summary", [None, {}], ids=["missing_metric", "missing_summary"])
+def test_aisbench_allows_missing_input_throughput(summary_keys, input_summary):
+    values = {
+        "Total Requests": 10,
+        "Success Requests": 9,
+        "Request Throughput": "3.0 req/s",
+        "Output Token Throughput": "1500.0 token/s",
+    }
+    data = {metric: dict.fromkeys(summary_keys, value) for metric, value in values.items()}
+    if input_summary is not None:
+        data["Input Token Throughput"] = input_summary
+    bench = MagicMock()
+    bench.config.output_path = "/output"
+    bench.get_performance_metric.side_effect = [0.1, 0.05]
+    with (
+        patch("optix.optimizer.plugins.benchmark.glob.glob", return_value=["/output/result.csv"]),
+        patch("optix.optimizer.plugins.benchmark.open_file", mock_open(read_data=json.dumps(data))),
+        patch("optix.optimizer.plugins.benchmark.logger.debug") as debug,
+    ):
+        result = AisBench.get_performance_index(bench)
+
+    assert result.input_token_throughput is None
+    assert result.generate_speed == 1500.0
+    assert result.throughput == 3.0
+    assert result.success_rate == 0.9
+    assert result.time_to_first_token == 0.1
+    assert result.time_per_output_token == 0.05
+    assert any("Input Token Throughput" in call.args[0] for call in debug.call_args_list)
 
 
 @pytest.mark.parametrize(
@@ -714,12 +774,13 @@ class TestVllmBenchMarkGetPerformanceIndexNoJson(unittest.TestCase):
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(
                 {
-                    "output_throughput": 1000.0,
-                    "mean_ttft_ms": 100.0,
-                    "mean_tpot_ms": 50.0,
+                    "output_throughput": 0.0,
+                    "total_token_throughput": 0.0,
+                    "mean_ttft_ms": 0.0,
+                    "mean_tpot_ms": 0.0,
                     "num_prompts": 0,
                     "completed": 0,
-                    "request_throughput": 2.0,
+                    "request_throughput": 0.0,
                 },
                 f,
             )
@@ -727,3 +788,5 @@ class TestVllmBenchMarkGetPerformanceIndexNoJson(unittest.TestCase):
         bench = VllmBenchMark(mock_config)
         result = bench.get_performance_index()
         assert result.success_rate == 0
+        assert result.generate_speed == 0
+        assert result.input_token_throughput == 0
