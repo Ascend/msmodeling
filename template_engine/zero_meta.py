@@ -373,6 +373,12 @@ def _encode_body_blob(body: dict[str, Any]) -> str:
 
     tensors: list[dict[str, Any]] = []
     encoded = encode_value(body, tensors, {})
+    # Resident provenance travels beside the positional tensor rows: the row
+    # shape/stride/dtype columns stay unchanged so format/3 stays readable by
+    # older readers, and each index list is omitted entirely when the body
+    # carries no tensor of that account.
+    weight_tensors = [index for index, tensor in enumerate(tensors) if tensor.pop("w", 0)]
+    cache_tensors = [index for index, tensor in enumerate(tensors) if tensor.pop("c", 0)]
     formulas: list[Any] = []
     formula_ids: dict[str, int] = {}
     for entry in encoded.get("entries", []):
@@ -402,6 +408,10 @@ def _encode_body_blob(body: dict[str, Any]) -> str:
         "formulas": formulas,
         "entry_fields": entry_fields,
     }
+    if weight_tensors:
+        payload["weight_tensors"] = weight_tensors
+    if cache_tensors:
+        payload["cache_tensors"] = cache_tensors
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
@@ -422,7 +432,16 @@ def _decode_body_blob(blob: bytes | str) -> dict[str, Any]:
             raise ValueError("invalid template entry field reference")
         entries.append(dict(zip(field_sets[index], row[1:], strict=True)))
     encoded["entries"] = entries
-    payload["tensors"] = [dict(zip(("s", "st", "d"), row, strict=True)) for row in payload["tensors"]]
+    weight_tensors = set(payload.get("weight_tensors") or ())
+    cache_tensors = set(payload.get("cache_tensors") or ())
+    payload["tensors"] = [
+        {
+            **dict(zip(("s", "st", "d"), row, strict=True)),
+            **({"w": 1} if index in weight_tensors else {}),
+            **({"c": 1} if index in cache_tensors else {}),
+        }
+        for index, row in enumerate(payload["tensors"])
+    ]
     formulas = payload["formulas"]
     for entry in entries:
         for field in _FORMULA_FIELDS:

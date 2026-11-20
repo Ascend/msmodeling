@@ -35,7 +35,7 @@ import enum
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import torch
 
@@ -69,11 +69,20 @@ class CapturedOp:
 
 
 class _MetaTensorPool:
-    """Replace live tensors while preserving aliases across all op entries."""
+    """Replace live tensors while preserving aliases across all op entries.
 
-    def __init__(self) -> None:
+    ``resident_owner`` (optional) reports which resident memory account a live
+    source tensor is already charged to: ``"weight"`` for parameters, buffers
+    and compile-time folded constants, ``"cache"`` for the KV / indexer /
+    compressed payload the cache inventory bills, ``None`` for request state.
+    Tagged placeholders keep that provenance in the artifact, which is the only
+    place it can still be known: after capture no model identity survives.
+    """
+
+    def __init__(self, resident_owner: Callable[[torch.Tensor], str | None] | None = None) -> None:
         self._by_source_id: dict[int, torch.Tensor] = {}
         self._source_tensors: list[torch.Tensor] = []
+        self._resident_owner = resident_owner
 
     def replace(self, value: Any) -> Any:
         if isinstance(value, torch.Tensor):
@@ -90,6 +99,10 @@ class _MetaTensorPool:
                     )
                 except (RuntimeError, TypeError, ValueError) as error:
                     raise CaptureSerializationError(f"cannot create Meta placeholder for tensor {value!r}") from error
+                if self._resident_owner is not None:
+                    from .graph_codec import tag_tensor_resident
+
+                    tag_tensor_resident(placeholder, self._resident_owner(value))
                 self._by_source_id[source_id] = placeholder
             return self._by_source_id[source_id]
         if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
@@ -140,10 +153,14 @@ def _normalise_func(func: Any) -> str:
     return result
 
 
-def serialize_op_invoke_infos(op_invoke_infos: Iterable[Any]) -> list[CapturedOp]:
+def serialize_op_invoke_infos(
+    op_invoke_infos: Iterable[Any],
+    *,
+    resident_owner: Callable[[torch.Tensor], str | None] | None = None,
+) -> list[CapturedOp]:
     """Convert raw runtime records into pickle-safe ``CapturedOp`` objects."""
 
-    pool = _MetaTensorPool()
+    pool = _MetaTensorPool(resident_owner)
     serialized: list[CapturedOp] = []
     for index, op in enumerate(op_invoke_infos):
         for field_name in ("func", "args", "kwargs", "out"):
@@ -160,13 +177,17 @@ def serialize_op_invoke_infos(op_invoke_infos: Iterable[Any]) -> list[CapturedOp
     return serialized
 
 
-def serialize_runtime(runtime: Any) -> list[CapturedOp]:
+def serialize_runtime(
+    runtime: Any,
+    *,
+    resident_owner: Callable[[torch.Tensor], str | None] | None = None,
+) -> list[CapturedOp]:
     """Serialize ``runtime.op_invoke_infos`` with one cross-entry tensor pool."""
 
     records = getattr(runtime, "op_invoke_infos", None)
     if records is None:
         raise CaptureSerializationError("runtime does not expose op_invoke_infos")
-    return serialize_op_invoke_infos(records)
+    return serialize_op_invoke_infos(records, resident_owner=resident_owner)
 
 
 def ensure_dynamo_cache_size_limit(minimum: int = MIN_DYNAMO_CACHE_SIZE_LIMIT) -> int:
@@ -304,7 +325,11 @@ def capture(
             runner=runner,
             request_tokens=int(request.concurrency * request.seq_len),
         )
-    return serialize_runtime(observed_runtimes[-1]), _execution_time(metrics)
+    tracker = observed_runtimes[-1].memory_tracker
+    return (
+        serialize_runtime(observed_runtimes[-1], resident_owner=tracker.resident_owner),
+        _execution_time(metrics),
+    )
 
 
 def _fill_model_meta(

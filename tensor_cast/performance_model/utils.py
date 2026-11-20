@@ -44,14 +44,50 @@ def is_noop_self_copy_op(op, args=()) -> bool:
     return isinstance(dst, torch.Tensor) and isinstance(src, torch.Tensor) and dst is src
 
 
+def accounted_elements(tensor: torch.Tensor) -> int:
+    """Elements a tensor occupies, ignoring the size ``numel()`` over-states.
+
+    A view whose strides overlap or are zero - ``expand``/``broadcast_to`` of a
+    small table, which is how models hand a per-request mask or rope index to
+    the graph - reports ``numel()`` elements but spans only the elements of its
+    base storage and allocates nothing. Charging ``numel()`` bills e.g. a
+    1 KB table of 128 rope values as the 134 MB it is broadcast to.
+
+    Strided slices span *more* than ``numel()`` and keep ``numel()``, so
+    non-overlapping tensors are unaffected.
+    """
+    numel = int(tensor.numel())
+    if numel == 0 or tensor.layout != torch.strided:
+        return numel
+    span = 1
+    for size, step in zip(tensor.shape, tensor.stride()):
+        span += (int(size) - 1) * abs(int(step))
+    # ``span - 1`` is the highest offset the view touches. An injective layout
+    # touches ``numel`` distinct offsets, so it can never span fewer elements
+    # than ``numel``; only a zero/overlapping stride can collapse the count.
+    return min(numel, span)
+
+
 def bytes_of_tensor(tensor: torch.Tensor, dtype: Optional[torch.dtype] = None) -> float:
     """
     Calculates the size of a tensor in bytes.
     This is a centralized function to ensure consistent byte calculation,
     especially for dtypes that might be packed.
+
+    Both accounts that consume it want the same number:
+
+    * **Allocation** (``MemoryTracker``): the bytes this tensor adds to the
+      peak, which for a view is its share of the storage, not ``numel``.
+    * **Traffic** (``op_invoke_info.get_memory_access_properties`` and the
+      per-op ``memory_read_bytes``/``memory_write_bytes`` overrides): the bytes
+      the op moves between the kernel and HBM.  For every non-overlapping
+      layout that is exactly ``numel`` (a strided slice or transpose spans at
+      least its logical elements), and for a stride-0 broadcast it is the base
+      table the kernel actually fetches - reading the virtual extent would
+      over-count a per-request mask or rope table by its broadcast factor.
     """
     dtype = tensor.dtype if dtype is None else dtype
-    return bytes_of_elements(tensor.numel(), dtype)
+    return bytes_of_elements(accounted_elements(tensor), dtype)
 
 
 _bytes_of_dtype = {

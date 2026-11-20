@@ -251,6 +251,93 @@ def test_compressor_output_uses_its_schema_instead_of_an_accidental_routing_fit(
     assert comparison.passed, comparison.as_dict()
 
 
+def test_compress_topk_is_the_clamped_rank_local_packed_token_count():
+    from template_engine.formulas import derive_value_formula
+    from template_engine.parameter_features import prefill_cache_features
+
+    parameters = (
+        ('E', 384),
+        ('E_per_tok', 6),
+        ('H', 8),
+        ('INDEX_TOPK', 1024),
+        ('WINDOW', 128),
+        ('COMPRESS_RATIO/4', 4),
+        ('COMPRESS_RATIO/128', 128),
+    )
+
+    def sample(batch, sequence):
+        c = config(batch, sequence)
+        c.update(TP=4, EP=32)
+        c['model_parameters'] = parameters
+        return c
+
+    def topk(batch, sequence):
+        features = prefill_cache_features(batch, sequence, 4, 32, 1, 0, dict(parameters))
+        packed = features['prefill/request_tokens']
+        assert features['prefill/index/topk'] == min(1024, packed)
+        return features['prefill/index/topk']
+
+    # EP shards split the packed tokens: TP4/EP32 splits B into 8 data-parallel
+    # shards, so B9 packs 2 requests, B17 packs 3 (512/768 tokens, keeping that
+    # width), while S>=INDEX_TOPK clamps at INDEX_TOPK regardless of the
+    # rank-local batch.
+    assert [topk(b, s) for b, s in ((9, 256), (17, 256), (128, 256), (1, 4096), (1, 32768))] == [
+        512,
+        768,
+        1024,
+        1024,
+        1024,
+    ]
+
+    # The whitebox feature must be what the derivation picks at Pass 1, not a
+    # routing MULTI or a per-anchor EXACT_LOOKUP fallback.
+    anchors = [(1, 256), (17, 256), (128, 256), (8, 16384), (1, 32768)]
+    formula = derive_value_formula([(sample(b, s), topk(b, s)) for b, s in anchors])
+    assert formula == {'type': 'LINEAR', 'coeff': 1, 'feat': 'prefill/index/topk', 'offset': 0}
+
+
+def test_compress_topk_scalar_replays_at_unseen_packed_token_counts():
+    parameters = (
+        ('E', 384),
+        ('E_per_tok', 6),
+        ('H', 8),
+        ('INDEX_TOPK', 1024),
+        ('WINDOW', 128),
+        ('COMPRESS_RATIO/4', 4),
+        ('COMPRESS_RATIO/128', 128),
+    )
+
+    def sample(batch, sequence):
+        c = config(batch, sequence)
+        c.update(TP=4, EP=32)
+        c['model_parameters'] = parameters
+        c['structure_policy'] = FIXED_POLICY
+        local = (batch + 7) // 8
+        packed = local * sequence
+        # 13 scalar args keep the recorded positions of the real schema; only
+        # args[13] (compress_topk) varies with the configuration.
+        args = (0, 0, 0, 0, 0.0, 512, 0, 'torch.int8', 64, None, None, 4, 128, min(1024, packed), packed, None)
+        out = torch.empty((1, packed, 32, 512), device='meta')
+        return _Capture(
+            str((batch, sequence)),
+            c,
+            [CapturedOp('tensor_cast.sparse_attn_sharedkv.default', args, {}, out)],
+            0.0,
+        )
+
+    anchors = [sample(*bs) for bs in ((1, 256), (17, 256), (128, 256), (8, 16384), (1, 32768))]
+    engine, report = build(anchors)
+    assert report.failed_formulas == 0
+
+    # B9/S256 packs 512 tokens (small-token regime); B33/S256 packs 1280 and
+    # clamps. Both lie outside the anchors' (B, S) points.
+    for batch, sequence in ((9, 256), (33, 256)):
+        truth = sample(batch, sequence)
+        result = generate({'engine': engine, 'meta': {'num_hidden_layers': 1}}, truth.config, return_ops=True)
+        comparison = compare_op_sequences(truth.ops, result['ops'])
+        assert comparison.passed, (batch, sequence, comparison.as_dict())
+
+
 def test_single_query_compressor_uses_incremental_row_count_in_prefill():
     from template_engine.parameter_features import prefill_cache_features
     from tensor_cast.layers.deepseek_v4 import get_window_topk_idxs
@@ -268,48 +355,228 @@ def test_single_query_compressor_uses_incremental_row_count_in_prefill():
             assert features[f'prefill/index/{ratio}/window_width'] == window.shape[-1] + max(sequence // ratio, 1)
 
 
-def test_moe_dispatch_shapes_follow_schema_at_unseen_large_batch():
+def _moe_dispatch_capture(batch, sequence, *, tp, ep, experts=384, top_k=6):
+    """One MoE dispatch/combine step with the official balanced split sizes."""
     from types import SimpleNamespace
     from tensor_cast.layers.moe_layer import FusedMoETensorCast, assign_experts
+    from template_engine.structure_buckets import parallel_geometry
 
+    c = config(batch, sequence)
+    c.update(TP=tp, EP=ep)
+    c['model_parameters'] = (('E', experts), ('E_per_tok', top_k), ('H', 8))
+    _, local = parallel_geometry({'TP': tp, 'EP': ep, 'MOE_DP': 1, 'B': batch})
+    tokens = (local * sequence + tp - 1) // tp
+    start, count = assign_experts(experts, ep, 0)
+    context = SimpleNamespace(
+        ep_group=SimpleNamespace(world_size=ep, rank_in_group=0),
+        num_external_shared_experts=0,
+        num_global_experts=experts,
+        expert_idx_start=start,
+        num_local_experts=count,
+    )
+    incoming, outgoing, *_ = FusedMoETensorCast.get_split_sizes(context, tokens * top_k, top_k)
+    hidden = torch.empty((tokens, 8), device='meta')
+    indices = torch.empty((tokens, top_k), dtype=torch.long, device='meta')
+    routed = torch.ops.tensor_cast.init_routing_v2(hidden, indices, False)
+    dispatched = torch.ops.tensor_cast.all_to_all(routed, outgoing, incoming, 0, list(range(ep)))
+    processed = -dispatched
+    combined = torch.ops.tensor_cast.all_to_all(processed, incoming, outgoing, 0, list(range(ep)))
+    ops = [
+        CapturedOp('tensor_cast.init_routing_v2.default', (hidden, indices, False), {}, routed),
+        CapturedOp('tensor_cast.all_to_all.default', (routed, outgoing, incoming, 0, list(range(ep))), {}, dispatched),
+        CapturedOp('aten.neg.default', (dispatched,), {}, processed),
+        CapturedOp('tensor_cast.all_to_all.default', (processed, incoming, outgoing, 0, list(range(ep))), {}, combined),
+    ]
+    return _Capture(str((batch, sequence)), c, ops, 0.0)
+
+
+def test_moe_dispatch_shapes_follow_schema_at_unseen_large_batch():
     def sample(batch, sequence):
-        c = config(batch, sequence)
-        c.update(TP=4, EP=32)
-        c['model_parameters'] = (('E', 384), ('E_per_tok', 6), ('H', 8))
-        local = (batch + 7) // 8
-        tokens = (local * sequence + 3) // 4
-        start, count = assign_experts(384, 32, 0)
-        context = SimpleNamespace(
-            ep_group=SimpleNamespace(world_size=32, rank_in_group=0),
-            num_external_shared_experts=0,
-            num_global_experts=384,
-            expert_idx_start=start,
-            num_local_experts=count,
-        )
-        incoming, outgoing, *_ = FusedMoETensorCast.get_split_sizes(context, tokens * 6, 6)
-        hidden = torch.empty((tokens, 8), device='meta')
-        indices = torch.empty((tokens, 6), dtype=torch.long, device='meta')
-        routed = torch.ops.tensor_cast.init_routing_v2(hidden, indices, False)
-        dispatched = torch.ops.tensor_cast.all_to_all(routed, outgoing, incoming, 0, list(range(32)))
-        processed = -dispatched
-        combined = torch.ops.tensor_cast.all_to_all(processed, incoming, outgoing, 0, list(range(32)))
-        ops = [
-            CapturedOp('tensor_cast.init_routing_v2.default', (hidden, indices, False), {}, routed),
-            CapturedOp(
-                'tensor_cast.all_to_all.default', (routed, outgoing, incoming, 0, list(range(32))), {}, dispatched
-            ),
-            CapturedOp('aten.neg.default', (dispatched,), {}, processed),
-            CapturedOp(
-                'tensor_cast.all_to_all.default', (processed, incoming, outgoing, 0, list(range(32))), {}, combined
-            ),
-        ]
-        return _Capture(str((batch, sequence)), c, ops, 0.0)
+        return _moe_dispatch_capture(batch, sequence, tp=4, ep=32)
 
     engine, _ = build([sample(b, s) for b, s in ((8, 132), (8, 136), (8, 260), (24, 180), (64, 131), (160, 8191))])
     truth = sample(255, 16383)
     generated = generate({'engine': engine, 'meta': {'num_hidden_layers': 1}}, truth.config, return_ops=True)
     result = compare_op_sequences(truth.ops, generated['ops'])
     assert result.passed, result.as_dict()
+
+
+def test_moe_dispatch_shapes_fit_when_expert_group_equals_tensor_parallel():
+    """EP == TP still dispatches; the old ``ep <= tp`` cut-off left no features.
+
+    Without the routing features every dispatch list and per-expert slice of
+    this cell degraded to a per-anchor EXACT_LOOKUP, so no unseen (B, S) could
+    be served even though the official helper reproduces the captured numbers
+    exactly.
+    """
+
+    def sample(batch, sequence):
+        return _moe_dispatch_capture(batch, sequence, tp=32, ep=32)
+
+    engine, report = build(
+        [sample(b, s) for b, s in ((1, 4096), (2, 4096), (4, 4096), (8, 4096), (1, 65536), (256, 256))]
+    )
+    assert report.failed_formulas == 0
+    for batch, sequence in ((3, 32768), (16, 131072)):
+        truth = sample(batch, sequence)
+        generated = generate({'engine': engine, 'meta': {'num_hidden_layers': 1}}, truth.config, return_ops=True)
+        comparison = compare_op_sequences(truth.ops, generated['ops'])
+        assert comparison.passed, (batch, sequence, comparison.as_dict())
+
+
+def test_decode_paged_blocks_shard_by_context_parallel_and_round_up():
+    from template_engine.parameter_features import prefill_cache_features
+
+    # Kimi TP8/EP32/DCP8 decode: local 2 x (S+1) = 65538 slots -> 513 plain
+    # blocks, and a card holding 1/8 of the tokens still allocates whole blocks.
+    features = prefill_cache_features(8, 32768, 8, 32, 1, 0, {}, decode=True, dcp=8)
+    assert features['prefill/cache/full_blocks'] == 513
+    assert features['prefill/cache/paged_blocks'] == 65
+    # 17 plain blocks over 8 cards is 2.125 -> 3, never 2: the remainder of a
+    # split still needs a whole block.
+    features = prefill_cache_features(4, 2175, 8, 32, 1, 0, {}, decode=True, dcp=8)
+    assert (features['prefill/cache/full_blocks'], features['prefill/cache/paged_blocks']) == (17, 3)
+    # DCP=1 keeps the historical value.
+    features = prefill_cache_features(8, 32768, 8, 32, 1, 0, {}, decode=True)
+    assert features['prefill/cache/paged_blocks'] == features['prefill/cache/full_blocks'] == 513
+    # Sparse-attention/window models do not shard their (window+compress) pool.
+    windowed = prefill_cache_features(8, 32768, 8, 32, 1, 0, {'WINDOW': 128}, decode=True, dcp=8)
+    assert windowed['prefill/cache/paged_blocks'] == windowed['prefill/cache/full_blocks']
+
+
+def test_dcp_cache_shard_factor_follows_the_kv_layout():
+    from template_engine.parameter_features import prefill_cache_features
+
+    # GQA with h_kv >= tp: DCP converts no capacity (native factor 1). The old
+    # "has WINDOW" proxy sharded these cells by dcp and under-sized the pool.
+    features = prefill_cache_features(4, 8192, 8, 32, 1, 0, {'KV_LAYOUT': 'gqa', 'KV_HEADS': 8}, decode=True, dcp=8)
+    assert features['prefill/cache/paged_blocks'] == features['prefill/cache/full_blocks']
+    # GQA with h_kv < tp: only the TP head replication becomes capacity.
+    gqa = prefill_cache_features(4, 8192, 8, 32, 1, 0, {'KV_LAYOUT': 'gqa', 'KV_HEADS': 2}, decode=True, dcp=8)
+    assert gqa['prefill/cache/paged_blocks'] == max(1, -(-gqa['prefill/cache/full_blocks'] // 4))
+    # Without a verified head count the native path claims no gain.
+    blind = prefill_cache_features(4, 8192, 8, 32, 1, 0, {'KV_LAYOUT': 'gqa'}, decode=True, dcp=8)
+    assert blind['prefill/cache/paged_blocks'] == blind['prefill/cache/full_blocks']
+    # MLA shards by dcp even when it also carries a sliding window.
+    mla = prefill_cache_features(4, 8192, 8, 32, 1, 0, {'KV_LAYOUT': 'mla', 'WINDOW': 128}, decode=True, dcp=8)
+    assert mla['prefill/cache/paged_blocks'] == max(1, -(-mla['prefill/cache/full_blocks'] // 8))
+    # Sparse attention keeps factor 1 with or without a WINDOW constant.
+    for parameters in ({'KV_LAYOUT': 'sparse'}, {'KV_LAYOUT': 'sparse', 'WINDOW': 128}):
+        sparse = prefill_cache_features(4, 8192, 8, 32, 1, 0, parameters, decode=True, dcp=8)
+        assert sparse['prefill/cache/paged_blocks'] == sparse['prefill/cache/full_blocks']
+    # Legacy artifacts predate KV_LAYOUT; the DSA family is marked by its
+    # indexer width instead of a sliding window and must not shard either.
+    legacy_dsa = prefill_cache_features(4, 8192, 8, 32, 1, 0, {'INDEX_TOPK': 2048}, decode=True, dcp=8)
+    assert legacy_dsa['prefill/cache/paged_blocks'] == legacy_dsa['prefill/cache/full_blocks']
+
+
+def test_bind_parameters_allows_resolved_supersets_but_rejects_disagreement():
+    from template_engine.model_parameters import bind_parameters
+
+    template = {'template_meta': {'model_parameters': (('H', 4096), ('WINDOW', 128))}}
+    resolved = {'model_parameters': (('H', 4096), ('WINDOW', 128), ('KV_LAYOUT', 'sparse'), ('KV_HEADS', 1))}
+    bound = bind_parameters(template, resolved)
+    # The declaration stays authoritative: freshly resolvable inputs an older
+    # artifact never declared are dropped before feature evaluation.
+    assert bound['model_parameters'] == (('H', 4096), ('WINDOW', 128))
+    with pytest.raises(ValueError, match='disagree'):
+        bind_parameters(template, {'model_parameters': (('H', 2048),)})
+
+
+def test_bind_parameters_warns_about_supplied_keys_the_template_never_declared(caplog):
+    """Dropping extras silently would also hide a mistyped parameter name."""
+    from template_engine.model_parameters import bind_parameters
+
+    template = {'template_meta': {'model_parameters': (('H', 4096),)}}
+    # ``KV_LAUOUT`` is a typo of ``KV_LAYOUT``: ignored, but never silently.
+    supplied = {'model_parameters': (('H', 4096), ('KV_LAUOUT', 'sparse'))}
+    with caplog.at_level('WARNING', logger='template_engine.model_parameters'):
+        bound = bind_parameters(template, supplied)
+    assert bound['model_parameters'] == (('H', 4096),)
+    assert 'KV_LAUOUT' in caplog.text
+
+
+@pytest.mark.parametrize(
+    'layout, kv_heads, tp, dcp',
+    [
+        ('sparse', 1, 8, 8),
+        ('mla', 96, 8, 8),
+        ('gqa', 8, 8, 8),
+        ('gqa', 2, 8, 8),
+        ('gqa', None, 8, 8),
+        ('gqa', 2, 8, 1),
+        ('sparse', 1, 8, 1),
+    ],
+)
+def test_template_dcp_shard_matches_native_capacity_factor(layout, kv_heads, tp, dcp):
+    """Capture-time layout classification must reproduce the native factor."""
+    from types import SimpleNamespace
+
+    from tensor_cast.core.input_generator import dcp_kv_token_capacity_factor
+    from template_engine.model_parameters import formula_parameters
+    from template_engine.parameter_features import _dcp_cache_shard_factor
+
+    hf_config = {'model_type': 'test_model', 'hidden_size': 64}
+    if kv_heads is not None:
+        hf_config['num_key_value_heads'] = kv_heads
+    mla = None
+    if layout in {'sparse', 'mla'}:
+        sparse = layout == 'sparse'
+        mla = SimpleNamespace(
+            mla_cls=type('MlaCls', (), {'requires_indexer_cache': classmethod(lambda cls, _s=sparse: _s)})
+        )
+    model_config = SimpleNamespace(
+        hf_config=hf_config,
+        mla_config=mla,
+        parallel_config=SimpleNamespace(tensor_parallel_size=tp, decode_context_parallel_size=dcp),
+    )
+    model = SimpleNamespace(
+        model_config=model_config,
+        text_config=SimpleNamespace(model_type='test_model', num_key_value_heads=kv_heads),
+    )
+    parameters = dict(formula_parameters(model_config) or ())
+    assert parameters.get('KV_LAYOUT') == layout
+    assert parameters.get('KV_HEADS') == kv_heads
+    assert _dcp_cache_shard_factor(parameters, tp, dcp) == dcp_kv_token_capacity_factor(model)
+
+
+def test_decode_paged_blocks_separate_context_parallel_shards_at_equal_plain_blocks():
+    def sample(batch, sequence):
+        c = config(batch, sequence, decode=True)
+        c.update(TP=8, EP=32, DCP=8)
+        from template_engine.parameter_features import prefill_cache_features
+
+        blocks = prefill_cache_features(batch, sequence, 8, 32, 1, 0, {}, decode=True, dcp=8)[
+            'prefill/cache/paged_blocks'
+        ]
+        cache = torch.empty((blocks, 128, 8), dtype=torch.int8, device='meta')
+        return _Capture(str((batch, sequence)), c, [CapturedOp('aten.copy_.default', (cache, cache), {}, cache)], 0.0)
+
+    engine, report = build([sample(b, s) for b, s in ((4, 16384), (8, 16384), (8, 32768), (4, 65536))])
+    assert report.failed_formulas == 0
+    truth = sample(8, 65536)
+    generated = generate({'engine': engine, 'meta': {'num_hidden_layers': 1}}, truth.config, return_ops=True)
+    comparison = compare_op_sequences(truth.ops, generated['ops'])
+    assert comparison.passed, comparison.as_dict()
+
+
+def test_prefill_paged_blocks_shard_by_context_parallel_through_the_feature_table():
+    """Prefill sizes the same paged pool as decode, so it must shard too.
+
+    ``input_generator`` applies ``dcp_sharded_num_blocks`` on both paths; a
+    prefill cell that drops ``dcp`` fits the unsharded block count and
+    over-predicts the per-card cache by the shard factor.
+    """
+    from template_generate import _build_features_cached
+
+    params = (('E', 256), ('E_per_tok', 6), ('H', 8))
+    plain = _build_features_cached(4, 2175, 8, 1, 32, 1, 0, False, params, True)
+    sharded = _build_features_cached(4, 2175, 8, 1, 32, 8, 0, False, params, True)
+
+    assert (plain['prefill/cache/full_blocks'], plain['prefill/cache/paged_blocks']) == (17, 17)
+    # 17 plain blocks over 8 cards is 2.125 -> 3, never 2: the remainder of a
+    # split still allocates a whole block.
+    assert (sharded['prefill/cache/full_blocks'], sharded['prefill/cache/paged_blocks']) == (17, 3)
 
 
 def test_single_packed_token_does_not_freeze_other_single_query_batches():
@@ -641,6 +908,23 @@ def test_routing_tokens_follow_official_dp_transform_boundary():
     assert transformed['moe_route/tokens'] == 129
 
 
+def test_routing_features_cover_expert_group_not_wider_than_tensor_parallel():
+    """EP == TP still keeps the balanced dispatch list; only EP == 1 has none."""
+    from template_engine.parameter_features import prefill_routing_features
+
+    parameters = {'E': 896, 'E_per_tok': 16}
+    # Kimi TP32/EP32: DP is 1 while EP is 32, so a rank routes ceil(S/32)
+    # tokens.  The official helper reproduces the captured dispatch list.
+    features = prefill_routing_features(1, 4096, 32, 32, 1, parameters)
+    assert features['moe_route/tokens'] == 128
+    assert features['moe_route/routed_total'] == 128 * 16
+    assert features['moe_route/output_device/0'] == 83
+    assert (
+        sum(features[f'moe_route/output_device/{index}'] for index in range(32)) == features['moe_route/output_total']
+    )
+    assert prefill_routing_features(1, 4096, 32, 1, 1, parameters) == {}
+
+
 def test_region_reference_survives_different_input_and_output_shapes():
     def capture(batch, sequence):
         x = torch.empty(((batch + 1) // 2 * sequence, 8), device='meta')
@@ -767,7 +1051,14 @@ def test_review_nonexact_axis_extrapolation_and_bounded_diagnostics():
 
 @pytest.mark.parametrize("nested", [None, 3, "invalid", {"hidden_size": 7}])
 def test_review_optional_text_config_is_type_checked(nested):
-    expected = (("H", 8),) if nested is None else ((("H", 7),) if isinstance(nested, dict) else None)
+    # Every resolved config also records its KV layout (the DCP cache shard
+    # follows the layout, not the model name), so the vocabularies carry
+    # ``KV_LAYOUT`` next to the architecture fields.
+    expected = (
+        None
+        if isinstance(nested, (int, str))
+        else ((("H", 8), ("KV_LAYOUT", "gqa")) if nested is None else (("H", 7), ("KV_LAYOUT", "gqa")))
+    )
     assert formula_parameters({"text_config": nested, "hidden_size": 8}) == expected
 
 
