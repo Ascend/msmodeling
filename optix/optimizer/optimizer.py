@@ -813,6 +813,42 @@ class PSOOptimizer(PerformanceTuner):
         if hasattr(self.scheduler.benchmark, "data_field"):
             self.scheduler.benchmark.data_field = self._select_fields_by_name(target_field, benchmark_names)
 
+    @staticmethod
+    def _is_numeric_enum(field) -> bool:
+        dtype_param = field.dtype_param
+        return (
+            field.dtype == "enum"
+            and isinstance(dtype_param, (list, tuple))
+            and bool(dtype_param)
+            and not isinstance(dtype_param[0], str)
+        )
+
+    def _narrow_concurrency_field(self, field, concurrency: int) -> None:
+        """Narrow one CONCURRENCY search field to the measured sustainable concurrency.
+
+        Numeric enum fields carry their legal candidates in ``dtype_param`` rather
+        than ``min``/``max`` (which may be normalized coordinates such as 0/1), so
+        the ladder is clipped directly against ``concurrency`` and ``value`` is set
+        to a surviving member. Scalar fields keep the original min/max clamping.
+        """
+        if self._is_numeric_enum(field):
+            # Sort so that clipped[-1] is reliably the largest surviving legal
+            # option: dtype_param is not guaranteed ascending by the config layer.
+            clipped = sorted(v for v in field.dtype_param if v <= concurrency)
+            if not clipped:
+                # Measured concurrency is below every declared option: keep the
+                # smallest one so value stays a valid ladder member.
+                clipped = [min(field.dtype_param)]
+            field.dtype_param = clipped
+            field.value = clipped[-1]
+            return
+        if field.min < concurrency < field.max:
+            field.value = field.max = concurrency
+        elif concurrency < field.min:
+            field.value = field.max = field.min
+        else:
+            field.value = field.max
+
     def _run_baseline_preserving_search_space(self):
         """Run baseline evaluation while preserving search-space data fields.
 
@@ -884,12 +920,7 @@ class PSOOptimizer(PerformanceTuner):
                     _concurrency = self.scheduler.benchmark.get_best_concurrency()
                     for _field in self.target_field:
                         if _field.name in CONCURRENCYS and _field.min != _field.max:
-                            if _field.min < _concurrency < _field.max:
-                                _field.value = _field.max = _concurrency
-                            elif _concurrency < _field.min:
-                                _field.value = _field.max = _field.min
-                            else:
-                                _field.value = _field.max
+                            self._narrow_concurrency_field(_field, _concurrency)
             else:
                 self.default_res = self._run_baseline_preserving_search_space()
                 self._raise_if_baseline_failed()

@@ -429,6 +429,67 @@ class TestPSOOptimizer:
         return PSOOptimizer(MagicMock(), target_field=default_support_field)
 
 
+class TestNarrowConcurrencyField:
+    """Coverage for PSOOptimizer._narrow_concurrency_field.
+
+    The measured sustainable concurrency is applied uniformly to numeric enum
+    fields (whose legal candidates live in ``dtype_param``, independent of the
+    possibly-normalized ``min``/``max``) while scalar fields keep the original
+    min/max clamping.
+    """
+
+    @staticmethod
+    def _field(**kwargs):
+        kwargs.setdefault("name", "CONCURRENCY")
+        return OptimizerConfigField(**kwargs)
+
+    @pytest.mark.parametrize(
+        "field_kwargs, concurrency, expected_ladder, expected_value",
+        [
+            # Real min/max enum: inner branch of the original code.
+            (dict(dtype="enum", min=16, max=64, dtype_param=[16, 32, 64]), 38, [16, 32], 32),
+            # Normalized min/max (range_to_enum): previously fell through to the
+            # else branch and wrote an off-ladder value.
+            (dict(dtype="enum", min=0, max=1, dtype_param=[16, 32, 48, 64]), 38, [16, 32], 32),
+            # Measured concurrency above every option: no clipping needed.
+            (dict(dtype="enum", min=0, max=1, dtype_param=[16, 32, 64]), 100, [16, 32, 64], 64),
+            # Measured concurrency below every option: keep the smallest legal member.
+            (dict(dtype="enum", min=0, max=1, dtype_param=[16, 32, 64]), 8, [16], 16),
+            # Unsorted ladder: clipped[-1] must be the largest legal value, not the
+            # last element of the raw (order-preserving) filter result.
+            (dict(dtype="enum", min=0, max=1, dtype_param=[128, 64, 32]), 100, [32, 64], 64),
+            # Unsorted ladder, concurrency below every option: fall back to the true minimum.
+            (dict(dtype="enum", min=0, max=1, dtype_param=[64, 128, 32]), 8, [32], 32),
+        ],
+    )
+    def test_numeric_enum_clips_ladder(self, field_kwargs, concurrency, expected_ladder, expected_value):
+        field = self._field(**field_kwargs)
+        PSOOptimizer(MagicMock())._narrow_concurrency_field(field, concurrency)
+        assert field.dtype_param == expected_ladder
+        assert field.value == expected_value
+
+    @pytest.mark.parametrize(
+        "min_value, max_value, concurrency, expected_value, expected_max",
+        [
+            (10, 1001, 38, 38, 38),
+            (10, 1001, 5, 10, 10),
+            (10, 1001, 2000, 1001, 1001),
+        ],
+    )
+    def test_scalar_field_keeps_original_clamping(
+        self, min_value, max_value, concurrency, expected_value, expected_max
+    ):
+        field = self._field(dtype="int", min=min_value, max=max_value)
+        PSOOptimizer(MagicMock())._narrow_concurrency_field(field, concurrency)
+        assert field.value == expected_value
+        assert field.max == expected_max
+
+    def test_string_enum_is_not_clipped(self):
+        field = self._field(dtype="enum", min=0, max=1, dtype_param=["a", "b"])
+        PSOOptimizer(MagicMock())._narrow_concurrency_field(field, 1)
+        assert field.dtype_param == ["a", "b"]
+
+
 @patch("optix.optimizer.optimizer.field_to_param")
 def test_refine_optimization_candidates(field_to_param_patch):
     field_to_param_patch.side_effect = [[3, 4], [7, 1]]
