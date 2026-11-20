@@ -748,6 +748,48 @@ class TestBeforeRunEnvHandling:
         assert "$REQUESTRATE" not in process.command
         process.stop(del_log=True)
 
+    @pytest.mark.parametrize("invalid_value", [-1.0, 0.0, float("nan"), float("inf")])
+    def test_evalscope_rate_flag_removed_with_invalid_value(self, invalid_value):
+        """Regression: evalscope uses --rate (not --request-rate); an invalid/non-positive
+        REQUESTRATE must remove the dangling flag too, leaving no bare '--rate'.
+        """
+        process = CustomProcess()
+        process.command = ["evalscope", "perf", "--parallel", "$CONCURRENCY", "--rate", "$REQUESTRATE"]
+        run_params = (
+            OptimizerConfigField(
+                name="REQUESTRATE",
+                config_position="env",
+                min=0,
+                max=100,
+                dtype="float",
+                value=invalid_value,
+            ),
+        )
+        process.before_run(run_params)
+        assert "--rate" not in process.command, f"left dangling --rate for value={invalid_value!r}"
+        assert "$REQUESTRATE" not in process.command
+        process.stop(del_log=True)
+
+    def test_evalscope_rate_flag_kept_with_positive_value(self):
+        """Regression: a positive REQUESTRATE keeps evalscope's --rate <value> pair intact."""
+        process = CustomProcess()
+        process.command = ["evalscope", "perf", "--parallel", "$CONCURRENCY", "--rate", "$REQUESTRATE"]
+        run_params = (
+            OptimizerConfigField(
+                name="REQUESTRATE",
+                config_position="env",
+                min=0,
+                max=100,
+                dtype="float",
+                value=10.0,
+            ),
+        )
+        process.before_run(run_params)
+        assert "--rate" in process.command
+        assert "$REQUESTRATE" not in process.command
+        assert process.command[process.command.index("--rate") + 1] == "10.0"
+        process.stop(del_log=True)
+
     def test_env_nan_value_removed(self):
         """Test env with NaN value is considered invalid and removed"""
         process = CustomProcess()

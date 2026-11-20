@@ -39,14 +39,17 @@ from ...io_utils import open_file
 from ...logging import format_subprocess_start
 from ..utils import backup, close_file_fp, kill_children, kill_process, remove_file
 
-# Mapping from field name to CLI flag name, used to remove CLI flags when removing invalid values
-FIELD_TO_CLI_FLAG = {
-    "REQUESTRATE": "--request-rate",
+# Mapping from field name to CLI flag name(s), used to remove CLI flags when removing
+# name the same tuning quantity differently (vLLM: --request-rate, evalscope perf: --rate).
+FIELD_TO_CLI_FLAGS = {
+    "REQUESTRATE": ("--request-rate", "--rate"),
 }
 
-# Fields whose values are non-positive (<=0) should be considered invalid and CLI params removed
+# Fields whose values are non-positive (<=0) should be considered invalid and CLI params removed.
+# Dropping `--rate 0` is safe for evalscope: evalscope's default value for `--rate` is also 0
+# (= unlimited traffic), so removing the explicit `--rate 0` leaves the same unlimited behaviour.
 # Note: non-positive filtering is a semantic constraint for specific fields, not a universal behavior
-NON_POSITIVE_INVALID_FIELDS = frozenset(FIELD_TO_CLI_FLAG.keys())
+NON_POSITIVE_INVALID_FIELDS = frozenset(FIELD_TO_CLI_FLAGS.keys())
 
 SENSITIVE_ENV_PATTERNS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
@@ -297,14 +300,14 @@ class CustomProcess:
                 if _var_name not in self.command:
                     continue
                 _i = self.command.index(_var_name)
-                _cli_flag = FIELD_TO_CLI_FLAG.get(_env_name)
+                _cli_flags = FIELD_TO_CLI_FLAGS.get(_env_name, ())
                 # Specific fields (e.g. REQUESTRATE) with non-positive values are considered invalid, to avoid causing assertion errors in benchmark
                 if not value_flag and isinstance(k.value, (int, float)) and k.value <= 0:
                     if _env_name in NON_POSITIVE_INVALID_FIELDS:
                         value_flag = True
                 if value_flag:
                     self.command.pop(_i)
-                    if _cli_flag and _i > 0 and self.command[_i - 1] == _cli_flag:
+                    if _i > 0 and self.command[_i - 1] in _cli_flags:
                         self.command.pop(_i - 1)
                 else:
                     self.command[_i] = str(k.value)
