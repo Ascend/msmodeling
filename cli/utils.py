@@ -19,7 +19,7 @@ import logging
 import os
 import re
 import sys
-from typing import Any
+from typing import Any, Optional
 
 from cli.spec_cli import (
     METAVAR_FLOAT,
@@ -57,6 +57,8 @@ _NEW_SPEC_OPTIONS = (
     "--acceptance-length",
 )
 
+DEFAULT_LOG_LEVEL = "error"
+
 LOG_LEVELS = {
     "debug": logging.DEBUG,
     "info": logging.INFO,
@@ -65,6 +67,29 @@ LOG_LEVELS = {
     "critical": logging.CRITICAL,
 }
 LOG_FORMAT = "[%(levelname)s] [%(name)s] %(message)s"
+
+
+def configure_logging(log_level: Optional[str] = DEFAULT_LOG_LEVEL) -> None:
+    """Configure root logging for CLI entry points.
+
+    Applies a single, consistent log format and honors ``log_level`` even when logging
+    was already configured (e.g. by an imported module or a previously run subcommand)
+    via ``force=True``. Logs are emitted to stderr so stdout stays reserved for
+    machine-parseable command results.
+
+    ``log_level`` is normalized to lowercase (and stripped) so callers do not need to
+    pre-process the value; an unknown or falsy value falls back to ``DEFAULT_LOG_LEVEL``.
+    """
+    normalized = (log_level or DEFAULT_LOG_LEVEL).lower().strip()
+    if normalized not in LOG_LEVELS:
+        normalized = DEFAULT_LOG_LEVEL
+    # ``force`` reconfigures even if logging was already set up. It is available on
+    # every interpreter the repo supports (requires-python >= 3.10; ``force`` since 3.8).
+    logging.basicConfig(
+        level=LOG_LEVELS[normalized],
+        format=LOG_FORMAT,
+        force=True,
+    )
 
 
 def check_device_targets(args: argparse.Namespace, logger: logging.Logger) -> list[str] | None:

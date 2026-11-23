@@ -23,7 +23,6 @@ import torch
 from cli.logo import print_logo
 from cli.registry.argparse_adapter import build_argparser, parse_module_args
 from cli.registry.modules import get_spec
-from cli.spec_cli import configure_std_logging
 from tensor_cast import device_profiles  # noqa: F401
 from tensor_cast.compilation import get_backend
 from tensor_cast.core.quantization.config import create_quant_config
@@ -53,7 +52,7 @@ from tensor_cast.quantize_utils import QuantGranularity
 from tensor_cast.runtime import Runtime
 from tensor_cast.utils import str_to_dtype
 
-from ..utils import parse_int_range
+from ..utils import configure_logging, parse_int_range
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +291,7 @@ def run_inference(
     else:
         cfg_parallel_group = None
 
-    print("Preparing dummy input tensors...")
+    logger.info("Preparing dummy input tensors...")
     input_kwargs = generate_diffusers_inputs(batch_size, height, width, frame_num, seq_len, model_config)
     input_kwargs, split_dim = process_input(input_kwargs, model_config)
 
@@ -301,7 +300,9 @@ def run_inference(
         # Keep one transformer forward per denoising step in simulation.
         cfg_input_kwargs = _duplicate_batch_tensors_for_cfg(input_kwargs, batch_size)
         if "hidden_states" in cfg_input_kwargs:
-            print(f"CFG enabled (batch-concat): effective batch_size={cfg_input_kwargs['hidden_states'].shape[0]}")
+            logger.info(
+                "CFG enabled (batch-concat): effective batch_size=%s", cfg_input_kwargs['hidden_states'].shape[0]
+            )
     active_inputs = cfg_input_kwargs or input_kwargs
 
     if compile:
@@ -319,8 +320,8 @@ def run_inference(
                 fullgraph=not compile_allow_graph_break,
             )
 
-    print(input_kwargs)
-    print("Running simulated inference...")
+    logger.debug("input_kwargs: %s", input_kwargs)
+    logger.info("Running simulated inference...")
     run_start = time.perf_counter()
     original_sp_group = get_sp_group()
 
@@ -352,15 +353,20 @@ def run_inference(
         set_sp_group(original_sp_group)
 
     run_end = time.perf_counter()
-    print()
 
+    # Kept on stdout (not logger) on purpose: this line is user-facing, appears as
+    # the first line of the documented example output, and sits right before the
+    # performance table below (also stdout). At the default --log-level (error) a
+    # logger.info would be filtered out and drop from the expected output.
     print(f"Model compilation and execution time: {run_end - run_start}s")
     result = runtime.table_averages(group_by_input_shapes=False)
+    # Keep the performance table on stdout (not logger) on purpose: the performance
+    # regression benchmark harness captures stdout to parse "Total time for ..." metrics.
     print(result)
 
     if chrome_trace:
         runtime.export_chrome_trace(chrome_trace)
-        print(f"Chrome trace written to: {chrome_trace}")
+        logger.info("Chrome trace written to: %s", chrome_trace)
 
 
 def main():
@@ -373,7 +379,10 @@ def main():
     parser = build_argparser(spec)
     args = parse_module_args(spec, parser)
     print_logo()
-    configure_std_logging(args)
+    # args.log_level is already normalized by parse_module_args (resolve_log_level
+    # folds -v/-q into it); configure_logging applies it via force=True so the
+    # level is honored even if a library already configured the root logger.
+    configure_logging(getattr(args, "log_level", None))
 
     run_inference(
         device=args.device,

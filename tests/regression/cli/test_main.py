@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from unittest.mock import patch
 
 import cli
@@ -53,6 +54,7 @@ def test_handle_inference_command_prints_help_when_subcommand_missing(
 
 def test_handle_inference_command_rejects_unknown_subcommand(
     capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     inference_parser = argparse.ArgumentParser(prog="msmodeling inference")
     inference_parser.add_subparsers(dest="inference_command")
@@ -60,8 +62,10 @@ def test_handle_inference_command_rejects_unknown_subcommand(
 
     assert _handle_inference_command(args, [], inference_parser) == 1
     captured = capsys.readouterr()
-    assert "Unknown inference command" in captured.err
     assert "usage:" in captured.out
+    assert any(
+        record.levelno == logging.ERROR and "Unknown inference command" in record.message for record in caplog.records
+    )
 
 
 @pytest.mark.parametrize(

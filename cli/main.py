@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,8 @@ from cli.spec_cli import SpecArgumentParser, add_version_option
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 def _dispatch(main_callable: Callable[[], object], remaining: list[str]) -> int:
@@ -68,7 +71,7 @@ def _handle_inference_command(
     if args.inference_command is None:
         inference_parser.print_help()
         return 0
-    print(f"Unknown inference command: {args.inference_command}", file=sys.stderr)
+    logger.error("Unknown inference command: %s", args.inference_command)
     inference_parser.print_help()
     return 1
 

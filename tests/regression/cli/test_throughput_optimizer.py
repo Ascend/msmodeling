@@ -19,7 +19,7 @@ import re
 import sys
 import time
 from unittest import TestCase
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 
 import pytest
@@ -818,6 +818,195 @@ class TestCapacityPlanningArgSemantics(TestCase):
         with self.assertRaises(SystemExit):
             self._parse_args(["--num-devices=4", "--tp-sizes", "8"])
 
+    def test_arg_parse_stores_search_combination_warning_when_exceeding_limit(self):
+        # 4 devices with tp/ep/moe-dp {1,2,4} yields 8 combos per MTP size (24 total),
+        # which exceeds --max-search-combinations=1, so arg_parse stores the warning.
+        args = self._parse_args(
+            [
+                "--num-devices=4",
+                "--tp-sizes",
+                "1",
+                "2",
+                "4",
+                "--ep-sizes",
+                "1",
+                "2",
+                "4",
+                "--moe-dp-sizes",
+                "1",
+                "2",
+                "4",
+                "--max-search-combinations=1",
+            ]
+        )
+        self.assertTrue(args.search_combination_warning_emitted)
+        self.assertIn("Large number of parallel search combinations", args.search_combination_warning)
+        # tp/ep each resolve to 3 candidates (1, 2, 4), so the warning reflects them.
+        self.assertIn("TP:3", args.search_combination_warning)
+        self.assertIn("EP:3", args.search_combination_warning)
+
+    def test_arg_parse_does_not_store_warning_within_limit(self):
+        args = self._parse_args(
+            [
+                "--num-devices=4",
+                "--tp-sizes",
+                "1",
+                "2",
+                "4",
+                "--ep-sizes",
+                "1",
+                "2",
+                "4",
+                "--moe-dp-sizes",
+                "1",
+                "2",
+                "4",
+                "--max-search-combinations=100",
+            ]
+        )
+        self.assertFalse(args.search_combination_warning_emitted)
+        self.assertIsNone(args.search_combination_warning)
+
+    def test_main_emits_search_combination_warning_after_logging_is_configured(self):
+        """The stored warning must be emitted via logger.warning after configure_logging.
+
+        arg_parse stores the message; main() emits it through the module logger
+        (logger.warning) only after configure_logging has run, so the warning
+        respects --log-level. Heavy downstream work is stubbed so the test only
+        exercises the deferred-warning path. The warning is captured by patching
+        ``logging.getLogger`` (main() rebinds its local ``logger`` from
+        ``logging.getLogger(__name__)``, so patching the module attribute would be
+        bypassed).
+        """
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        class _Args:
+            model_id = "Qwen/Qwen3-32B"
+            compilation_config = None
+            speculative_method = None
+            search_combination_warning_emitted = True
+            search_combination_warning = "Large number of parallel search combinations (24 = TP:4 ...)."
+            device = ["TEST_DEVICE"]
+            num_devices = 4
+            input_length = 1024
+            output_length = 512
+            disagg = False
+            enable_optimize_prefill_decode_ratio = False
+            ttft_limits = None
+            tpot_limits = None
+            num_mtp_tokens = 1
+            num_mtp_token_sizes = []
+            mtp_acceptance_rate = [0.5, 0.5, 0.5]
+            prefill_devices_per_instance = None
+            decode_devices_per_instance = None
+            target_qps = None
+
+        # Shared call-order log: the mocked configure_logging and logger.warning
+        # both record into it, so the assertion does not depend on mock ordering.
+        order = []
+
+        def _configure(*_a, **_k):
+            order.append("configure")
+
+        def _warn(*_a, **_k):
+            order.append("warning")
+
+        mock_logger = MagicMock()
+        mock_logger.warning.side_effect = _warn
+
+        with (
+            patch.object(throughput_optimizer_module, "arg_parse", return_value=_Args()),
+            patch.object(throughput_optimizer_module, "print_logo"),
+            patch.object(throughput_optimizer_module, "configure_logging", side_effect=_configure) as configure,
+            patch.object(throughput_optimizer_module, "apply_compilation_config"),
+            patch.object(throughput_optimizer_module, "check_device_targets", return_value=["TEST_DEVICE"]),
+            patch.object(throughput_optimizer_module, "run_multi_device_loop", return_value=[]),
+            patch.object(throughput_optimizer_module, "render_cross_hardware_summary"),
+            patch("logging.getLogger", return_value=mock_logger),
+        ):
+            throughput_optimizer_module.main()
+
+        # configure_logging ran, and it ran *before* the warning was emitted.
+        configure.assert_called_once()
+        self.assertEqual(order, ["configure", "warning"], "configure_logging must run before the warning")
+        # The notice is passed as logger.warning("%s", message): message is the
+        # second positional argument (not a format string), so assert on [1][1].
+        self.assertIn("Large number of parallel search combinations", mock_logger.warning.call_args[0][1])
+
+    def test_search_combination_warning_respects_log_level(self):
+        """A logger.warning for the notice passes at WARNING, is dropped at ERROR.
+
+        configure_logging applies the root level via force=True; the module logger
+        inherits that level, so isEnabledFor(WARNING) reflects the real gating.
+        This avoids force=True wiping the capture handler (which would make any
+        caplog-based assertion vacuous) and leaks no handler/level state.
+        """
+        import logging
+
+        from cli.utils import configure_logging
+
+        module_logger = logging.getLogger(THROUGHPUT_OPTIMIZER_MODULE)
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        try:
+            configure_logging("warning")
+            self.assertTrue(module_logger.isEnabledFor(logging.WARNING), "warning must pass at WARNING level")
+            configure_logging("error")
+            self.assertFalse(module_logger.isEnabledFor(logging.WARNING), "warning must be suppressed at ERROR level")
+        finally:
+            # force=True removes/closes handlers and rewrites the root level;
+            # restore the original so pytest's capture handler and other tests
+            # are not affected by this test's real configure_logging calls.
+            for handler in root.handlers:
+                if handler not in saved_handlers:
+                    root.removeHandler(handler)
+                    handler.close()
+            root.handlers[:] = saved_handlers
+            root.setLevel(saved_level)
+
+    def test_main_wires_log_level_into_configure_logging(self):
+        """main() must honor --log-level by routing it through cli.utils.configure_logging.
+
+        Before the fix the entry point called configure_std_logging (no force),
+        so a library that had already configured the root logger made --log-level
+        a no-op. It now calls configure_logging(args.log_level), which applies the
+        level via force=True.
+        """
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        class _Args:
+            log_level = "warning"
+            model_id = "Qwen/Qwen3-32B"
+            compilation_config = None
+            device = ["TEST_DEVICE"]
+            num_devices = 4
+            input_length = 1024
+            output_length = 512
+            disagg = False
+            enable_optimize_prefill_decode_ratio = False
+            ttft_limits = None
+            tpot_limits = None
+            num_mtp_tokens = 1
+            num_mtp_token_sizes = []
+            mtp_acceptance_rate = [0.5, 0.5, 0.5]
+            prefill_devices_per_instance = None
+            decode_devices_per_instance = None
+            target_qps = None
+
+        with (
+            patch.object(throughput_optimizer_module, "arg_parse", return_value=_Args()),
+            patch.object(throughput_optimizer_module, "print_logo"),
+            patch.object(throughput_optimizer_module, "configure_logging") as mock_configure,
+            patch.object(throughput_optimizer_module, "apply_compilation_config"),
+            patch.object(throughput_optimizer_module, "check_device_targets", return_value=["TEST_DEVICE"]),
+            patch.object(throughput_optimizer_module, "run_multi_device_loop", return_value=[]),
+            patch.object(throughput_optimizer_module, "render_cross_hardware_summary"),
+        ):
+            throughput_optimizer_module.main()
+
+        mock_configure.assert_called_once_with("warning")
+
 
 class TestCapacityPlanningModeSelection(TestCase):
     """--target-qps mode dispatch: disagg requires exactly one phase SLO limit."""
@@ -912,7 +1101,7 @@ class TestCapacityPlanningAutoModeCli(TestCase):
         with (
             patch.object(sys, "argv", argv),
             patch.object(throughput_optimizer_module, "print_logo"),
-            patch.object(throughput_optimizer_module, "configure_std_logging"),
+            patch.object(throughput_optimizer_module, "configure_logging"),
             patch.object(throughput_optimizer_module, "run_capacity_planning", return_value=0) as mock_capacity,
         ):
             self.assertEqual(throughput_optimizer_module.main(), 0)

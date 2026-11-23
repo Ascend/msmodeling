@@ -162,12 +162,12 @@ def _run_throughput_sweep(params: dict[str, Any]) -> list[dict[str, Any]]:
     disagg_mode = bool(args.disagg) and not pd_ratio_mode
 
     # Mirror the CLI's pre-flight combination-count warning (cli/inference/
-    # throughput_optimizer.py). The CLI uses ``print(..., file=sys.stderr)``
-    # which is always visible; ParallelRunner uses ``logger.warning`` which
-    # the worker's log-level filter (default ``error``) would silently drop.
-    # Emit here so the warning is captured into the job log regardless of
-    # log_level, then flag ``search_combination_warning_emitted`` to prevent
-    # ParallelRunner from repeating it.
+    # throughput_optimizer.py). Emit it here via ``print`` so the web-UI job log
+    # captures the warning regardless of the runner's log_level, then flag
+    # ``search_combination_warning_emitted`` to prevent ParallelRunner from
+    # repeating it. (The CLI itself routes this warning through ``logger.warning``
+    # after ``configure_logging``, so it respects ``--log-level``; the web-UI path
+    # deliberately uses ``print`` because the job log is the only surface here.)
     tp_cands, ep_cands, moe_dp_cands, mtp_cands = resolve_parallel_search_candidates(
         args.tp_sizes,
         args.ep_sizes,

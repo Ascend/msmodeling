@@ -24,7 +24,6 @@ import time
 from cli.logo import print_logo
 from cli.registry.argparse_adapter import build_argparser, parse_module_args
 from cli.registry.modules import get_spec
-from cli.spec_cli import configure_std_logging
 from serving_cast.service.optimizer_curve_plots import (
     render_cross_hardware_summary,
     run_multi_device_loop,
@@ -39,8 +38,8 @@ from tensor_cast import device_profiles  # noqa: F401  (registers device profile
 from tensor_cast.core.compilation_config import apply_compilation_config
 
 from ..utils import (
-    LOG_FORMAT,
     check_device_targets,
+    configure_logging,
     draft_method,
     resolve_draft_block_and_acceptance,
     resolve_num_speculative_tokens_to_block,
@@ -187,6 +186,7 @@ def arg_parse():
     # against each derived budget. None of these locals are consumed downstream;
     # ParallelRunner re-resolves the candidate ranges from the actual device count.
     args.search_combination_warning_emitted = False
+    args.search_combination_warning = None
     if args.num_devices is not None:
         tp_candidates, ep_candidates, moe_dp_candidates, mtp_candidates = resolve_parallel_search_candidates(
             args.tp_sizes,
@@ -223,15 +223,15 @@ def arg_parse():
         if args.max_search_combinations and total_combinations > args.max_search_combinations:
             args.search_combination_warning_emitted = True
             spec_label = "Spec" if draft_method(args) is not None else "MTP"
-            print(
-                "[WARNING] Large number of parallel search combinations "
+            # Store the warning message; main() emits it via logger.warning after
+            # logging is configured, so it respects --log-level.
+            args.search_combination_warning = (
+                "Large number of parallel search combinations "
                 f"({total_combinations} = TP:{len(tp_candidates)} x EP:{len(ep_candidates)} "
                 f"x MOE-DP:{len(moe_dp_candidates)} x {spec_label}:{len(mtp_candidates)} x DCP:{len(dcp_candidates)}). "
                 "Optimization may take a long time. Consider narrowing --tp-sizes, --ep-sizes, "
                 "--moe-dp-sizes, --num-mtp-tokens/--num-speculative-tokens, or --dcp-sizes; "
-                "or increase --max-search-combinations.",
-                file=sys.stderr,
-                flush=True,
+                "or increase --max-search-combinations."
             )
 
     return args
@@ -309,8 +309,22 @@ def main():
     start_time = time.time()
     args = arg_parse()
     print_logo()
-    configure_std_logging(args, log_format=LOG_FORMAT)
+    # args.log_level is already normalized by parse_module_args (resolve_log_level
+    # folds -v/-q into it); configure_logging applies it via force=True so the
+    # level is honored even if a library already configured the root logger.
+    configure_logging(getattr(args, "log_level", None))
     logger = logging.getLogger(__name__)
+
+    if getattr(args, "search_combination_warning_emitted", False):
+        # Emitted via logger.warning after configure_logging so it respects
+        # --log-level (default ``error`` suppresses it; pass ``--log-level warning``
+        # to see it). ParallelRunner skips its own copy because
+        # search_combination_warning_emitted is already True. The message is passed
+        # as an argument (not a format string) so an embedded ``%`` is safe, and the
+        # ``if message`` guard turns a missing message into a no-op.
+        message = getattr(args, "search_combination_warning", None)
+        if message:
+            logger.warning("%s", message)
 
     apply_compilation_config(args.compilation_config)
 
@@ -401,7 +415,7 @@ def main():
 
     end_time = time.time()
     elapsed_time = end_time - start_time
-    print(f"All experiments completed in {elapsed_time:.2f} seconds.")
+    logger.info("All experiments completed in %.2f seconds.", elapsed_time)
 
 
 if __name__ == "__main__":

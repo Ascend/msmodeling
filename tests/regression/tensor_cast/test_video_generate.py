@@ -118,6 +118,30 @@ def test_bsa_context_aggregates_fallbacks_and_warns_once(caplog):
     assert "causal=2, gqa=1" in warnings[0].message
 
 
+def test_video_generate_main_applies_log_level_via_configure_logging():
+    """The video entry point must wire --log-level through cli.utils.configure_logging.
+
+    main() previously called configure_std_logging (spec_cli, no force), so a
+    library that had already configured the root logger made --log-level a no-op.
+    It now calls configure_logging (force=True), which honors the level.
+    """
+    from cli.inference import video_generate as video_generate_mod
+
+    args = MagicMock()
+    args.log_level = "debug"
+    with (
+        patch.object(video_generate_mod, "get_spec"),
+        patch.object(video_generate_mod, "build_argparser"),
+        patch.object(video_generate_mod, "parse_module_args", return_value=args),
+        patch.object(video_generate_mod, "print_logo"),
+        patch.object(video_generate_mod, "run_inference"),
+        patch.object(video_generate_mod, "configure_logging") as mock_configure,
+    ):
+        video_generate_mod.main()
+
+    mock_configure.assert_called_once_with("debug")
+
+
 class TestVideoGeneration(unittest.TestCase):
     """Unit tests for video_generate.py script."""
 
