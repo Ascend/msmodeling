@@ -609,6 +609,39 @@ def test_registration_rejects_wrong_model_and_depth(artifacts):
         registry.register_template(source, MODEL, 3, do_compile=True)
 
 
+def test_registration_refuses_to_replace_a_different_recorded_identity(tmp_path, monkeypatch):
+    """A local-path capture must not overwrite the repository-id artifact.
+
+    The destination name is the model-name slug, so
+    ``/data/models/GLM-5.3`` and ``zai-org/GLM-5.3`` compete for the same file.
+    Replacing the repository-id artifact with a path-only one would make every
+    repository-id request fall back to native.
+    """
+    from template_engine.graph_codec import encode_document
+
+    folder = tmp_path / 'registry'
+    monkeypatch.setattr(registry, '_TEMPLATES_DIR', folder)
+    monkeypatch.setattr(registry, '_LEGACY_PATH', tmp_path / 'absent.json.xz')
+    registry._MODEL_META_CACHE.clear()
+    checkout = tmp_path / 'models' / 'GLM-5.3'
+    checkout.mkdir(parents=True)
+
+    def install(identity, name):
+        path = tmp_path / name
+        path.write_bytes(
+            encode_document(
+                {'meta': {'model_ids': [identity], 'num_hidden_layers': 2, 'do_compile': True}}, 'template_lazy/1'
+            )
+        )
+        return path
+
+    registry.register_template(install('zai-org/GLM-5.3', 'repo.json.xz'), 'zai-org/GLM-5.3', 2, do_compile=True)
+    with pytest.raises(ValueError, match='refusing to overwrite'):
+        registry.register_template(install(str(checkout), 'path.json.xz'), str(checkout), 2, do_compile=True)
+    # Refreshing the same identity over itself stays allowed.
+    registry.register_template(install('zai-org/GLM-5.3', 'repo2.json.xz'), 'zai-org/GLM-5.3', 2, do_compile=True)
+
+
 def test_optimizer_request_preserves_official_dcp_axis():
     from tensor_cast.model_config import ParallelConfig
     from template_engine.runner_bridge import TemplateBackedModelRunner
@@ -838,6 +871,115 @@ def test_review_oversized_file_is_rejected_before_body_read(tmp_path, monkeypatc
 def test_review_malformed_registry_identities_do_not_crash(identities):
     meta = {"model_ids": identities}
     assert registry._model_matches(meta, MODEL) is False
+
+
+def test_identity_matching_accepts_local_checkouts_but_not_same_tailed_owners(tmp_path):
+    """Issue #667: a local path is the same model as its repository id.
+
+    The CLI is normally pointed at a downloaded checkout while the artifact
+    records the repository id it was captured from, so discovery and serving
+    must both accept that spelling - and only that one.
+    """
+    from template_engine.model_identity import identity_matches
+
+    checkout = tmp_path / 'GLM-5.3'
+    checkout.mkdir()
+
+    # Repository ids still compare as text (case-insensitively), unchanged.
+    assert identity_matches(['zai-org/GLM-5.3'], 'zai-org/GLM-5.3')
+    assert identity_matches(['zai-org/GLM-5.3'], 'ZAI-ORG/glm-5.3')
+    # A local checkout is addressed by its directory name...
+    assert identity_matches(['zai-org/GLM-5.3'], str(checkout))
+    # ...but only in that direction.  A template captured from a local
+    # directory records no repository, so it serves that path and nothing
+    # else: not a repository id, and not another checkout with the same tail.
+    assert identity_matches([str(checkout)], str(checkout))
+    assert not identity_matches([str(checkout)], 'zai-org/GLM-5.3')
+    same_tail = tmp_path / 'other' / 'GLM-5.3'
+    same_tail.mkdir(parents=True)
+    assert not identity_matches([str(checkout)], str(same_tail))
+    assert not identity_matches([str(checkout)], 'someone-else/GLM-5.3')
+
+    # Two owners can publish the same tail; the artifacts are not interchangeable.
+    assert not identity_matches(['zai-org/GLM-5.3'], 'someone-else/GLM-5.3')
+    # A checkout of a different model has a different tail.
+    other = tmp_path / 'GLM-5.4'
+    other.mkdir()
+    assert not identity_matches(['zai-org/GLM-5.3'], str(other))
+    # A path that does not exist is still a repository id: a typo must not fall
+    # back onto the template of a same-tailed checkout.
+    (tmp_path / 'gone').mkdir()
+    assert not identity_matches(['zai-org/GLM-5.3'], str(tmp_path / 'gone' / 'GLM-5.3'))
+
+
+def test_local_checkout_requires_an_explicit_path_spelling(tmp_path, monkeypatch):
+    """A repository id is also a relative path; only explicit paths are checkouts.
+
+    ``zai-org/GLM-5.3`` parses as a relative path, so a working directory that
+    happens to contain that folder must not turn the repository id into a
+    checkout - that would disable the local-checkout match and let another
+    owner's id match by slug.
+    """
+    from template_engine.model_identity import identity_matches, is_local_model_path
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / 'zai-org' / 'GLM-5.3').mkdir(parents=True)
+    (tmp_path / 'someone-else' / 'GLM-5.3').mkdir(parents=True)
+
+    assert not is_local_model_path('zai-org/GLM-5.3')
+    assert not is_local_model_path('someone-else/GLM-5.3')
+    checkout = tmp_path / 'models' / 'GLM-5.3'
+    checkout.mkdir(parents=True)
+    assert identity_matches(['zai-org/GLM-5.3'], str(checkout))
+    assert not identity_matches(['zai-org/GLM-5.3'], 'someone-else/GLM-5.3')
+
+    # Explicit checkout spellings still count.
+    assert is_local_model_path('./zai-org/GLM-5.3')
+    assert is_local_model_path('~')
+    assert not is_local_model_path('zai-org/GLM-5.4')
+
+    # A trailing separator names the same checkout.
+    assert identity_matches([str(checkout)], str(checkout) + '/')
+    assert identity_matches(['zai-org/GLM-5.3'], str(checkout) + '/')
+
+
+def test_identity_matching_refuses_mixed_malformed_and_unknown_metadata(tmp_path):
+    from template_engine.model_identity import identity_matches
+
+    # Mixed corpus: captured from several models, no single architecture.
+    assert not identity_matches(['a/X', 'b/Y'], 'a/X')
+    assert not identity_matches([], 'a/X')
+    assert not identity_matches('a/X', 'a/X')
+    assert not identity_matches([7], 'a/X')
+    assert not identity_matches(['a/X'], None)
+    # The 'unknown' sentinel means "no recorded identity", so it matches
+    # neither a directory that happens to be called 'unknown' nor a request
+    # that spells the sentinel.
+    sentinel_dir = tmp_path / 'unknown'
+    sentinel_dir.mkdir()
+    assert not identity_matches(['unknown'], str(sentinel_dir))
+    assert not identity_matches(['unknown'], 'unknown')
+    # Artifacts built before model_ids existed stored a bare slug.  A slug
+    # cannot prove which repository it came from, so it only matches a
+    # concrete checkout - never a repository id, which could belong to
+    # another owner with the same model name.
+    assert not identity_matches(['deepseek_v4_pro'], 'deepseek-ai/DeepSeek-V4-Pro')
+    assert not identity_matches(['deepseek_v4_pro'], 'other-org/DeepSeek-V4-Pro')
+    legacy_checkout = tmp_path / 'DeepSeek-V4-Pro'
+    legacy_checkout.mkdir()
+    assert identity_matches(['deepseek_v4_pro'], str(legacy_checkout))
+
+    # A tail with no ASCII alphanumerics folds to an empty slug.  Two empty
+    # slugs must not be treated as the same model (cache_io.model_slug applies
+    # the same "empty identity is unusable" rule).
+    chinese = tmp_path / '模型'
+    chinese.mkdir()
+    other_chinese = tmp_path / '其他模型'
+    other_chinese.mkdir()
+    assert not identity_matches([str(chinese)], str(other_chinese))
+    punctuation = tmp_path / '---'
+    punctuation.mkdir()
+    assert not identity_matches(['owner/---'], str(punctuation))
 
 
 def test_review_registry_requires_explicit_known_depth(tmp_path, monkeypatch):
@@ -1071,14 +1213,15 @@ def test_capture_metadata_write_failure_is_reported(monkeypatch, tmp_path):
 
 def test_windows_model_paths_use_short_names_and_keep_previous_discovery(tmp_path, monkeypatch):
     from template_engine.graph_codec import encode_document
-    import re
+    from template_engine.model_identity import legacy_template_slug
 
     identity = r'C:\models\Qwen3-0.6B'
     monkeypatch.setattr(registry, '_TEMPLATES_DIR', tmp_path)
     monkeypatch.setattr(registry, '_LEGACY_PATH', tmp_path / 'absent.json.xz')
     registry._MODEL_META_CACHE.clear()
     assert registry.slugify_model_id(identity) == 'qwen3_0_6b'
-    legacy = re.sub(r'[^0-9a-zA-Z]+', '_', identity).lower().strip('_')
+    legacy = legacy_template_slug(identity)
+    assert legacy != registry.slugify_model_id(identity)
     previous = tmp_path / f'{legacy}_cmp_on.json.xz'
     previous.write_bytes(
         encode_document(
@@ -1086,6 +1229,52 @@ def test_windows_model_paths_use_short_names_and_keep_previous_discovery(tmp_pat
         )
     )
     assert registry.template_path_for(identity, 28, do_compile=True) == str(previous)
+
+
+@pytest.mark.parametrize('artifact', ['glm_5_3_cmp_on', 'kimi_k3_cmp_on', 'deepseek_v4_pro_cmp_on'])
+def test_shipped_template_resolves_from_a_local_model_path(artifact, tmp_path):
+    """Issue #667: the shipped artifacts record a repository id, the CLI gets a path.
+
+    `msmodeling inference text-generate /home/.../models/GLM-5.3 --compile`
+    found ``glm_5_3_cmp_on.json.xz`` by slug and then rejected it because the
+    identity check compared the absolute path with ``zai-org/GLM-5.3``, so the
+    run silently fell back with ``reason=no_matching_registered_template``.
+    """
+    path = registry._TEMPLATES_DIR / f'{artifact}.json.xz'
+    meta = registry._load_meta(path)
+    assert meta is not None
+    identity = meta['model_ids'][0]
+    layers = meta['num_hidden_layers']
+    checkout = tmp_path / 'models' / identity.split('/')[-1]
+    checkout.mkdir(parents=True)
+
+    assert registry.template_path_for(str(checkout), layers, do_compile=meta['do_compile']) == str(path)
+
+    different = tmp_path / 'models' / f'{identity.split("/")[-1]}-different'
+    different.mkdir()
+    assert registry.template_path_for(str(different), layers, do_compile=meta['do_compile']) is None
+
+
+def test_generate_serves_a_local_checkout_of_the_declared_model(artifacts, tmp_path):
+    """The serving gate must agree with discovery (issue #667, second gate).
+
+    Relaxing only ``template_path_for`` would turn the fallback into
+    ``TemplateGraphRefusal('model identity mismatch')`` because
+    ``TemplateBackedModelRunner`` passes the same ``model_id`` into
+    ``generate``.
+    """
+    source, config, _targets, _training = artifacts
+    graph = load_template_graph(source)
+    checkout = tmp_path / 'models' / 'Workflow-Model'
+    checkout.mkdir(parents=True)
+    assert (
+        generate(graph, {**config, 'model_id': str(checkout)}, return_ops=True, num_hidden_layers=2)['covered'] is True
+    )
+
+    other = tmp_path / 'models' / 'Other-Model'
+    other.mkdir()
+    with pytest.raises(TemplateGraphRefusal, match='model identity mismatch'):
+        generate(graph, {**config, 'model_id': str(other)}, return_ops=True, num_hidden_layers=2)
 
 
 def test_compact_body_preserves_formulas_tensors_and_container_identity():
@@ -1213,12 +1402,26 @@ def test_text_generate_and_optimizer_share_template_switch():
 
 
 @pytest.mark.parametrize('enabled', [True, False])
-def test_text_generate_main_uses_registered_template_or_explicit_native(artifacts, monkeypatch, enabled):
+@pytest.mark.parametrize('model_id_source', ['repository-id', 'local-checkout'])
+def test_text_generate_main_uses_registered_template_or_explicit_native(
+    artifacts, monkeypatch, enabled, model_id_source, tmp_path
+):
+    """Issue #667, end to end: the CLI is pointed at the model checkout.
+
+    ``msmodeling inference text-generate /models/GLM-5.3 --compile`` used to
+    log ``reason=no_matching_registered_template`` and run natively because the
+    registered artifact only knows the repository id it was captured from.
+    """
     from cli.inference import text_generate
     from tensor_cast.model_config import ParallelConfig
 
     source, cfg, _, _ = artifacts
     registry.register_template(source, MODEL, 2, do_compile=True)
+    model_id = MODEL
+    if model_id_source == 'local-checkout':
+        checkout = tmp_path / 'models' / MODEL.split('/')[-1]
+        checkout.mkdir(parents=True)
+        model_id = str(checkout)
     calls = []
     metrics = SimpleNamespace(print_info=lambda: calls.append('print'))
 
@@ -1254,7 +1457,7 @@ def test_text_generate_main_uses_registered_template_or_explicit_native(artifact
     argv = [
         'text_generate',
         '--model-id',
-        MODEL,
+        model_id,
         '--num-devices',
         '2',
         '--num-queries',
