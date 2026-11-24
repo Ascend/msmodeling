@@ -33,6 +33,7 @@ Pipeline (run time, pure software):
 from __future__ import annotations
 
 from .graph_codec import read_artifact_bytes
+from .model_identity import identity_matches
 
 import sys
 import time
@@ -329,12 +330,13 @@ def generate(
         raise TemplateGraphRefusal(config, "compile provenance mismatch")
     # Model identity gate: a template carries the model it was induced from,
     # so serving a different model's config is refused instead of silently
-    # returning another architecture's graph.
+    # returning another architecture's graph.  The comparison is shared with
+    # discovery (template_engine.model_identity) so a local model path that
+    # resolved a template cannot be refused here on the same id.
     served_models = template_graph.get("meta", {}).get("model_ids")
     requested_model = config.get("model_id")
-    if served_models and requested_model:
-        if str(requested_model) not in {str(item) for item in served_models}:
-            raise TemplateGraphRefusal(config, "model identity mismatch")
+    if served_models and requested_model and not identity_matches(served_models, requested_model):
+        raise TemplateGraphRefusal(config, "model identity mismatch")
     from .cache_io import build_key_and_config
     from .coverage import describe_coverage
 

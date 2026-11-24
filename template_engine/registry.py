@@ -37,6 +37,14 @@ template built for another model must not silently answer lookups.  No
 match returns ``None`` and callers proceed without template acceleration
 (feature-invisible when absent).
 
+Identity matching is NOT implemented here: :mod:`.model_identity` defines it
+once, because the same question is asked again at serving time by
+:func:`~template_engine.template_graph.generate`.  In short, a template
+serves its own repository id and, when the request is a local model
+checkout (or the artifact stores a bare slug), the same model-name slug -
+so ``/models/GLM-5.3`` resolves the template built from ``zai-org/GLM-5.3``
+(issue #667).
+
 Compile-marker semantics are defined ONCE in :func:`_marker_matches` and
 shared by the locate and the register paths: an unspecified request
 (``None``) is an existence probe, while a boolean request matches only an
@@ -50,8 +58,9 @@ from .file_lock import destination_lock
 
 from .graph_codec import read_artifact_bytes
 
+from .model_identity import identity_matches, legacy_template_slug, slugify_model_id
+
 import logging
-import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -80,13 +89,6 @@ def load_registered_template(path):
         return cached[1]
 
 
-def slugify_model_id(model_id: str) -> str:
-    """``deepseek-ai/DeepSeek-V4-Pro`` -> ``deepseek_v4_pro``."""
-
-    tail = str(model_id).replace("\\", "/").rstrip("/").split("/")[-1]
-    return re.sub(r"[^0-9a-zA-Z]+", "_", tail).lower().strip("_")
-
-
 def _marker_matches(stored: Any, requested: bool | None) -> bool:
     """Compile-marker comparison, defined once (review issue #1).
 
@@ -102,19 +104,20 @@ def _marker_matches(stored: Any, requested: bool | None) -> bool:
 
 
 def _model_matches(meta, model_id):
+    """Identity check, delegated to :mod:`.model_identity`.
+
+    ``model_ids`` (the captured identities) is the authority when present;
+    artifacts built before it existed fall back to the single ``model``
+    field, which may be a repository id or a bare slug.
+    """
+
     identities = meta.get('model_ids')
     if identities is not None:
-        if (
-            not isinstance(identities, list)
-            or not identities
-            or any(not isinstance(value, str) for value in identities)
-        ):
-            return False
-        return {value.casefold() for value in identities} == {str(model_id).casefold()}
-    stored = str(meta.get('model', '')).casefold()
-    if '/' in stored:
-        return stored == str(model_id).casefold()
-    return bool(stored) and stored == slugify_model_id(model_id)
+        return identity_matches(identities, model_id)
+    stored = meta.get('model')
+    if not isinstance(stored, str) or not stored.strip():
+        return False
+    return identity_matches([stored], model_id)
 
 
 def _load_meta(path: Path) -> dict[str, Any] | None:
@@ -163,8 +166,7 @@ def template_path_for(
         return None
     slug = slugify_model_id(model_id)
     # Preserve discovery of artifacts previously named from a Windows path.
-    legacy_slug = re.sub(r'[^0-9a-zA-Z]+', '_', str(model_id).rstrip('/').split('/')[-1]).lower().strip('_')
-    slugs = dict.fromkeys((slug, legacy_slug))
+    slugs = dict.fromkeys((slug, legacy_template_slug(model_id)))
     suffixes = ('_cmp_on', '_cmp_off', '') if do_compile is None else (f"_cmp_{'on' if do_compile else 'off'}", '')
     candidates = [_TEMPLATES_DIR / f'{name}{suffix}.json.xz' for name in slugs for suffix in suffixes]
     candidates.append(_LEGACY_PATH)
@@ -193,6 +195,44 @@ def template_path_for(
             continue
         return str(candidate)
     return None
+
+
+def _declared_identities(meta: dict[str, Any]) -> tuple[str, ...]:
+    """Identities recorded in an artifact's ``meta.model_ids``.
+
+    Artifacts built before ``model_ids`` existed carry only ``meta.model``;
+    they report no identity here on purpose, so refreshing them stays allowed.
+    """
+
+    recorded = meta.get('model_ids')
+    if isinstance(recorded, (list, tuple)) and recorded:
+        return tuple(str(item) for item in recorded)
+    return ()
+
+
+def _check_overwrite_identity(destination: Path, meta: dict[str, Any]) -> None:
+    """Refuse to replace an artifact that records a different model identity.
+
+    The destination name is the model-name slug, so a capture taken from a
+    local directory (``/data/models/GLM-5.3``) maps onto the shipped
+    ``glm_5_3_cmp_on.json.xz``.  Overwriting it would replace a repository-id
+    artifact with one that only serves that path, and every repository-id
+    request would fall back to native.  Legacy artifacts without identities
+    stay replaceable (that is how they get refreshed).
+    """
+
+    if not destination.exists():
+        return
+    previous = _declared_identities(_load_meta(destination) or {})
+    incoming = _declared_identities(meta)
+    if not previous or not incoming:
+        return
+    if {item.casefold() for item in previous} != {item.casefold() for item in incoming}:
+        raise ValueError(
+            f'refusing to overwrite {destination.name}: it records {list(previous)}, '
+            f'the new artifact records {list(incoming)}; register under the recorded '
+            'identity or remove the old artifact first'
+        )
 
 
 def registration_path(model_id, do_compile):
@@ -225,6 +265,7 @@ def register_template(
     from .graph_codec import atomic_write_bytes
 
     with destination_lock(destination):
+        _check_overwrite_identity(destination, meta)
         atomic_write_bytes(destination, read_artifact_bytes(Path(source_path)))
         _MODEL_META_CACHE.pop(str(destination), None)
     return str(destination)
