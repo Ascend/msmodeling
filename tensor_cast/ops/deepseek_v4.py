@@ -37,10 +37,12 @@ def _(
 ) -> torch.Tensor:
     """Semantic op for writing V4 MLA window KV into cache.
 
-    V4's main attention path (Flash/Pro) materializes KV explicitly, then performs a
-    scatter-style cache update before sparse attention consumes the shared KV
-    memory. This op keeps that write visible in the semantic graph without
-    collapsing it back into the older `concat_and_cache_mla` abstraction.
+    V4's main attention path (Flash/Pro) materializes KV explicitly, then
+    performs a paged scatter-style cache update before sparse attention
+    consumes the shared KV memory. Prefill supplies one update row per valid
+    token and ``[block_id, block_offset]`` indices. This op keeps that write
+    visible in the semantic graph without collapsing it back into the older
+    `concat_and_cache_mla` abstraction.
 
     The op writes `kv` into `kv_cache` at `slot_mapping` positions and returns
     a functional handle to the updated cache (same shape/dtype as the input

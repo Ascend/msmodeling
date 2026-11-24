@@ -722,6 +722,49 @@ def test_v41_attention_wrapper_executes_window_and_guards_missing_owner():
             wrapper(hidden, rope, None, csa2_state=DeepseekV41SharedAttentionState())
 
 
+@pytest.mark.parametrize(
+    ("seq_len", "expected_updates", "expected_write_lengths"),
+    [
+        (3, [[0, 1, 2]], [3]),
+        (8, [[4, 5, 6, 7]], [4]),
+        (6, [[2, 3], [4, 5]], [2, 2]),
+    ],
+)
+def test_v41_prefill_scatter_preserves_circular_window_order(
+    seq_len,
+    expected_updates,
+    expected_write_lengths,
+):
+    attention = SimpleNamespace(window_size=4)
+    kv_window_entry = torch.arange(seq_len).reshape(1, seq_len, 1)
+    kv_cache = torch.zeros(1)
+    slot_mapping = torch.tensor([7])
+    meta_seq_lens = torch.tensor([seq_len])
+    calls = []
+
+    def _scatter(update, cache, mapping, write_len, seq_lens):
+        calls.append((update.clone(), cache.clone(), mapping, write_len, seq_lens))
+        return cache + 1
+
+    with patch("torch.ops.tensor_cast.scatter_nd_update_mla", side_effect=_scatter):
+        kv_for_attn, kv_attn_handle = DeepseekV4SparseAttention._scatter_window_kv_prefill(
+            attention,
+            kv_window_entry,
+            kv_cache,
+            slot_mapping,
+            seq_len,
+            meta_seq_lens,
+        )
+
+    assert kv_for_attn is kv_window_entry
+    assert [call[0].flatten().tolist() for call in calls] == expected_updates
+    assert [call[3] for call in calls] == expected_write_lengths
+    assert all(call[2] is slot_mapping and call[4] is meta_seq_lens for call in calls)
+    for index, call in enumerate(calls):
+        torch.testing.assert_close(call[1], kv_cache + index)
+    torch.testing.assert_close(kv_attn_handle, kv_cache + len(calls))
+
+
 def test_v41_source_publishes_both_quantized_cache_planes_and_tail():
     config = _tiny_config()
     with torch.device("meta"):

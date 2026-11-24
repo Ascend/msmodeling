@@ -59,10 +59,12 @@ from tensor_cast.layers.mla import (
     MultiheadLatentAttentionBase,
     _resolve_sparse_topk_limit,
 )
+from tensor_cast.device import DeviceProfile, TEST_DEVICE
 from tensor_cast.model_config import LinearQuantConfig, MlaConfig
+from tensor_cast.performance_model.bound_analyzer import StatsKey
+from tensor_cast.performance_model.op_estimator_registry import get_op_estimator
 from tensor_cast.performance_model.op_invoke_info import is_hif8_op_from_info, OpInvokeInfo
 from tensor_cast.quantize_utils import LinearQuantType
-from tensor_cast.device import TEST_DEVICE
 from tensor_cast.utils import SimFormat
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.performance_model.utils import is_hif8_op
@@ -765,6 +767,7 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
         assert wrapper.compress_ratio == 0
         assert wrapper.use_indexer is False
         assert wrapper.use_compressor is False
+        assert wrapper.qk_rope_head_dim == 64
 
     def test_v4_attention_wrapper_with_compressor(self):
         """Test V4 attention wrapper with compressor (ratio=4)."""
@@ -832,7 +835,8 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
             query_lens=torch.tensor([5], dtype=torch.long),
             slot_mapping=torch.tensor([0, 1, 2, 3, 4], dtype=torch.long),
         )
-        kv_cache = torch.randn(1, 4, 4)
+        kv_cache = torch.randn(2, 4, 4)
+        scatter_calls = []
 
         def _dynamic_quantize_symmetric(x, *_args, **_kwargs):
             return x, torch.ones(1, dtype=torch.float32, device=x.device)
@@ -845,11 +849,15 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
             assert _kwargs["query_lens"] is attention_meta.query_lens
             return q
 
+        def _scatter_full_prefill(update, cache, indices, *_args):
+            scatter_calls.append((update, cache, indices))
+            return kv_cache
+
         with (
             patch("torch.ops.tensor_cast.rms_norm", side_effect=lambda x, *_args, **_kwargs: x),
             patch("torch.ops.tensor_cast.apply_rope_inplace", side_effect=lambda *_args, **_kwargs: None),
             patch("torch.ops.tensor_cast.dynamic_quantize_symmetric", side_effect=_dynamic_quantize_symmetric),
-            patch("torch.ops.tensor_cast.scatter_nd_update_mla", side_effect=lambda _kv, cache, *_args: cache),
+            patch("torch.ops.tensor_cast.scatter_nd_update_mla", side_effect=_scatter_full_prefill),
             patch("torch.ops.tensor_cast.sparse_attn_sharedkv", side_effect=_sparse_attn_sharedkv),
         ):
             result, cache = wrapper(
@@ -862,6 +870,69 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
 
         assert result.shape == hidden_states.shape
         assert cache is None
+        assert len(scatter_calls) == 1
+        update, paged_cache, indices = scatter_calls[0]
+        assert update.shape == (5, 1, 4)
+        assert paged_cache.shape == (2, 4, 1, 4)
+        assert indices.shape == (5, 2)
+        assert indices.dtype == torch.int32
+
+    def test_v4_prefill_scatter_keeps_all_8070_rows(self):
+        inner = self._create_tiny_forward_inner_module()
+        mla_config = MlaConfig(module_name="DeepseekV4SparseAttention")
+        with patch(
+            "tensor_cast.layers.mla.MultiheadLatentAttentionTensorCast.__init__",
+            _stub_mla_tensor_cast_init,
+        ):
+            wrapper = DeepseekV4SparseAttention(mla_config, inner, self._mock_tp_group())
+
+        num_tokens = 8070
+        block_size = 32
+        kv = torch.empty(1, num_tokens, 4)
+        cache = torch.empty((num_tokens + block_size - 1) // block_size, block_size, 4)
+        slots = torch.arange(num_tokens)
+        captured = []
+
+        def _scatter(update, paged_cache, indices, *_args):
+            captured.append((update.shape, paged_cache.shape, indices.shape, indices.dtype))
+            return paged_cache
+
+        with patch("torch.ops.tensor_cast.scatter_nd_update_mla", side_effect=_scatter):
+            kv_for_attn, cache_handle = wrapper._scatter_full_kv_prefill(kv, cache, slots, num_tokens, None)
+
+        assert kv_for_attn is kv
+        assert cache_handle.shape == cache.shape
+        assert captured == [
+            (
+                torch.Size([8070, 1, 4]),
+                torch.Size([253, 32, 1, 4]),
+                torch.Size([8070, 2]),
+                torch.int32,
+            )
+        ]
+
+    def test_v4_prefill_scatter_validates_cache_metadata(self):
+        inner = self._create_tiny_forward_inner_module()
+        mla_config = MlaConfig(module_name="DeepseekV4SparseAttention")
+        with patch(
+            "tensor_cast.layers.mla.MultiheadLatentAttentionTensorCast.__init__",
+            _stub_mla_tensor_cast_init,
+        ):
+            wrapper = DeepseekV4SparseAttention(mla_config, inner, self._mock_tp_group())
+
+        kv = torch.empty(1, 2, 4)
+        slots = torch.arange(2)
+
+        kv_for_attn, cache_handle = wrapper._scatter_full_kv_prefill(kv, None, slots, 2, None)
+        assert kv_for_attn is kv
+        assert cache_handle is kv
+
+        with pytest.raises(ValueError, match="requires slot_mapping"):
+            wrapper._scatter_full_kv_prefill(kv, torch.empty(1, 2, 4), None, 2, None)
+        with pytest.raises(ValueError, match="Expected paged KV cache"):
+            wrapper._scatter_full_kv_prefill(kv, torch.empty(1, 2, 1, 4), slots, 2, None)
+        with pytest.raises(ValueError, match="Prefill produced 2 KV rows"):
+            wrapper._scatter_full_kv_prefill(kv, torch.empty(1, 2, 4), torch.arange(1), 2, None)
 
     def test_v4_attention_quant_config_describes_kv_storage(self):
         inner = self._create_tiny_forward_inner_module()
@@ -893,7 +964,8 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
             assert rope_head_dim == 2
             assert kv.dtype == torch.uint8
             assert kv.shape[-1] == 6
-            assert kv_dependency is kv_cache
+            assert kv_dependency.shape == kv_cache.shape
+            assert kv_dependency.untyped_storage().data_ptr() == kv_cache.untyped_storage().data_ptr()
             assert kv_dependency.dtype == torch.uint8
             return q
 
@@ -1319,7 +1391,7 @@ class TestDeepseekV4DecoderLayer(unittest.TestCase):
             first_k_dense_replace=0,
         )
 
-        with torch.device("meta"):
+        with init_on_device_without_buffers("meta"), no_init_weights():
             layer = DeepseekV4DecoderLayer(config, layer_idx=0)
         assert layer.hidden_size == 4096
         assert layer.layer_idx == 0
@@ -1343,12 +1415,11 @@ class TestDeepseekV4DecoderLayer(unittest.TestCase):
             first_k_dense_replace=3,
         )
 
-        with torch.device("meta"):
+        with init_on_device_without_buffers("meta"), no_init_weights():
             layer0 = DeepseekV4DecoderLayer(config, layer_idx=0)
-        assert hasattr(layer0, "mlp")
-
-        with torch.device("meta"):
             layer3 = DeepseekV4DecoderLayer(config, layer_idx=3)
+
+        assert hasattr(layer0, "mlp")
         assert hasattr(layer3, "mlp")
 
     def test_decoder_layer_ratio4_builds_indexer_and_compressor(self):
@@ -1849,11 +1920,16 @@ def test_v4_sparse_attention_reads_physical_rows(row_bytes):
 def test_v4_scatter_and_compressor_write_mixed_row_bytes():
     invoke = MagicMock()
     cache = torch.empty(1, 16, 576, dtype=torch.uint8)
-    invoke.args = [torch.empty(1, 2, 576, dtype=torch.uint8), cache, None, 2, None]
+    indices = torch.empty(2, 2, dtype=torch.int32)
+    invoke.args = [torch.empty(1, 2, 576, dtype=torch.uint8), cache, indices, 2, None]
+    expected_read_bytes = 2 * 576 + indices.numel() * indices.element_size()
     invoke.get_memory_access_properties.return_value = MagicMock(
-        memory_read_bytes=0, memory_write_bytes=0, memory_readwrite_bytes=0
+        memory_read_bytes=expected_read_bytes,
+        memory_write_bytes=0,
+        memory_readwrite_bytes=0,
     )
     props = _v4_perf_props(torch.ops.tensor_cast.scatter_nd_update_mla.default)(invoke)
+    assert props.memory_read_bytes == expected_read_bytes
     assert props.memory_write_bytes == 2 * 576
 
     writes = []
@@ -1873,6 +1949,42 @@ def test_v4_scatter_and_compressor_write_mixed_row_bytes():
         props = _v4_perf_props(torch.ops.tensor_cast.compressor.default)(invoke)
         writes.append(props.memory_write_bytes)
     assert writes[1] - writes[0] == 64
+
+
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_v4_paged_scatter_bills_only_projected_indices(slot_dtype):
+    tokens, block = 129, 128
+    update = torch.empty(1, tokens, 512, device="meta", dtype=torch.bfloat16)
+    cache = torch.empty(2, block, 512, device="meta", dtype=torch.bfloat16)
+    slots = torch.empty(tokens, device="meta", dtype=slot_dtype)
+    op = torch.ops.tensor_cast.scatter_nd_update_mla.default
+    args = [update, cache, slots, block, None, "PA_BSND"]
+    props = OpInvokeInfo(op, args, {}, op(*args)).get_perf_properties()
+
+    update_bytes = update.numel() * update.element_size()
+    assert props.memory_read_bytes == update_bytes + tokens * 2 * torch.int32.itemsize
+    assert props.memory_write_bytes == update_bytes
+
+
+@pytest.mark.parametrize("device", [DeviceProfile.all_device_profiles["ATLAS_800_A3_752T_128G_DIE"], TEST_DEVICE])
+def test_v4_scatter_uses_generic_roofline_with_full_write_traffic(device):
+    tokens, block = 8070, 32
+    update = torch.empty(1, tokens, 512, device="meta", dtype=torch.bfloat16)
+    cache = torch.empty(362, block, 512, device="meta", dtype=torch.bfloat16)
+    slots = torch.empty(tokens, device="meta", dtype=torch.int64)
+    op = torch.ops.tensor_cast.scatter_nd_update_mla.default
+    args = [update, cache, slots, block, None, "PA_BSND"]
+    info = OpInvokeInfo(op, args, {}, op(*args))
+
+    estimator = get_op_estimator(op, device.name)
+    assert estimator is get_op_estimator(None, None)
+    result = estimator(info, device)
+    update_bytes = update.numel() * update.element_size()
+    index_bytes = tokens * 2 * torch.int32.itemsize
+    expected_memory_s = (2 * update_bytes + index_bytes) / (device.memory_bandwidth_bytes_ps * device.memory_efficiency)
+    assert result.statistics[StatsKey.GP_OPS] == 0.0
+    assert result.statistics[StatsKey.MEMORY_ACCESS] == pytest.approx(expected_memory_s)
+    assert result.execution_time_s == pytest.approx(expected_memory_s + device.static_cost.gp_op_cost_s)
 
 
 @pytest.mark.parametrize("query_len", [1, 8])
@@ -2078,16 +2190,18 @@ def test_v4_prefill_cache_write_follows_backend(tokens, paged):
     slots = torch.empty(tokens, device="meta", dtype=torch.int64)
     writes = []
 
-    def scatter(update, target, *_args):
-        writes.append(update.shape[1])
+    def scatter(update, target, indices, *_args):
+        writes.append((update.shape, target.shape, indices.shape, _args[2:]))
         return target
 
     with patch("torch.ops.tensor_cast.scatter_nd_update_mla", side_effect=scatter):
-        visible, _ = DeepseekV4SparseAttention._scatter_window_kv_prefill(wrapper, kv, cache, slots, tokens, None)
+        visible, handle = DeepseekV4SparseAttention._scatter_full_kv_prefill(wrapper, kv, cache, slots, tokens, None)
     assert visible is kv
-    assert sum(writes) == (tokens if paged else min(tokens, 128))
+    assert handle.shape == cache.shape
     if paged:
-        assert len(writes) == 1
+        assert writes == [(kv.shape, cache.shape, slots.shape, ("PA_BSND",))]
+    else:
+        assert writes == [((tokens, 1, 512), (200, 128, 1, 512), (tokens, 2), ())]
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.int8])

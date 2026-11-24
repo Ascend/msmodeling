@@ -297,8 +297,9 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
            op-for-op, decode uses an `arange + offset` matching the
            reference if-branch)
         9. ``cat(window_topk, compress_topk).int()`` (skipped on ratio==0)
-       10. `scatter_nd_update_mla` writes the post-RoPE `kv_window_entry`
-           into the sliding-window cache and returns a functional handle
+       10. `scatter_nd_update_mla` writes every valid post-RoPE
+           `kv_window_entry` row into the paged main KV cache and returns a
+           functional handle
        11. (ratio>0 only) `compressor` for the shared coarse-grain KV
        12. `sparse_attn_sharedkv` over [window | compressed] memory
        13. ``apply_rotary_emb(o[..., -rd:], inverse=True)`` on the output
@@ -309,9 +310,9 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
     and writes KV via `concat_and_cache_mla`), V4 (Flash/Pro) deliberately keeps
     these stages as separate ops on NPU. This wrapper therefore also
     emits them as separate ops and DOES NOT call `mlapo` or
-    `concat_and_cache_mla`. The sliding-window KV write from
-    `model.py:520-533` is preserved here as `scatter_nd_update_mla`: the post-
-    RoPE `kv_window_entry` is written into `kv_cache`, and the op returns a
+    `concat_and_cache_mla`. The paged main-KV write is preserved here as
+    `scatter_nd_update_mla`: every valid post-RoPE `kv_window_entry` row is
+    written into `kv_cache`, and the op returns a
     functional handle to the updated cache that is then fed into
     `sparse_attn_sharedkv`. This builds an explicit
     `wkv -> kv_norm -> KV-RoPE -> cat -> scatter -> sparse_attn` data edge,
@@ -516,39 +517,15 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         sl: int,
         meta_seq_lens: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Write window KV entries into the sliding-window cache during prefill.
-
-        Returns (kv_for_attn, kv_attn_handle) where ``kv_attn_handle`` is the
-        post-write functional cache handle that must be wired into
-        ``sparse_attn_sharedkv`` to keep the entire KV producer chain live.
-
-        Write semantics:
-            - Ascend paged cache: single scatter of every new Prefill KV row
-            - ``sl <= W``:  single scatter of the full window entry
-            - ``sl > W`` with ``cutoff == 0``: tail-``W`` fills the cache exactly
-            - ``sl > W`` with ``cutoff > 0``: two-scatter split to match the
-              circular-buffer semantics of the reference implementation
-
-        The caller passes the post-write handle to ``sparse_attn_sharedkv``
-        and uses existing order barriers where a control dependency is needed,
-        preserving the producer chain without charging artificial arithmetic.
-        """
-        W = int(self.window_size)
+        """Write V4.1 prefill KV entries into its circular window cache."""
+        window_size = int(self.window_size)
         kv_for_attn = kv_window_entry
         kv_attn_handle = kv_window_entry
 
         if kv_cache is None:
             return kv_for_attn, kv_attn_handle
 
-        if self.use_paged_kv_cache:
-            # Ascend prefill stages every new KV row in the paged cache. The
-            # attention window restricts reads; it does not truncate this write.
-            kv_cache = torch.ops.tensor_cast.scatter_nd_update_mla(
-                kv_window_entry, kv_cache, slot_mapping, W, meta_seq_lens, "PA_BSND"
-            )
-            return kv_for_attn, kv_cache
-
-        if sl <= W:
+        if sl <= window_size:
             kv_cache = torch.ops.tensor_cast.scatter_nd_update_mla(
                 kv_window_entry,
                 kv_cache,
@@ -557,23 +534,23 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                 meta_seq_lens,
             )
         else:
-            cutoff = sl % W
-            kv_window_tail = kv_window_entry[:, -W:]
+            cutoff = sl % window_size
+            kv_window_tail = kv_window_entry[:, -window_size:]
             if cutoff == 0:
                 kv_cache = torch.ops.tensor_cast.scatter_nd_update_mla(
                     kv_window_tail,
                     kv_cache,
                     slot_mapping,
-                    W,
+                    window_size,
                     meta_seq_lens,
                 )
             else:
-                first, second = kv_window_tail.split([W - cutoff, cutoff], dim=1)
+                first, second = kv_window_tail.split([window_size - cutoff, cutoff], dim=1)
                 kv_cache = torch.ops.tensor_cast.scatter_nd_update_mla(
                     first,
                     kv_cache,
                     slot_mapping,
-                    W - cutoff,
+                    window_size - cutoff,
                     meta_seq_lens,
                 )
                 kv_cache = torch.ops.tensor_cast.scatter_nd_update_mla(
@@ -583,7 +560,64 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                     cutoff,
                     meta_seq_lens,
                 )
-        kv_attn_handle = kv_cache
+        return kv_for_attn, kv_cache
+
+    def _scatter_full_kv_prefill(
+        self,
+        kv_window_entry: torch.Tensor,
+        kv_cache: Optional[torch.Tensor],
+        slot_mapping: Optional[torch.Tensor],
+        sl: int,
+        meta_seq_lens: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Write every valid prefill KV row into the paged main KV cache.
+
+        Returns (kv_for_attn, kv_attn_handle) where ``kv_attn_handle`` is the
+        post-write functional cache handle that must be wired into
+        ``sparse_attn_sharedkv`` to keep the entire KV producer chain live.
+
+        The profiling backend projects the logical PA_BSND inputs to the
+        physical kernel ABI. The analytic path models the physical cache and
+        block/offset indices explicitly. Neither path truncates writes to the
+        sparse-attention read window.
+        """
+        kv_for_attn = kv_window_entry
+        kv_attn_handle = kv_window_entry
+
+        if kv_cache is None:
+            return kv_for_attn, kv_attn_handle
+
+        if slot_mapping is None:
+            raise ValueError("Prefill KV cache update requires slot_mapping")
+        if kv_cache.ndim != 3:
+            raise ValueError(f"Expected paged KV cache [blocks, block_size, width], got {tuple(kv_cache.shape)}")
+
+        num_tokens = kv_window_entry.shape[0] * kv_window_entry.shape[1]
+        flat_slots = slot_mapping.reshape(-1)
+        if flat_slots.shape[0] != num_tokens:
+            raise ValueError(
+                f"slot_mapping has {flat_slots.shape[0]} entries, but Prefill produced {num_tokens} KV rows"
+            )
+        if self.use_paged_kv_cache:
+            kv_attn_handle = torch.ops.tensor_cast.scatter_nd_update_mla(
+                kv_window_entry, kv_cache, flat_slots, int(self.window_size), meta_seq_lens, "PA_BSND"
+            )
+            return kv_for_attn, kv_attn_handle
+
+        update = kv_window_entry.reshape(num_tokens, 1, kv_window_entry.shape[-1])
+        # The serving scheduler materializes physical block/offset indices
+        # outside the model graph. TensorCast only needs their runtime shape and
+        # dtype to model the ScatterNdUpdateV2 kernel.
+        indices = torch.empty((num_tokens, 2), dtype=torch.int32, device=flat_slots.device)
+        paged_cache = kv_cache.unsqueeze(-2)
+        updated_cache = torch.ops.tensor_cast.scatter_nd_update_mla(
+            update,
+            paged_cache,
+            indices,
+            sl,
+            meta_seq_lens,
+        )
+        kv_attn_handle = updated_cache if updated_cache.shape == kv_cache.shape else updated_cache.reshape_as(kv_cache)
 
         return kv_for_attn, kv_attn_handle
 
@@ -1035,7 +1069,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
             # whose visible data matches `[window | compressed]` while its dtype
             # / meta shape comes from the post-scatter/cache path.
             if not is_v41:
-                kv_for_attn, kv_attn_handle = self._scatter_window_kv_prefill(
+                kv_for_attn, kv_attn_handle = self._scatter_full_kv_prefill(
                     kv_window_entry,
                     kv_cache,
                     slot_mapping,

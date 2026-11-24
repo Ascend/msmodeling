@@ -19,8 +19,8 @@ from torch._subclasses.fake_tensor import is_fake
 
 from .. import _accumulate_compute_ops, _estimate_default, _estimate_hif8_kv, _hif8_quantization_ops, _rmsnorm_ops
 from ..memory_tracker import MemoryTracker
-from ..op_invoke_info import is_hif8_op_from_info, OpInvokeInfo
 from ..op_estimator_registry import register_op_estimator
+from ..op_invoke_info import is_hif8_op_from_info, OpInvokeInfo
 from ..utils import bytes_of_elements
 
 
@@ -57,35 +57,25 @@ def _(
     assert len(op_invoke_info.args) >= 3
     kv = op_invoke_info.args[0]
 
-    # Reference (model.py:518-530): this stage is a direct KV window-cache
-    # assignment (`self.kv_cache[...] = kv`), not a generic indexed scatter.
-    # The semantic op carries `slot_mapping` only because msmodeling routes the
-    # write through the existing block-cache abstraction; the reference V4
-    # implementation does not materialize or consume an index tensor here.
-    #
-    # Cost model therefore mirrors the reference assignment semantics:
+    # Cost model mirrors the physical ScatterNdUpdateV2 path:
     #   - read the source `kv` rows
+    #   - read two block/offset indices per row
     #   - write exactly the updated cache rows
-    #   - do NOT charge reads of `slot_mapping`, `seq_lens`, or the full cache
-    #     tensor / returned cache handle.
+    #   - do NOT charge the full cache tensor / returned cache handle.
     #
-    # Per call, rows written are:
-    #   prefill short      = `seqlen`
-    #   prefill split tail = `W-cutoff` then `cutoff`
-    #   decode             = 1 (or packed multi-decode `sl` rows)
-    # Caller is responsible for slicing `kv` to the rows that should land in
-    # cache; this op just charges the reference-equivalent assignment traffic.
+    # Per call, rows written are all valid Prefill tokens, or one row per
+    # request for Decode (including packed multi-decode).
+    kwargs = op_invoke_info.kwargs if isinstance(op_invoke_info.kwargs, dict) else {}
+    layout = op_invoke_info.args[5] if len(op_invoke_info.args) > 5 else kwargs.get("cache_layout", "BND")
     properties = op_invoke_info.get_memory_access_properties(
-        exclude_input_ids={1, 2, 4},
+        exclude_input_ids={1, 2, 4} if layout == "PA_BSND" else {1, 4},
         exclude_output_ids={0},
     )
     batch, rows_written = kv.shape[0], kv.shape[1]
     per_row_bytes = kv.shape[-1] * kv.element_size()
     properties.memory_write_bytes += batch * rows_written * per_row_bytes
-    kwargs = op_invoke_info.kwargs if isinstance(op_invoke_info.kwargs, dict) else {}
-    layout = op_invoke_info.args[5] if len(op_invoke_info.args) > 5 else kwargs.get("cache_layout", "BND")
     if layout == "PA_BSND":
-        # Physical block/offset indices are two INT32 values per new row.
+        # Bill the projected block/offset pair instead of the logical slot.
         properties.memory_read_bytes += batch * rows_written * 8
     return properties
 
