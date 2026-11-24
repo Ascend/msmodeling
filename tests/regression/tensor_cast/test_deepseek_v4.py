@@ -29,8 +29,12 @@ import tensor_cast.performance_model.builtin_model  # noqa: F401 — register V4
 
 from tensor_cast.core.quantization.config import create_attention_quant_config
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
+from tensor_cast.device import DeviceProfile, TEST_DEVICE
 from tensor_cast.performance_model import _rmsnorm_ops
-from tensor_cast.performance_model.builtin_model.deepseek_v4 import _safe_max_int
+from tensor_cast.performance_model.builtin_model.deepseek_v4 import (
+    _safe_max_int,
+)
+from tensor_cast.performance_model.op_estimator_registry import get_op_estimator
 from tensor_cast.transformers.builtin_model.deepseek_v4 import (
     DeepseekV4Compressor,
     DeepseekV4Config,
@@ -59,10 +63,8 @@ from tensor_cast.layers.mla import (
     MultiheadLatentAttentionBase,
     _resolve_sparse_topk_limit,
 )
-from tensor_cast.device import DeviceProfile, TEST_DEVICE
 from tensor_cast.model_config import LinearQuantConfig, MlaConfig
 from tensor_cast.performance_model.bound_analyzer import StatsKey
-from tensor_cast.performance_model.op_estimator_registry import get_op_estimator
 from tensor_cast.performance_model.op_invoke_info import is_hif8_op_from_info, OpInvokeInfo
 from tensor_cast.quantize_utils import LinearQuantType
 from tensor_cast.utils import SimFormat
@@ -1951,6 +1953,106 @@ def test_v4_scatter_and_compressor_write_mixed_row_bytes():
     assert writes[1] - writes[0] == 64
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_v4_compressor_projection_uses_runtime_low_precision_dtype(dtype):
+    invoke = MagicMock()
+    hidden_states = torch.empty(1, 8, 64, dtype=dtype)
+    invoke.args = [
+        hidden_states,
+        torch.empty(1, 8, 16, dtype=torch.bfloat16),
+        4,
+        16,
+        4,
+        False,
+        torch.tensor([8]),
+    ]
+    invoke.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
+
+    props = _v4_perf_props(torch.ops.tensor_cast.compressor.default)(invoke)
+
+    expected_mma_ops = 2 * (1 * 8 * 64 * (2 * 16) * 2)
+    assert props.compute_ops[dtype].mma_ops == expected_mma_ops
+    assert props.compute_ops[torch.float32].mma_ops == 0
+
+
+def test_v4_indexer_compressor_adds_per_token_quant_and_dual_cache_writes():
+    def compressor_props(rotate):
+        invoke = MagicMock()
+        invoke.args = [
+            torch.empty(1, 8, 64, dtype=torch.bfloat16),
+            torch.empty(1, 8, 16, dtype=torch.int8 if rotate else torch.bfloat16),
+            4,
+            16,
+            4,
+            rotate,
+            torch.tensor([8]),
+        ]
+        invoke.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
+        return _v4_perf_props(torch.ops.tensor_cast.compressor.default)(invoke)
+
+    main = compressor_props(rotate=False)
+    indexer = compressor_props(rotate=True)
+
+    assert indexer.compute_ops[torch.float32].gp_ops > main.compute_ops[torch.float32].gp_ops
+    assert indexer.memory_read_bytes > main.memory_read_bytes
+
+
+def test_v4_bnd_int8_indexer_writes_value_and_scale():
+    _assert_v4_indexer_cache_accounting(torch.int8, 8, 10)
+
+
+@pytest.mark.parametrize(
+    "device_name",
+    [
+        "ATLAS_800_A3_752T_128G_DIE",
+        "ATLAS_800_A3_560T_128G_DIE",
+        "ATLAS_800_A3_560T_128G_DIE_ROCE",
+        TEST_DEVICE.name,
+    ],
+)
+@pytest.mark.parametrize("rotate", [False, True])
+def test_v4_bnd_compressor_uses_generic_roofline(device_name, rotate):
+    device = DeviceProfile.all_device_profiles[device_name]
+    op = torch.ops.tensor_cast.compressor.default
+    hidden_states = torch.empty(1, 8, 64, dtype=torch.bfloat16)
+    cache = torch.empty(1, 8, 16, dtype=torch.int8 if rotate else torch.bfloat16)
+    invoke = MagicMock()
+    invoke.func = op
+    invoke.args = [hidden_states, cache, 4, 16, 4, rotate, torch.tensor([8])]
+    invoke.out = (torch.empty(1, 2, 16, dtype=torch.bfloat16), cache)
+    invoke.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
+    invoke.get_perf_properties.return_value = _v4_perf_props(op)(invoke)
+
+    result = get_op_estimator(op, device.name)(invoke, device)
+    expected = get_op_estimator(None, None)(invoke, device)
+    assert result.execution_time_s == pytest.approx(expected.execution_time_s)
+    assert result.statistics == expected.statistics
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "storage_width", "bytes_per_cache_row"), [(torch.bfloat16, 8, 16), (torch.uint8, 6, 6)]
+)
+def test_v4_rotated_non_int8_cache_uses_physical_storage(cache_dtype, storage_width, bytes_per_cache_row):
+    _assert_v4_indexer_cache_accounting(cache_dtype, storage_width, bytes_per_cache_row)
+
+
+def _assert_v4_indexer_cache_accounting(cache_dtype, storage_width, bytes_per_cache_row):
+    invoke = MagicMock()
+    hidden_states = torch.empty(1, 8, 64, dtype=torch.bfloat16)
+    cache = torch.empty(1, 8, storage_width, dtype=cache_dtype)
+    invoke.func = torch.ops.tensor_cast.compressor.default
+    invoke.args = [hidden_states, cache, 4, 8, 4, True, torch.tensor([8])]
+    rows = 2
+    invoke.out = (torch.empty(1, rows, storage_width, dtype=cache_dtype), cache)
+    invoke.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
+    properties = _v4_perf_props(torch.ops.tensor_cast.compressor.default)(invoke)
+
+    cache_write_bytes = rows * bytes_per_cache_row
+    # Two FP32 state streams keep one 4-token overlap block at width 2 * 8.
+    state_write_bytes = 2 * 4 * (2 * 8) * torch.float32.itemsize
+    assert properties.memory_write_bytes == state_write_bytes + cache_write_bytes
+
+
 @pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
 def test_v4_paged_scatter_bills_only_projected_indices(slot_dtype):
     tokens, block = 129, 128
@@ -2407,6 +2509,12 @@ def test_v4_indexer_compressor_paged_core_accepts_int8_cache_but_keeps_reference
     workload = _v4_semantic_workload("Compressor", named, {"contract": "v4_requests_v2"})
     assert workload["tokens"] == 4096 and workload["head_dim"] == 128
     assert info.out[0].dtype == torch.bfloat16
+    a3 = DeviceProfile.all_device_profiles["ATLAS_800_A3_752T_128G_DIE"]
+    estimate = get_op_estimator(op, a3.name)
+    generic = get_op_estimator(None, None)
+    result = estimate(info, a3)
+    assert result.execution_time_s == pytest.approx(generic(info, a3).execution_time_s)
+    assert "cache_scatter_count" not in result.statistics
     named["cache_layout"] = "BND"
     with pytest.raises(ValueError, match="v4_paged_runtime_required"):
         _v4_semantic_workload("Compressor", named, {"contract": "v4_requests_v2"})

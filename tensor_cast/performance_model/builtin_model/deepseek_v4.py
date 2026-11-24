@@ -80,6 +80,22 @@ def _(
     return properties
 
 
+def _compressor_cache_layout(op_invoke_info: OpInvokeInfo) -> str:
+    if len(op_invoke_info.args) > 10:
+        return op_invoke_info.args[10]
+    kwargs = op_invoke_info.kwargs if isinstance(op_invoke_info.kwargs, dict) else {}
+    return kwargs.get("cache_layout", "BND")
+
+
+def _compressor_cache_scatter_specs(
+    kv_cache: torch.Tensor, head_dim: int, rotate: bool
+) -> tuple[tuple[int, torch.dtype], ...]:
+    """Return (width, dtype) for each physical write of a non-paged Compressor row."""
+    if rotate and kv_cache.dtype == torch.int8:
+        return (head_dim, torch.int8), (1, torch.float16)
+    return ((kv_cache.shape[-1], kv_cache.dtype),)
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.compressor.default)
 def _(
     op_invoke_info: OpInvokeInfo,
@@ -102,10 +118,7 @@ def _(
     overlap = coff == 2
     proj_out_dim = coff * head_dim
 
-    layout = (
-        op_invoke_info.args[10] if len(op_invoke_info.args) > 10 else op_invoke_info.kwargs.get("cache_layout", "BND")
-    )
-    if layout == "PA_BSND":
+    if _compressor_cache_layout(op_invoke_info) == "PA_BSND":
         # Paged Compressor(cache_mode=1) consumes BF16 x and two
         # BF16 weights, updates FP32 state and returns a BF16 scratch stream.
         # Hadamard/quantization and all paged K/scale writes are caller ops.
@@ -166,18 +179,17 @@ def _(
         exclude_input_ids={1, 4, "seq_lens", "query_lens"},
         exclude_output_ids={0, 1},
     )
-    # wkv + wgate: two fp32 Linears x -> coff*d (model.py:323-324).
+    # The production Compressor kernel consumes BF16/FP16 activations and
+    # weights directly.  Keep the projection dtype aligned with the runtime
+    # tensor instead of billing the two projections as FP32 GEMMs.
+    projection_dtype = hidden_states.dtype
+    # wkv + wgate: two Linears x -> coff*d (model.py:323-324).
     proj_mma = batch * seq_len * hidden_size * proj_out_dim * 2
     mma_ops = 2 * proj_mma
-    # fp32 weight reads (input x is auto-counted).
-    properties.memory_read_bytes += 2 * hidden_size * proj_out_dim * 4
-    # Eager `x = x.float()` (model.py:322) materializes a fp32 hidden_states
-    # buffer consumed by wkv/wgate. Bill one round-trip (write+read=8 B/elem).
-    properties.memory_readwrite_bytes += 8 * batch * seq_len * hidden_size
+    # Projection weight reads (input x is auto-counted).
+    properties.memory_read_bytes += 2 * hidden_size * proj_out_dim * projection_dtype.itemsize
 
     gp_ops = 0
-    # bf16 -> fp32 cast pass over hidden_states (model.py:322).
-    gp_ops += batch * seq_len * hidden_size
 
     # Accumulate per-request costs. Each prefill request contributes full
     # prefill cost on its own `query_len_i` rows; each decode-token contributes
@@ -263,6 +275,11 @@ def _(
             # fast_round_scale (bit ops: log2_ceil + pow2) + clamp + cast + mul.
             # ~5-6 ops/elem (was 3, undercounted).
             gp_ops += rows * head_dim * 5
+            if kv_cache.dtype == torch.int8:
+                # Only the INT8 indexer reduces and quantizes each token for
+                # the separate value and scale cache writes.
+                gp_ops += rows * head_dim * 7 + rows
+                properties.memory_read_bytes += rows * head_dim * hidden_states.element_size()
         elif hif8_kv:
             # The normalized/RoPE result is BF16 before HIF8 encoding. Replace
             # native non-RoPE FP8 act_quant; encode the complete shared-KV row.
@@ -270,19 +287,11 @@ def _(
             gp_ops += _hif8_quantization_ops(source, kv_cache.dtype)
         else:
             gp_ops += rows * nope_head_dim * 3
-        properties.memory_write_bytes += batch * total_post_compress_rows * kv_cache.shape[-1] * kv_cache.element_size()
-        if rotate and kv_cache.dtype == torch.int8:
-            # The Ascend INT8 index cache stores a separate FP16 scale per row.
-            # This semantic compressor owns both writes; do not add them again
-            # to the QLI score/top-k core below.
-            properties.memory_write_bytes += rows * 2
+        scatter_specs = _compressor_cache_scatter_specs(kv_cache, head_dim, rotate)
+        properties.memory_write_bytes += rows * sum(width * dtype.itemsize for width, dtype in scatter_specs)
 
-    _accumulate_compute_ops(
-        properties,
-        torch.float32,
-        mma_ops=mma_ops,
-        gp_ops=gp_ops,
-    )
+    _accumulate_compute_ops(properties, projection_dtype, mma_ops=mma_ops)
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=gp_ops)
     return properties
 
 
