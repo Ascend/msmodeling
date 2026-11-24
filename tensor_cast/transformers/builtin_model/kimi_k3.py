@@ -1829,6 +1829,14 @@ def _get_k3_class_from_source(class_ref: str, model_id: str, remote_source: str 
     module_name = class_ref.split(".", 1)[0]
     class_name = class_ref.split(".", 1)[1]
 
+    # A model that is already built may reference a class object from an
+    # earlier remote-module generation (transformers re-executes the file in
+    # place and replaces its classes). Re-patching must target those exact
+    # objects, so an in-flight ensure pass can pin them here.
+    override = _k3_class_overrides().get(class_ref)
+    if override is not None:
+        return override
+
     # Same-package class resolution: prefer the modeling_kimi_linear module
     # that was loaded as part of the modeling_kimi_k3 package (via
     # ``from .modeling_kimi_linear import ...``), not a separately-loaded
@@ -2143,6 +2151,224 @@ def _make_k3_mla_prolog_hook(original_compute_mla_prolog):
 # re-executing the remote modeling files into fresh module objects.
 _K3_MODULE_PATCH_MARKER = "_tensor_cast_kimi_k3_patched"
 
+# Marker stamped on the K3 VL class (and, when re-patching a built model, on the
+# exact classes that model uses).  ``transformers.dynamic_module_utils``
+# re-executes a remote modeling file **in place** when its content hash changes
+# (for example when the Hub re-validates a lazily downloaded
+# ``modeling_kimi_linear`` and serves different bytes).  The module object
+# survives that reload, so the module-level marker above stays set while every
+# class object is replaced by a pristine, unpatched copy -- the previous
+# generation keeps the marker but the model is instantiated from the new one.
+# Checking the class-level marker detects exactly that case.
+_K3_CLASS_PATCH_MARKER = "_tensor_cast_kimi_k3_class_patched"
+
+# Temporary ``class_ref -> class object`` overrides used when re-applying the
+# patch pass to the classes an already-built model actually uses.
+#
+# Context-local, not a plain module dict: parallel captures in one process
+# would otherwise see each other's pins.  ``_ensure_k3_class_patches`` sets the
+# dictionary for the duration of one patch pass and resets it in ``finally``;
+# an unrelated thread keeps resolving through the module generation, and a
+# ``clear()`` in one thread can never yank pins out from under another.  The
+# lock used for other shared template state (``registry._GRAPH_CACHE_LOCK``)
+# would only serialize the passes, not isolate their contents.
+_K3_CLASS_OVERRIDES: contextvars.ContextVar[dict[str, type] | None] = contextvars.ContextVar(
+    "tensor_cast_kimi_k3_class_overrides", default=None
+)
+
+
+def _k3_class_overrides() -> dict[str, type]:
+    """Class pins active for the current patch pass (empty outside one)."""
+    return _K3_CLASS_OVERRIDES.get() or {}
+
+
+#: The remote package the K3 patch pass resolves classes from.  Every patch
+#: site asks ``_get_k3_class_from_source`` for ``<package>.<ClassName>``.
+_K3_REMOTE_PACKAGES = ("modeling_kimi_k3", "modeling_kimi_linear")
+
+#: Attribute that records which class generation an instance was verified
+#: against.  ``_ensure_k3_class_patches`` runs before every ``run_inference`` and
+#: a full ``named_modules()`` probe costs ~1.6 ms on a 61-layer K3 tree; the
+#: fingerprint makes every repeat call a two-module ``vars()`` scan.
+_K3_VERIFIED_GENERATION_ATTR = "_tensor_cast_kimi_k3_verified_generation"
+
+
+#: Instance paths probed when a model cannot enumerate its modules (wrappers
+#: and partial stubs).  ``layers`` is a list, so the probe takes its first
+#: element.
+_K3_INSTANCE_PATHS = (
+    "",
+    "vision_tower",
+    "vision_tower.encoder",
+    "vision_tower.encoder.patch_embed",
+    "language_model",
+    "language_model.model",
+    "language_model.model.layers",
+)
+
+
+def _k3_live_classes(inner) -> dict[str, type]:
+    """Map both remote ref prefixes to the classes this instance holds.
+
+    ``_patch_model_classes_for_kimi_k3`` resolves every patch target through
+    ``_get_k3_class_from_source`` by ``modeling_kimi_k3.<Name>`` or
+    ``modeling_kimi_linear.<Name>``.  An in-place remote re-execution replaces
+    the module's classes, so resolving by name patches the NEW generation while
+    the instance still calls the OLD one -- the whole pass is then inert (the
+    attention/MLP classes keep running unpatched).  Enumerate the instance and
+    key each class by both prefixes; class names are unique inside the remote
+    package, so the two entries always name the same object.
+    """
+
+    classes: dict[str, type] = {}
+
+    def add(candidate) -> None:
+        cls = candidate if isinstance(candidate, type) else type(candidate)
+        module_name = getattr(cls, "__module__", "") or ""
+        if module_name.rsplit(".", 1)[-1] in _K3_REMOTE_PACKAGES:
+            classes[cls.__name__] = cls
+
+    named_modules = getattr(inner, "named_modules", None)
+    if callable(named_modules):
+        for _, module in named_modules():
+            add(module)
+
+    if not classes:
+        for path in _K3_INSTANCE_PATHS:
+            target = inner
+            for part in path.split(".") if path else ():
+                if isinstance(target, (list, tuple)):
+                    target = target[0] if target else None
+                if target is None:
+                    break
+                target = getattr(target, part, None)
+            if isinstance(target, (list, tuple)):
+                target = target[0] if target else None
+            if target is not None:
+                add(target)
+
+    return {f'{package}.{name}': cls for package in _K3_REMOTE_PACKAGES for name, cls in classes.items()}
+
+
+def _stamp_k3_patch_targets(module_names, extra_classes=()) -> None:
+    """Stamp the class-level patch marker after a successful pass.
+
+    With ``extra_classes`` (re-patch of a built model) only those classes are
+    stamped: the module's current generation is *not* the one the live model
+    uses, so leaving it unmarked lets a later model load re-patch it instead of
+    silently trusting a marker it never earned.
+    """
+    classes = list(extra_classes)
+    if not classes:
+        for module_name in module_names:
+            module = sys.modules.get(module_name)
+            if module is None:
+                continue
+            for obj in list(vars(module).values()):
+                if isinstance(obj, type) and getattr(obj, "__module__", None) == module_name:
+                    classes.append(obj)
+    for cls in classes:
+        try:
+            setattr(cls, _K3_CLASS_PATCH_MARKER, True)
+        except (AttributeError, TypeError):
+            continue
+
+
+def _k3_class_patches_intact(probe_cls) -> bool:
+    """Return whether ``probe_cls`` still carries the class-level patch marker.
+
+    A module re-execution replaces the classes while keeping the module object,
+    so the class marker is the only reliable signal that the pass must re-run.
+    """
+    return bool(getattr(probe_cls, _K3_CLASS_PATCH_MARKER, False))
+
+
+def _k3_remote_module_classes_intact(module_name) -> bool:
+    """Whether every class defined by one remote module still carries the marker.
+
+    ``transformers`` re-executes each remote file independently, keyed by that
+    file's content hash.  Replacing only ``modeling_kimi_linear`` (attention /
+    MoE / MLP) leaves the ``modeling_kimi_k3`` module -- and the wrapper class a
+    single-class probe would look at -- fully marked, so a wrapper-only check
+    skips the repair and the live modules keep running unpatched code.
+
+    ``_stamp_k3_patch_targets`` marks every class the module defines, so a
+    replaced generation always leaves at least one unmarked class behind.  The
+    re-patch-of-a-built-model pass deliberately stamps only the live classes, so
+    this check stays False there and the next load re-runs the idempotent pass.
+    """
+    module = sys.modules.get(module_name)
+    if module is None:
+        return False
+    seen = False
+    for obj in list(vars(module).values()):
+        if not isinstance(obj, type) or getattr(obj, "__module__", None) != module_name:
+            continue
+        seen = True
+        if not _k3_class_patches_intact(obj):
+            return False
+    return seen
+
+
+def _k3_remote_module_names(inner) -> tuple[str, str] | None:
+    """The two remote modules of the package the instance's classes come from.
+
+    Both names are always returned, whichever file defines the wrapper: the
+    guard must notice a re-execution of *either* file, and returning the pair
+    from the wrapper's own package keeps the fingerprint symmetric.
+    """
+    module_name = getattr(type(inner), "__module__", "") or ""
+    package_prefix, separator, leaf = module_name.rpartition(".")
+    if not separator or leaf not in _K3_REMOTE_PACKAGES:
+        return None
+    return tuple(f"{package_prefix}.{package}" for package in _K3_REMOTE_PACKAGES)
+
+
+def _k3_class_generation(module_names) -> tuple | None:
+    """Cheap fingerprint of the class objects the remote modules define now.
+
+    ``transformers`` re-executes a remote file in place, replacing its class
+    objects while the module object survives.  Fingerprinting the class ids of
+    both files therefore changes exactly when the generation an instance could
+    be holding changes, at the cost of one ``vars()`` scan per module instead of
+    a ``named_modules()`` walk over the whole model.  ``None`` means the
+    generation cannot be fingerprinted (a module is missing or defines no
+    class), which keeps the full probe in charge.
+    """
+    generation = []
+    for name in module_names:
+        module = sys.modules.get(name)
+        if module is None:
+            return None
+        classes = sorted(
+            (attribute, id(value))
+            for attribute, value in vars(module).items()
+            if isinstance(value, type) and getattr(value, "__module__", None) == name
+        )
+        if not classes:
+            return None
+        generation.append((name, id(module), tuple(classes)))
+    return tuple(generation)
+
+
+def _k3_verified_generation(model) -> tuple | None:
+    """The class generation this model instance was last verified against."""
+    try:
+        return getattr(model, _K3_VERIFIED_GENERATION_ATTR)
+    except AttributeError:
+        return None
+
+
+def _remember_k3_verified_generation(model, generation) -> None:
+    """Record a verified generation so the next call can skip the model walk."""
+    if generation is None:
+        return
+    try:
+        setattr(model, _K3_VERIFIED_GENERATION_ATTR, generation)
+    except (AttributeError, TypeError):
+        # Wrappers with restrictive ``__setattr__`` simply keep the full probe.
+        pass
+
 
 def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
     """Monkey-patch remote model classes before model instantiation.
@@ -2225,7 +2451,10 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
         package_prefix, separator, _ = k3_module_name.rpartition(".")
         linear_module_name = f"{package_prefix}.modeling_kimi_linear" if separator else "modeling_kimi_linear"
         remote_module_names = (k3_module_name, linear_module_name)
-        if all(getattr(sys.modules.get(name), _K3_MODULE_PATCH_MARKER, False) for name in remote_module_names):
+        module_marked = all(
+            getattr(sys.modules.get(name), _K3_MODULE_PATCH_MARKER, False) for name in remote_module_names
+        )
+        if module_marked and all(_k3_remote_module_classes_intact(name) for name in remote_module_names):
             return False
     except Exception:
         # Resolution failed — fall through and let the per-patch blocks
@@ -3656,6 +3885,9 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             _orig_run_inference_k3 = _K3_ModelRunner.run_inference
 
             def _run_inference_with_k3_constant_folder_guard(self, *args, **kwargs):
+                # A late remote-module re-execution can leave the instance on
+                # unpatched classes; verify right before the graph runs.
+                _ensure_k3_class_patches(getattr(self, "model", None))
                 # Scope the MetaConstantFolder guard to this run so dynamo
                 # compilation (which happens inside run_inference) never
                 # folds K3's region markers / torch.empty stub allocations,
@@ -3682,6 +3914,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             module = sys.modules.get(name)
             if module is not None:
                 setattr(module, _K3_MODULE_PATCH_MARKER, True)
+        _stamp_k3_patch_targets(remote_module_names, list(_k3_class_overrides().values()))
 
     return patched
 
@@ -3718,6 +3951,80 @@ def _hf_config_patch_for_kimi_k3(config, model_id=None):
 
     if config_patched or classes_patched:
         logger.info("Patched transformers environment for Kimi-K3")
+
+
+def _ensure_k3_class_patches(model) -> bool:
+    """Re-apply K3 class patches when the built model uses stale classes.
+
+    ``transformers`` keys remote modules by content hash and re-executes the
+    modeling file in place whenever that hash changes, replacing every class
+    object while keeping the module (and its module-level patch marker). The
+    model is then instantiated from the fresh, unpatched classes, which shows
+    up as e.g. ``KimiK3ForConditionalGeneration.forward() got an unexpected
+    keyword argument 'attention_meta'``.
+
+    This runs after model construction and pins the classes the instance
+    actually uses, so the patch pass targets those objects instead of the
+    newer module generation.  The pin covers every remote class the instance
+    holds (attention, MoE gate/block, MLPs, decoder layers), not just the
+    top-level wrapper: resolving only the wrapper would leave the inner patch
+    sites pointing at classes nothing calls.
+    """
+    inner = getattr(model, "_inner", None) or model
+    config = getattr(model, "hf_config", None) or getattr(inner, "config", None)
+    if getattr(config, "model_type", None) != "kimi_k3":
+        return False
+
+    module_names = _k3_remote_module_names(inner)
+    generation = _k3_class_generation(module_names) if module_names else None
+    # Fast path: this instance already passed the full probe and neither remote
+    # file has been re-executed since.  The guard runs before every
+    # ``run_inference``, so scanning the class generation of the two remote
+    # modules replaces a whole-model ``named_modules()`` walk per inference
+    # while still detaching the moment either file is replaced in place.
+    if generation is not None and _k3_verified_generation(model) == generation:
+        return False
+
+    model_cls = type(inner)
+    live_classes = _k3_live_classes(inner)
+    live_classes.setdefault(f"modeling_kimi_k3.{model_cls.__name__}", model_cls)
+    # Probe every class the instance holds, not just the wrapper: transformers
+    # re-executes each remote file independently by content hash, so
+    # ``modeling_kimi_linear`` (attention / MoE / MLP) can be replaced while
+    # ``modeling_kimi_k3`` and its wrapper class keep their markers.  Probing
+    # the wrapper alone would skip the repair exactly in that case and leave
+    # the live modules running unpatched code (``unexpected keyword argument
+    # 'attention_meta'``).
+    if all(_k3_class_patches_intact(cls) for cls in live_classes.values()):
+        _remember_k3_verified_generation(model, generation)
+        return False
+
+    overrides = dict(live_classes)
+
+    model_id = getattr(config, "name_or_path", None) or getattr(model, "model_id", None)
+    stale = sorted({cls.__name__ for cls in live_classes.values() if not _k3_class_patches_intact(cls)})
+    logger.warning(
+        "Kimi-K3 remote classes were re-executed after patching (%s lost the patch marker); "
+        "re-applying class patches to the instantiated classes.",
+        ", ".join(stale),
+    )
+    token = _K3_CLASS_OVERRIDES.set(overrides)
+    try:
+        patched = _patch_model_classes_for_kimi_k3(config, model_id)
+    finally:
+        _K3_CLASS_OVERRIDES.reset(token)
+    # ``patched`` only says that at least one block succeeded (the VL forward is
+    # assigned unconditionally), while the class markers are written only when
+    # *no* block swallowed an exception.  Key the memo to that marker, not to
+    # the return value: after a partial pass a remembered generation would let
+    # the fast path above skip the retry forever, leaving the model on the
+    # classes whose patch blocks failed.
+    if patched and all(_k3_class_patches_intact(cls) for cls in live_classes.values()):
+        # Fingerprint again: the pass may have imported the remote modules while
+        # repairing a model built before they were ever loaded.
+        generation = _k3_class_generation(module_names) if module_names else None
+        _remember_k3_verified_generation(model, generation)
+    return patched
 
 
 # ============================================================
@@ -3830,6 +4137,12 @@ def _patch_model_for_kimi_k3(model) -> None:
     import operator as _operator
 
     from ..custom_model_registry import get_language_layers as _get_lang_layers
+
+    # The model may have been instantiated from a remote-module generation that
+    # transformers re-executed *after* the pre-load patch pass. Re-apply the
+    # class patches to the classes this instance actually uses before any
+    # structural transformation wraps them.
+    _ensure_k3_class_patches(model)
 
     # The context-aware wrapper is activated only by K3 run_inference; other
     # execution contexts keep the default constant-folding policy.

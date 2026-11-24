@@ -200,6 +200,7 @@ class MemoryTracker:
         self.is_analyzed: bool = False
         self._resident_tensors = {}
         self._weight_storages = set()
+        self._cache_storages = set()
         self._resolved_boundaries = None
         self._weight_templates = set()
         self._returned_tensors = []
@@ -207,6 +208,39 @@ class MemoryTracker:
         self.op_input_tensor_ids: List[Set[TensorKey]] = []
         self.op_output_tensor_ids: List[Set[TensorKey]] = []
         self._alias_plan_cache: Dict[Any, Optional[AliasPlan]] = {}
+        self._resident_key_owners_cache: Optional[Dict[TensorKey, str]] = None
+        self._region_merge_listener_manager = None
+        self._follow_region_merges(self.region_identity_registry)
+
+    def _follow_region_merges(self, identity_registry) -> None:
+        """Keep ``_resident_key_owners_cache`` live without rebuilding it.
+
+        The cache maps a resident tensor's region root to its owner, and roots
+        move whenever the registry unions two keys.  Those unions happen for the
+        whole duration of a recording, so a cache that is only invalidated on
+        resident registration goes stale on the next capture, and rebuilding it
+        on every union would cost one pass over all residents per region.  The
+        manager reports each union instead, which keeps both sides O(1).
+        """
+        previous = self._region_merge_listener_manager
+        if previous is not None:
+            previous.remove_listener(self._on_region_root_merge)
+        manager = identity_registry.equivalent_tensor_id_manager
+        manager.add_listener(self._on_region_root_merge)
+        self._region_merge_listener_manager = manager
+
+    def _on_region_root_merge(self, retired_root, kept_root) -> None:
+        """Apply one union (or a whole-state swap) to the cached owners."""
+        cache = self._resident_key_owners_cache
+        if cache is None:
+            return
+        if retired_root is None:
+            # A replay scope replaced the visible state; every root is void.
+            self._resident_key_owners_cache = None
+            return
+        owner = cache.pop(retired_root, None)
+        if owner is not None:
+            cache.setdefault(kept_root, owner)
 
     def _register_resident(self, tensor, owner):
         if self.is_analyzed:
@@ -215,6 +249,7 @@ class MemoryTracker:
         if existing is not None and existing[1] != owner:
             raise ValueError("A storage cannot be charged as both weight and cache")
         self._resolved_boundaries = None
+        self._resident_key_owners_cache = None
         self._resident_tensors[id(tensor)] = (tensor, owner)
 
     def register_static_weight(self, tensor, *, repeat_template=False):
@@ -233,7 +268,10 @@ class MemoryTracker:
                 self.register_kv_cache(tensor)
 
     def register_kv_cache(self, tensor):
+        """Register an already billed cache tensor; never read its values or add bytes."""
         self._register_resident(tensor, "cache")
+        if tensor.layout == torch.strided:
+            self._cache_storages.add(tensor.untyped_storage())
 
     def register_compiled_weight_aliases(self, tensors):
         """Recognize frozen views of already charged weights, without reading data.
@@ -258,6 +296,59 @@ class MemoryTracker:
             elif registration[1] != "weight":
                 raise ValueError("A storage cannot be charged as both weight and cache")
 
+    def resident_owner(self, tensor: Any) -> Optional[str]:
+        """Resident account a live traced tensor is already charged to.
+
+        Returns ``"weight"`` for registered parameters/buffers and compile-time
+        folded constants, ``"cache"`` for tensors the cache inventory bills, and
+        ``None`` when the tensor is request state (or graph activation).
+
+        Used at capture time, where the model is still attached: the template
+        capture tags placeholders so serving can register them again without
+        model identity (``register_compiled_weight_constants`` /
+        ``register_kv_cache``).  All three resident matches apply, mirroring
+        ``resolve_memory_boundaries``: object identity, shared storage (a view
+        or repack of a resident tensor), and the Region equivalence registry (a
+        copy the runtime aliases to a resident tensor, which Meta placeholders
+        can only reveal through their tensor key).
+        """
+        registration = self._resident_tensors.get(id(tensor))
+        if registration is not None:
+            return registration[1]
+        if tensor.layout == torch.strided:
+            try:
+                storage = tensor.untyped_storage()
+            except (RuntimeError, NotImplementedError):
+                # Fake/functional tensors may not expose storage; identity and
+                # the region key below still decide.
+                storage = None
+            if storage is not None:
+                if storage in self._weight_storages:
+                    return "weight"
+                if storage in self._cache_storages:
+                    return "cache"
+        return self._resident_key_owners().get(self._get_real_tensor_id(tensor, 0))
+
+    def _resident_key_owners(self) -> Dict[TensorKey, str]:
+        """Region-resolved keys of every resident tensor, by owner (cached).
+
+        A resident tensor's key is resolved through the region equivalence
+        registry, and that registry keeps gaining keys for the whole duration of
+        a recording (``Region._add_equivalent_info`` for every captured region,
+        plus the workload replay's alias registration).  Registration-only
+        invalidation therefore holds for one capture and goes stale on the next
+        one: aliases recorded later would resolve a resident tensor to a root
+        the cache never saw.  The manager reports every union (and every
+        whole-state swap from ``scoped_aliases``), so this map is built once per
+        resident registration and then kept live in O(1) per event.
+        """
+        if self._resident_key_owners_cache is None:
+            owners: Dict[TensorKey, str] = {}
+            for tensor, owner in self._resident_tensors.values():
+                owners.setdefault(self._get_real_tensor_id(tensor, 0), owner)
+            self._resident_key_owners_cache = owners
+        return self._resident_key_owners_cache
+
     def register_model_outputs(self, outputs):
         if self.is_analyzed:
             raise RuntimeError("Register outputs before analysis")
@@ -274,6 +365,9 @@ class MemoryTracker:
         if identity_registry is None:
             raise ValueError("identity_registry is required")
         self.region_identity_registry = identity_registry
+        # Another registry resolves the same tensors to different roots.
+        self._resident_key_owners_cache = None
+        self._follow_region_merges(identity_registry)
 
     def _extract_tensors(self, data: Any) -> List[torch.Tensor]:
         """A helper function to recursively find all torch.Tensor objects

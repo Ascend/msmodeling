@@ -170,6 +170,36 @@ class EquivalentKeyManager:
         # while preserving the existing public ``parent``/``root_order`` maps
         # for normal model recording.
         self._local = threading.local()
+        # Observers that resolve keys once and cache the answer (for example
+        # ``MemoryTracker._resident_key_owners``).  A union-find cannot be
+        # polled for changes without an O(keys) scan, and the registry gains
+        # keys for the whole duration of a recording, so a polled cache is both
+        # slow and easy to leave stale.  Listeners are told about the only two
+        # ways an existing answer can change: a union (O(1) per merge) and a
+        # whole-state swap by ``scoped_aliases``.
+        self._listeners = []
+        self._listener_lock = threading.Lock()
+
+    def add_listener(self, listener) -> None:
+        """Register ``listener(retired_root, kept_root)`` for state changes.
+
+        ``retired_root is None`` means the visible state was replaced wholesale
+        (replay scope entered or left) and every cached resolution is void.
+        """
+        with self._listener_lock:
+            if listener not in self._listeners:
+                self._listeners.append(listener)
+
+    def remove_listener(self, listener) -> None:
+        with self._listener_lock:
+            if listener in self._listeners:
+                self._listeners.remove(listener)
+
+    def _notify(self, retired_root, kept_root) -> None:
+        with self._listener_lock:
+            listeners = list(self._listeners)
+        for listener in listeners:
+            listener(retired_root, kept_root)
 
     def _state(self):
         state = getattr(self._local, "state", None)
@@ -205,11 +235,15 @@ class EquivalentKeyManager:
         oldest_root = min(roots, key=lambda r: root_order[r])
 
         # Union all roots to the oldest root
+        retired = []
         for root in roots:
             if root != oldest_root:
                 parent[root] = oldest_root
                 # Remove old root from root_order as it's no longer a root
                 del root_order[root]
+                retired.append(root)
+        for root in retired:
+            self._notify(root, oldest_root)
 
     @contextmanager
     def scoped_aliases(self) -> Iterator[None]:
@@ -223,6 +257,9 @@ class EquivalentKeyManager:
         previous_state = getattr(self._local, "state", None)
         parent, root_order = self._state()
         self._local.state = (parent.copy(), root_order.copy())
+        # Entering and leaving both replace what a key resolves to, so every
+        # cached resolution is void even though no union happened.
+        self._notify(None, None)
         try:
             yield
         finally:
@@ -230,6 +267,7 @@ class EquivalentKeyManager:
                 del self._local.state
             else:
                 self._local.state = previous_state
+            self._notify(None, None)
 
     def get_group_root_key(self, key):
         """Get the root key of the group containing the given key."""

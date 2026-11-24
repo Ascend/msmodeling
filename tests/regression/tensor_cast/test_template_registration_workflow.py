@@ -179,6 +179,94 @@ def test_supplied_graph_uses_official_memory_and_observer(monkeypatch, has_pixel
     assert observer == [runtime]
 
 
+def test_supplied_graph_registers_tagged_weights_as_resident(monkeypatch):
+    """A tagged template graph must charge its weights, not its inputs.
+
+    Expansion reuses one captured placeholder per represented layer, so object
+    identity survives to serve time.  Registering those tensors as resident
+    static weights keeps them out of the request-input account: the peak
+    formula already adds the full weight total, so counting the placeholders
+    again would double the weight bytes.
+    """
+    from tensor_cast.core import model_runner as module
+
+    class Runtime(SimpleNamespace):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    runner = object.__new__(module.ModelRunner)
+    runner.user_input = SimpleNamespace(
+        dump_input_shapes=False,
+        dump_op_bound_results=False,
+        reserved_memory_gb=1,
+        num_queries=8,
+        query_len=1,
+        world_size=1,
+        chrome_trace=None,
+        block_size=128,
+    )
+    runner.perf_models = []
+    runner.device_profile = SimpleNamespace(
+        host_bandwidth_bytes_ps=1,
+        host_transfer_efficiency=1,
+        host_latency_s=0,
+    )
+    runner.total_device_memory_gb = 128
+    runner.model_weight_size_gb = 60
+    runner.engram_host_resident_size_gb = 0
+    runner.engram_host_resident_per_rank_gb = 0
+    runner.model = SimpleNamespace(
+        model_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_size=1), hf_config=SimpleNamespace(model_type='fixture')
+        )
+    )
+    monkeypatch.setattr(module, 'dcp_kv_token_capacity_factor', lambda _: 1)
+    monkeypatch.setattr(runner, '_ensure_compiled', lambda: pytest.fail('supplied graph must not compile'))
+    cache = torch.empty(1024, device='meta', dtype=torch.uint8)
+    inputs = dict(kv_cache_by_layers={0: cache}, kv_cache_per_token=16)
+    summary = SimpleNamespace(
+        request_input_bytes=0,
+        activation_peak_bytes=512 * 1024**2,
+        peak_memory_bytes=lambda weight_bytes, cache_bytes: weight_bytes + cache_bytes + 512 * 1024**2,
+    )
+    registered = {}
+    tracker = SimpleNamespace(
+        register_model_memory=lambda *_: None,
+        get_forward_memory_summary=lambda: summary,
+        register_compiled_weight_constants=lambda tensors: registered.update(tensors=list(tensors)),
+        register_kv_cache=lambda tensor: registered.setdefault('caches', []).append(tensor),
+        peak_mem_usage=lambda: 10 * 1024**3,
+    )
+    runtime = Runtime(
+        event_list=[],
+        memory_tracker=tracker,
+        total_execution_time_s=lambda: {'analytic': 0.1},
+        table_averages=lambda **_: [],
+        get_breakdowns=lambda: {},
+    )
+    monkeypatch.setattr(module, 'Runtime', lambda *_a, **_k: runtime)
+    monkeypatch.setattr(module, 'MemoryTracker', lambda _: tracker)
+
+    weights = [torch.empty(4, device='meta'), torch.empty(8, device='meta')]
+    caches = [torch.empty(64, device='meta', dtype=torch.int8)]
+    metrics = runner.run_inference(
+        [SimpleNamespace(concurrency=8, query_len=1, is_decode=True)],
+        generate_inputs_func=lambda *_a, **_k: inputs,
+        graph_provider=lambda _kwargs: [],
+        graph_weight_tensors=weights,
+        graph_cache_tensors=caches,
+    )
+
+    assert registered['tensors'] == weights
+    assert registered['caches'] == caches
+    expected_peak_gb = metrics.model_weight_size_gb + metrics.kv_cache_size_gb + 0.5
+    assert metrics.model_activation_size_gb == pytest.approx(0.5)
+    assert metrics.peak_memory_usage_gb == pytest.approx(expected_peak_gb)
+
+
 def template_workflow_script():
     import importlib.util
 

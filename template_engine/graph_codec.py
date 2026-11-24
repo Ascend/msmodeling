@@ -68,6 +68,39 @@ _PRESET = 6
 #: 9 | lzma.PRESET_EXTREME - used by the low-frequency template writers.
 PRESET_MAX = 9 | (1 << 31)
 
+#: Tensor attributes carrying resident-memory provenance across capture and
+#: template artifacts.  A captured tensor that was already charged as resident
+#: model memory keeps that tag through encoding, template expansion
+#: (``rebuild_tensor``) and serving, so the memory tracker can classify the
+#: expanded graph exactly like the native path instead of charging every Meta
+#: placeholder as a request input.
+#:
+#: ``weight`` covers parameters, buffers and compile-time folded constants (the
+#: static weight account); ``cache`` covers the per-layer KV / indexer /
+#: compressed payload the ``CacheMemoryInventory`` account already bills.
+#: Encoded as ``"w": 1`` / ``"c": 1`` on the tensor-table entry.
+TENSOR_WEIGHT_ATTR = "_msmodeling_template_weight"
+TENSOR_CACHE_ATTR = "_msmodeling_template_cache"
+
+
+def tag_tensor_resident(tensor: Any, owner: str | None) -> None:
+    """Write the capture's resident-memory provenance tag on a graph tensor."""
+
+    if owner == "weight":
+        setattr(tensor, TENSOR_WEIGHT_ATTR, True)
+    elif owner == "cache":
+        setattr(tensor, TENSOR_CACHE_ATTR, True)
+
+
+def tensor_resident_owner(tensor: Any) -> str | None:
+    """Resident account of a tagged graph tensor, or ``None`` for request state."""
+
+    if getattr(tensor, TENSOR_WEIGHT_ATTR, False):
+        return "weight"
+    if getattr(tensor, TENSOR_CACHE_ATTR, False):
+        return "cache"
+    return None
+
 
 class GraphCodecError(ValueError):
     """Raised when a JSON+xz artifact does not follow the graph codec."""
@@ -138,6 +171,7 @@ _TRUSTED_EXPORTS = {
         "QuantDtype",
     },
     "tensor_cast.layers.attention": {"AttentionTensorCast"},
+    "tensor_cast.layers.mla": {"MultiheadLatentAttentionTensorCast"},
     "tensor_cast.layers.glm5": {"Glm5SparseAttention"},
     "tensor_cast.layers.quant_linear": {"TensorCastQuantLinear"},
     "tensor_cast.layers.deepseek_v4": {"DeepseekV4SparseAttention", "route_deepseek_v4_gate"},
@@ -184,14 +218,17 @@ def encode_value(value: Any, tensors: list[dict[str, Any]], tensor_ids: dict[int
         if index is None:
             index = len(tensors)
             tensor_ids[source_id] = index
-            tensors.append(
-                {
-                    "id": index,
-                    "s": [int(d) for d in value.shape],
-                    "st": [int(s) for s in value.stride()],
-                    "d": str(value.dtype),
-                }
-            )
+            entry = {
+                "id": index,
+                "s": [int(d) for d in value.shape],
+                "st": [int(s) for s in value.stride()],
+                "d": str(value.dtype),
+            }
+            if getattr(value, TENSOR_WEIGHT_ATTR, False):
+                entry["w"] = 1
+            elif getattr(value, TENSOR_CACHE_ATTR, False):
+                entry["c"] = 1
+            tensors.append(entry)
         return {"__t__": index}
     if isinstance(value, torch.dtype):
         return {"__dt__": str(value)}
@@ -417,7 +454,12 @@ def _materialise_tensor(entry: Any) -> Any:
         raise GraphCodecError(f"unknown torch dtype name: {name!r}")
     shape = [int(d) for d in entry.get("s", [])]
     stride = [int(s) for s in entry.get("st", [])]
-    return torch.empty_strided(tuple(shape), tuple(stride), dtype=dtype, device="meta")
+    tensor = torch.empty_strided(tuple(shape), tuple(stride), dtype=dtype, device="meta")
+    if entry.get("w"):
+        setattr(tensor, TENSOR_WEIGHT_ATTR, True)
+    elif entry.get("c"):
+        setattr(tensor, TENSOR_CACHE_ATTR, True)
+    return tensor
 
 
 def dumps_bytes(payload: Any, *, preset: int = _PRESET) -> bytes:

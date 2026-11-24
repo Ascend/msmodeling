@@ -21,6 +21,7 @@ from tensor_cast.device import TEST_DEVICE
 from tensor_cast.performance_model.base import PerformanceModel
 from tensor_cast.performance_model.memory_tracker import MemoryTracker
 from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+from tensor_cast.performance_model.utils import accounted_elements, bytes_of_tensor
 from tensor_cast.runtime import Runtime, RuntimeEvent
 
 
@@ -39,6 +40,51 @@ class TestMemoryTracker(unittest.TestCase):
         self.assertEqual(summary.request_input_bytes, 20)
         self.assertEqual(summary.activation_peak_bytes, 40)
         self.assertEqual(summary.peak_memory_bytes(1000, 2000), 3060)
+
+    def test_broadcast_view_is_charged_by_its_storage_not_its_logical_shape(self):
+        """``expand`` reports ``numel`` elements but allocates nothing.
+
+        Models hand a small rope table to the graph as a stride-0 broadcast view
+        (``(1, 131072, 128)`` int64 out of 128 int64 values).  Charging
+        ``numel * itemsize`` bills 134 MB for a 1 KB table the weight account
+        already carries.
+        """
+
+        base = torch.empty(128, dtype=torch.int64, device="meta")
+        broadcast = base.expand(1, 131072, 128)
+
+        self.assertEqual(accounted_elements(broadcast), 128)
+        self.assertEqual(bytes_of_tensor(broadcast), 1024)
+
+        # Non-overlapping layouts keep ``numel`` (slices span exactly numel,
+        # contiguous and transposed tensors do too).
+        self.assertEqual(accounted_elements(torch.empty(4, 8, dtype=torch.float32, device="meta")), 32)
+        matrix = torch.empty(8, 16, dtype=torch.float32, device="meta")
+        self.assertEqual(accounted_elements(matrix.t()), 128)
+        self.assertEqual(accounted_elements(matrix[:, ::2]), 64)
+        self.assertEqual(accounted_elements(torch.empty(0, 8, device="meta")), 0)
+
+    def test_op_traffic_reads_a_broadcast_operand_once(self):
+        """``memory_read_bytes`` is HBM traffic, and a stride-0 operand is read once.
+
+        The same ``bytes_of_tensor`` feeds the allocation account and the op
+        traffic account, so an expanded per-request tensor must not inflate the
+        read traffic the latency model is built on either: the kernel fetches
+        the base table, not the virtual extent.
+        """
+
+        table = torch.empty(4, 8, dtype=torch.float32, device="meta")
+        expanded = table.expand(64, 4, 8)
+        info = OpInvokeInfo(torch.ops.aten.add.Tensor, (expanded, expanded), {}, expanded)
+        properties = info.get_memory_access_properties()
+        self.assertEqual(properties.memory_read_bytes, 2 * 4 * 8 * 4)
+        self.assertEqual(properties.memory_write_bytes, 4 * 8 * 4)
+
+        # A plain (non-overlapping) operand keeps its logical size.
+        plain = torch.empty(64, 4, 8, dtype=torch.float32, device="meta")
+        info = OpInvokeInfo(torch.ops.aten.add.Tensor, (plain, plain), {}, plain)
+        properties = info.get_memory_access_properties()
+        self.assertEqual(properties.memory_read_bytes, 2 * 64 * 4 * 8 * 4)
 
     def test_weight_view_and_copy_have_different_accounting(self):
         weight = torch.empty(10, device="meta")

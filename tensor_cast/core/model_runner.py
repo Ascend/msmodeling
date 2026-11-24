@@ -24,7 +24,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 import torch
 
@@ -617,6 +617,8 @@ class ModelRunner:
         runtime_observer: Optional[Callable[[Runtime], None]] = None,
         *,
         graph_provider: Optional[Callable[[dict], list]] = None,
+        graph_weight_tensors: Optional[Iterable[Any]] = None,
+        graph_cache_tensors: Optional[Iterable[Any]] = None,
     ) -> ModelRunnerMetrics:
         if graph_provider is None:
             self._ensure_compiled()
@@ -699,6 +701,18 @@ class ModelRunner:
         ):
             if graph_provider is not None:
                 runtime.op_invoke_infos = graph_provider(input_kwargs)
+                # A supplied (template) graph cannot be matched to the model's
+                # resident memory by identity: its Meta placeholders are copies,
+                # and expansion repeats one representative tensor per layer.
+                # The capture recorded which placeholders are resident and in
+                # which account; register them the way the native path registers
+                # the model, so they are not charged as request input (the peak
+                # already carries the full weight and cache accounts).
+                graph_weights = tuple(graph_weight_tensors or ())
+                if graph_weights:
+                    runtime.memory_tracker.register_compiled_weight_constants(graph_weights)
+                for cache_tensor in graph_cache_tensors or ():
+                    runtime.memory_tracker.register_kv_cache(cache_tensor)
             else:
                 static_forward = getattr(self, "_static_meta_forward", None)
                 if static_forward is None:

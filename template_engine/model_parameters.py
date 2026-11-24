@@ -20,7 +20,35 @@ No model is loaded and no process-global constants are changed during expansion.
 Legacy artifacts without parameters retain their historical formula vocabulary.
 """
 
+import logging
 from collections.abc import Mapping
+
+logger = logging.getLogger(__name__)
+
+
+def _kv_layout(model_config, config):
+    """Classify the KV layout the same way ``dcp_kv_token_capacity_factor`` does.
+
+    Under Decode Context Parallel the per-card token capacity factor depends on
+    the KV layout, not on the model name: sparse-attention models keep factor 1,
+    MLA shards by ``dcp``, and GQA only converts the TP head replication
+    ``min(dcp, max(1, tp // h_kv))`` into capacity.  The template side cannot
+    recover that classification from (B, S, TP, DCP), so record it next to the
+    other formula parameters while the resolved model config is still available.
+    Captures written before this field existed keep evaluating with the legacy
+    ``WINDOW`` heuristic (see ``parameter_features._dcp_cache_shard_factor``).
+    """
+    if config.get('model_type') in ('deepseek_v4', 'deepseek_v41', 'deepseek_v41_text'):
+        return 'sparse'
+    mla_config = getattr(model_config, 'mla_config', None)
+    if mla_config is not None:
+        requires_indexer_cache = getattr(getattr(mla_config, 'mla_cls', None), 'requires_indexer_cache', None)
+        sparse = bool(requires_indexer_cache()) if callable(requires_indexer_cache) else False
+        return 'sparse' if sparse else 'mla'
+    # Everything else carries a per-head KV layout (GQA / MHA).  The native path
+    # claims no DCP gain there unless ``num_key_value_heads`` is available, which
+    # is exactly what a missing ``KV_HEADS`` reproduces.
+    return 'gqa'
 
 
 def formula_parameters(model_config, *, block_size=None):
@@ -53,6 +81,12 @@ def formula_parameters(model_config, *, block_size=None):
     for ratio in config.get('compress_ratios', []) or []:
         if type(ratio) is int and ratio > 0:
             values[f'COMPRESS_RATIO/{ratio}'] = ratio
+    kv_heads = config.get('num_key_value_heads')
+    if isinstance(kv_heads, int) and not isinstance(kv_heads, bool) and kv_heads > 0:
+        values['KV_HEADS'] = kv_heads
+    layout = _kv_layout(model_config, config)
+    if layout is not None:
+        values['KV_LAYOUT'] = layout
     if block_size is not None:
         values['BLOCK_SIZE'] = int(block_size)
     return tuple(sorted(values.items())) if values else None
@@ -77,6 +111,26 @@ def bind_parameters(template, config):
         return dict(config)
     parameters = tuple(tuple(pair) for pair in parameters)
     supplied = config.get('model_parameters')
-    if supplied is not None and tuple(tuple(pair) for pair in supplied) != parameters:
-        raise ValueError('model formula parameters disagree with the template')
+    if supplied is not None:
+        supplied = {name: value for name, value in (tuple(pair) for pair in supplied)}
+        # The template declaration is the contract: every declared parameter
+        # must agree.  A supplied superset is allowed because resolution keeps
+        # gaining derivable inputs (e.g. ``KV_LAYOUT``) that older artifacts
+        # never declared; those extras are dropped below so the evaluation stays
+        # exactly what the artifact was fit with.
+        disagree = [name for name, value in parameters if name in supplied and supplied[name] != value]
+        if disagree:
+            raise ValueError('model formula parameters disagree with the template')
+        # Dropping the extras silently would also swallow a mistyped parameter
+        # name in a template's own binding: the artifact would keep serving the
+        # value it was fit with while the caller believes its input took effect.
+        # Name them so a typo is visible instead of indistinguishable from the
+        # intended "newer resolver, older artifact" case.
+        undeclared = sorted(set(supplied) - {name for name, _ in parameters})
+        if undeclared:
+            logger.warning(
+                'Model formula parameters %s were supplied but are not declared by this template; '
+                'ignoring them so the artifact keeps evaluating as it was fit.',
+                ', '.join(undeclared),
+            )
     return {**config, 'model_parameters': parameters}

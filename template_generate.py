@@ -477,12 +477,16 @@ def _build_features_cached(
         from template_engine.parameter_features import prefill_routing_features, prefill_cache_features
 
         features.update(prefill_routing_features(b, s, tp, ep, moe_dp, constants))
-        features.update(prefill_cache_features(b, s, tp, ep, moe_dp, mtp, constants))
+        # Prefill sizes the same paged pool as decode (``input_generator`` calls
+        # ``dcp_sharded_num_blocks`` on both paths), so the DCP shard must reach
+        # this branch too; otherwise a DCP>1 prefill cell fits the unsharded
+        # block count and over-predicts the per-card cache by the shard factor.
+        features.update(prefill_cache_features(b, s, tp, ep, moe_dp, mtp, constants, dcp=dcp))
     if decode and declared_parameters and fixed_structure:
         from template_engine.parameter_features import prefill_cache_features, prefill_routing_features
 
         features.update(prefill_routing_features(b, mtp + 1, tp, ep, moe_dp, constants))
-        cache = prefill_cache_features(b, s, tp, ep, moe_dp, mtp, constants, decode=True)
+        cache = prefill_cache_features(b, s, tp, ep, moe_dp, mtp, constants, decode=True, dcp=dcp)
         features.update({'decode/' + name.removeprefix('prefill/'): value for name, value in cache.items()})
 
     # Missing architecture fields are not inferred from another model. They
@@ -736,6 +740,27 @@ def _tensor_sizes(values: Sequence[Any], *, strict: bool) -> tuple[int, ...]:
     return tuple(int(round(float(value))) for value in values)
 
 
+def _copy_tensor_tags(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Carry provenance tags (captured resident-memory identity) to a rebuilt tensor."""
+
+    from template_engine.graph_codec import tag_tensor_resident, tensor_resident_owner
+
+    tag_tensor_resident(target, tensor_resident_owner(source))
+    return target
+
+
+def _tensor_with_tags(orig: torch.Tensor, shape, stride, *, strict: bool = False) -> torch.Tensor:
+    """Create a Meta tensor, carrying provenance tags from ``orig``.
+
+    Expansion rebuilds a placeholder whenever a shape formula changes it; the
+    resident-memory tag must survive or the served graph loses the provenance
+    the capture recorded.
+    """
+
+    rebuilt = torch.empty_strided(shape, stride, dtype=orig.dtype, device="meta", requires_grad=orig.requires_grad)
+    return _copy_tensor_tags(orig, rebuilt)
+
+
 def rebuild_tensor(orig: torch.Tensor, new_shape: Sequence[Any], *, strict: bool = False) -> torch.Tensor:
     """Rebuild a meta tensor with the requested shape and compatible strides."""
 
@@ -761,13 +786,7 @@ def rebuild_tensor(orig: torch.Tensor, new_shape: Sequence[Any], *, strict: bool
             else:
                 stride.append(int(round(old_stride_value * old_value / old_dimension)))
 
-    return torch.empty_strided(
-        shape,
-        tuple(stride),
-        dtype=orig.dtype,
-        device="meta",
-        requires_grad=orig.requires_grad,
-    )
+    return _tensor_with_tags(orig, shape, tuple(stride))
 
 
 def _apply_tensor_shape_stride(
@@ -821,13 +840,7 @@ def _apply_tensor_shape_stride(
         return orig
     if tuple(orig.shape) == shape and tuple(orig.stride()) == stride:
         return orig
-    return torch.empty_strided(
-        shape,
-        stride,
-        dtype=orig.dtype,
-        device="meta",
-        requires_grad=orig.requires_grad,
-    )
+    return _tensor_with_tags(orig, shape, stride)
 
 
 def apply_formula_to_val(
@@ -1348,6 +1361,7 @@ def _generate_ops_from_template_uncached(
                 device="meta",
                 requires_grad=value.requires_grad,
             )
+            _copy_tensor_tags(value, cloned)
             tensor_pool[key] = cloned
             tensor_origins[key] = path
             return cloned

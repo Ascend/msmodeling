@@ -60,6 +60,37 @@ def log_template_route(inner, requests, status, *, reason='', op_count=None):
         )
 
 
+def template_resident_tensors(ops, owner: str) -> List[Any]:
+    """Distinct graph tensors the capture tagged with one resident account.
+
+    Expansion materialises one placeholder per captured tensor and reuses it for
+    every represented layer, so object identity survives the whole serve path.
+    ``owner`` is ``"weight"`` (static weight account) or ``"cache"`` (the cache
+    inventory account).  Empty for artifacts captured before the tag existed;
+    those placeholders then fall back to the request-input account.
+    """
+    from template_engine.graph_codec import tensor_resident_owner
+
+    seen = {}
+    for op in ops:
+        for value in (getattr(op, 'args', ()), getattr(op, 'kwargs', {}), getattr(op, 'out', None)):
+            stack = [value]
+            while stack:
+                item = stack.pop()
+                if isinstance(item, (list, tuple)):
+                    stack.extend(item)
+                elif isinstance(item, dict):
+                    stack.extend(item.values())
+                elif tensor_resident_owner(item) == owner:
+                    seen[id(item)] = item
+    return list(seen.values())
+
+
+def template_weight_tensors(ops) -> List[Any]:
+    """Distinct graph tensors the capture tagged as model weights."""
+    return template_resident_tensors(ops, 'weight')
+
+
 def create_runner(user_input, *, enabled=True, incompatible_reason=''):
     """Keep compile provenance while deferring compilation for template candidates."""
     from tensor_cast.core.model_runner import ModelRunner
@@ -303,6 +334,8 @@ class TemplateBackedModelRunner:
             with_sampler,
             runtime_observer,
             graph_provider=graph_provider,
+            graph_weight_tensors=template_weight_tensors(ops),
+            graph_cache_tensors=template_resident_tensors(ops, 'cache'),
         )
         metrics.source_tag = source
         log_template_route(inner, requests, 'HIT', reason='template_graph', op_count=len(ops))

@@ -29,6 +29,15 @@ from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
 
 
+def _restore_class_flag(cls, name, saved_value):
+    """Restore a class-level flag, removing it when it did not exist before."""
+    if saved_value is None:
+        if name in cls.__dict__:
+            delattr(cls, name)
+    else:
+        setattr(cls, name, saved_value)
+
+
 @pytest.mark.nightly
 class TestKimiK3(unittest.TestCase):
     """Unit tests for Kimi K3 model simulation.
@@ -689,13 +698,6 @@ class TestKimiK3Patches(unittest.TestCase):
 
             return _fake_get_class, _restore
 
-        def _restore_flag(cls, name, saved_value):
-            if saved_value is None:
-                if name in cls.__dict__:
-                    delattr(cls, name)
-            else:
-                setattr(cls, name, saved_value)
-
         class _KimiConfig:
             model_type = "kimi_k3"
 
@@ -735,8 +737,629 @@ class TestKimiK3Patches(unittest.TestCase):
             finally:
                 restore2()
         finally:
-            _restore_flag(ModelWrapper, "_patched_for_k3_mtp", saved_mw_flag)
-            _restore_flag(ModelRunner, "_tensor_cast_k3_constant_folder_guard", saved_runner_flag)
+            _restore_class_flag(ModelWrapper, "_patched_for_k3_mtp", saved_mw_flag)
+            _restore_class_flag(ModelRunner, "_tensor_cast_k3_constant_folder_guard", saved_runner_flag)
+
+    def test_patch_model_classes_reapplied_after_in_place_remote_reexecution(self):
+        """transformers re-executes a remote file *in place* when its content
+        hash changes: the module object (and its module-level marker) survives,
+        but every class object is replaced by an unpatched copy.
+
+        The guard must detect the replaced class and re-apply the patches, or
+        the model is built from a class whose ``forward`` rejects TensorCast
+        kwargs (``unexpected keyword argument 'attention_meta'``).
+        """
+        import sys
+        import types
+
+        from tensor_cast.core.model_runner import ModelRunner
+        from tensor_cast.transformers.builtin_model.kimi_k3 import _patch_model_classes_for_kimi_k3
+        from tensor_cast.transformers.model import ModelWrapper
+
+        package = "transformers_modules.test_kimi_k3_inplace"
+
+        def _noop(self, *args, **kwargs):
+            return None
+
+        def _define(name, module_name, base=None):
+            cls = type(
+                name,
+                (base or object,),
+                {
+                    "forward": _noop,
+                    "moe_infer": _noop,
+                    "_update_linear_attn_mask": _noop,
+                    "__module__": module_name,
+                },
+            )
+            return cls
+
+        k3_name = f"{package}.modeling_kimi_k3"
+        linear_name = f"{package}.modeling_kimi_linear"
+        k3_module = types.ModuleType(k3_name)
+        linear_module = types.ModuleType(linear_name)
+
+        def _populate(k3_module, linear_module):
+            vl_cls = _define("KimiK3ForConditionalGeneration", k3_module.__name__)
+            vl_cls._merge_input_ids_with_image_features = _noop
+            k3_module.KimiK3ForConditionalGeneration = vl_cls
+            k3_module.VL_VISION_ATTENTION_FUNCTIONS = {}
+            k3_module.MoonViT3dEncoder = _define("MoonViT3dEncoder", k3_module.__name__)
+            k3_module.MoonVision3dPatchEmbed = _define("MoonVision3dPatchEmbed", k3_module.__name__)
+            for name in (
+                "KimiDeltaAttention",
+                "KimiLinearModel",
+                "KimiSparseMoeBlock",
+                "KimiMoEGate",
+                "KimiDecoderLayer",
+                "SituAndMul",
+                "KimiMLP",
+                "KimiBlockSparseMLP",
+                "KimiLinearForCausalLM",
+            ):
+                setattr(linear_module, name, _define(name, linear_module.__name__))
+            linear_module._apply_attn_res = lambda *args, **kwargs: None
+            return vl_cls
+
+        def _fake_get_class(class_ref, *args, **kwargs):
+            module_name, _, class_name = class_ref.partition(".")
+            return getattr(sys.modules[f"{package}.{module_name}"], class_name)
+
+        class _KimiConfig:
+            model_type = "kimi_k3"
+
+        saved_mw_flag = getattr(ModelWrapper, "_patched_for_k3_mtp", None)
+        saved_runner_flag = getattr(ModelRunner, "_tensor_cast_k3_constant_folder_guard", None)
+        saved_run_inference = ModelRunner.run_inference
+        ModelWrapper._patched_for_k3_mtp = True
+        ModelRunner._tensor_cast_k3_constant_folder_guard = True
+        saved_modules = {name: sys.modules.get(name) for name in (k3_name, linear_name)}
+        sys.modules[k3_name] = k3_module
+        sys.modules[linear_name] = linear_module
+        try:
+            first_vl = _populate(k3_module, linear_module)
+            with mock.patch.object(self._km, "_get_k3_class_from_source", side_effect=_fake_get_class):
+                self.assertTrue(_patch_model_classes_for_kimi_k3(_KimiConfig(), "moonshotai/Kimi-K3"))
+                self.assertTrue(hasattr(first_vl, "_original_vl_forward"))
+
+                # Same module objects, fresh classes: transformers re-executed
+                # the file in place and kept the module-level marker.
+                second_vl = _populate(k3_module, linear_module)
+                self.assertTrue(getattr(k3_module, self._km._K3_MODULE_PATCH_MARKER, False))
+                self.assertFalse(hasattr(second_vl, "_original_vl_forward"))
+
+                self.assertTrue(_patch_model_classes_for_kimi_k3(_KimiConfig(), "moonshotai/Kimi-K3"))
+                self.assertTrue(hasattr(second_vl, "_original_vl_forward"))
+
+                # A third pass over the now-patched generation is a no-op.
+                self.assertFalse(_patch_model_classes_for_kimi_k3(_KimiConfig(), "moonshotai/Kimi-K3"))
+        finally:
+            for name, original in saved_modules.items():
+                if original is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = original
+            # Restoring the flag alone would leave a run_inference patch that
+            # this test installed running for the rest of the session, so roll
+            # the method back as well (a no-op when the flag above already kept
+            # the block from running).
+            ModelRunner.run_inference = saved_run_inference
+            _restore_class_flag(ModelWrapper, "_patched_for_k3_mtp", saved_mw_flag)
+            _restore_class_flag(ModelRunner, "_tensor_cast_k3_constant_folder_guard", saved_runner_flag)
+
+    def test_patch_model_classes_reapplied_when_only_linear_module_reexecuted(self):
+        """transformers re-executes each remote file on its own content hash.
+
+        Replacing only ``modeling_kimi_linear`` (attention / MoE / MLP) keeps
+        ``modeling_kimi_k3`` and every marker on the wrapper class intact, so a
+        wrapper-only guard skips the repair and the live modules keep running
+        unpatched code. The guard must inspect the class generation of *both*
+        remote modules.
+        """
+        import sys
+        import types
+
+        from tensor_cast.core.model_runner import ModelRunner
+        from tensor_cast.transformers.builtin_model.kimi_k3 import _patch_model_classes_for_kimi_k3
+        from tensor_cast.transformers.model import ModelWrapper
+
+        package = "transformers_modules.test_kimi_k3_partial"
+
+        def _noop(self, *args, **kwargs):
+            return None
+
+        def _define(name, module_name):
+            return type(
+                name,
+                (object,),
+                {
+                    "forward": _noop,
+                    "moe_infer": _noop,
+                    "_update_linear_attn_mask": _noop,
+                    "__module__": module_name,
+                },
+            )
+
+        k3_name = f"{package}.modeling_kimi_k3"
+        linear_name = f"{package}.modeling_kimi_linear"
+        k3_module = types.ModuleType(k3_name)
+        linear_module = types.ModuleType(linear_name)
+
+        def _populate_k3():
+            vl_cls = _define("KimiK3ForConditionalGeneration", k3_name)
+            vl_cls._merge_input_ids_with_image_features = _noop
+            k3_module.KimiK3ForConditionalGeneration = vl_cls
+            k3_module.VL_VISION_ATTENTION_FUNCTIONS = {}
+            k3_module.MoonViT3dEncoder = _define("MoonViT3dEncoder", k3_name)
+            k3_module.MoonVision3dPatchEmbed = _define("MoonVision3dPatchEmbed", k3_name)
+            return vl_cls
+
+        def _populate_linear():
+            for name in (
+                "KimiDeltaAttention",
+                "KimiLinearModel",
+                "KimiSparseMoeBlock",
+                "KimiMoEGate",
+                "KimiDecoderLayer",
+                "SituAndMul",
+                "KimiMLP",
+                "KimiBlockSparseMLP",
+                "KimiLinearForCausalLM",
+            ):
+                setattr(linear_module, name, _define(name, linear_name))
+            linear_module._apply_attn_res = lambda *args, **kwargs: None
+
+        def _fake_get_class(class_ref, *args, **kwargs):
+            module_name, _, class_name = class_ref.partition(".")
+            return getattr(sys.modules[f"{package}.{module_name}"], class_name)
+
+        class _KimiConfig:
+            model_type = "kimi_k3"
+
+        saved_mw_flag = getattr(ModelWrapper, "_patched_for_k3_mtp", None)
+        saved_runner_flag = getattr(ModelRunner, "_tensor_cast_k3_constant_folder_guard", None)
+        saved_run_inference = ModelRunner.run_inference
+        ModelWrapper._patched_for_k3_mtp = True
+        ModelRunner._tensor_cast_k3_constant_folder_guard = True
+        saved_modules = {name: sys.modules.get(name) for name in (k3_name, linear_name)}
+        sys.modules[k3_name] = k3_module
+        sys.modules[linear_name] = linear_module
+        try:
+            _populate_k3()
+            _populate_linear()
+            with mock.patch.object(self._km, "_get_k3_class_from_source", side_effect=_fake_get_class):
+                self.assertTrue(_patch_model_classes_for_kimi_k3(_KimiConfig(), "moonshotai/Kimi-K3"))
+                wrapper = getattr(k3_module, "KimiK3ForConditionalGeneration")
+                self.assertTrue(self._km._k3_class_patches_intact(wrapper))
+
+                # Only the linear file is re-executed in place: the k3 module
+                # object and its wrapper class keep their markers while every
+                # attention / MoE / MLP class is replaced by a pristine copy.
+                _populate_linear()
+                fresh_attention = getattr(linear_module, "KimiDeltaAttention")
+                self.assertFalse(self._km._k3_class_patches_intact(fresh_attention))
+                self.assertTrue(self._km._k3_class_patches_intact(wrapper))
+
+                self.assertTrue(_patch_model_classes_for_kimi_k3(_KimiConfig(), "moonshotai/Kimi-K3"))
+                self.assertTrue(self._km._k3_class_patches_intact(fresh_attention))
+                self.assertTrue(self._km._k3_class_patches_intact(wrapper))
+                # Nothing left to repair once both generations are marked.
+                self.assertFalse(_patch_model_classes_for_kimi_k3(_KimiConfig(), "moonshotai/Kimi-K3"))
+        finally:
+            for name, original in saved_modules.items():
+                if original is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = original
+            # Restoring the flag alone would leave a run_inference patch that
+            # this test installed running for the rest of the session, so roll
+            # the method back as well (a no-op when the flag above already kept
+            # the block from running).
+            ModelRunner.run_inference = saved_run_inference
+            _restore_class_flag(ModelWrapper, "_patched_for_k3_mtp", saved_mw_flag)
+            _restore_class_flag(ModelRunner, "_tensor_cast_k3_constant_folder_guard", saved_runner_flag)
+
+    def test_ensure_k3_class_patches_targets_instantiated_classes(self):
+        """Post-load ensure re-patches the exact classes the model uses.
+
+        When the built model holds a stale class generation, resolving classes
+        by name would patch the newer (unused) generation and leave the live
+        model unpatched. The ensure pass must pin the instantiated classes.
+        """
+        import sys
+        import types
+
+        from tensor_cast.transformers.builtin_model import kimi_k3 as _km
+
+        package = "transformers_modules.test_kimi_k3_ensure"
+        module_name = f"{package}.modeling_kimi_k3"
+        module = types.ModuleType(module_name)
+
+        class KimiK3ForConditionalGeneration:
+            pass
+
+        KimiK3ForConditionalGeneration.__module__ = module_name
+        module.KimiK3ForConditionalGeneration = KimiK3ForConditionalGeneration
+        sys.modules[module_name] = module
+        try:
+
+            class _Config:
+                model_type = "kimi_k3"
+                name_or_path = "moonshotai/Kimi-K3"
+
+            model = SimpleNamespace(
+                _inner=object.__new__(KimiK3ForConditionalGeneration),
+                hf_config=_Config(),
+            )
+            captured = {}
+
+            def _fake_patch(config, model_id):
+                captured["overrides"] = dict(_km._k3_class_overrides())
+                captured["model_id"] = model_id
+                return True
+
+            with mock.patch.object(_km, "_patch_model_classes_for_kimi_k3", side_effect=_fake_patch):
+                self.assertTrue(_km._ensure_k3_class_patches(model))
+
+            self.assertIs(
+                captured["overrides"][f"modeling_kimi_k3.{KimiK3ForConditionalGeneration.__name__}"],
+                KimiK3ForConditionalGeneration,
+            )
+            self.assertEqual(captured["model_id"], "moonshotai/Kimi-K3")
+            self.assertEqual(_km._k3_class_overrides(), {})
+
+            # Already-marked classes are left alone.
+            setattr(KimiK3ForConditionalGeneration, _km._K3_CLASS_PATCH_MARKER, True)
+            with mock.patch.object(_km, "_patch_model_classes_for_kimi_k3", side_effect=_fake_patch):
+                self.assertFalse(_km._ensure_k3_class_patches(model))
+        finally:
+            sys.modules.pop(module_name, None)
+            if hasattr(KimiK3ForConditionalGeneration, _km._K3_CLASS_PATCH_MARKER):
+                delattr(KimiK3ForConditionalGeneration, _km._K3_CLASS_PATCH_MARKER)
+
+    def test_ensure_k3_class_patches_probes_every_live_class(self):
+        """A marked wrapper must not short-circuit the repair.
+
+        transformers re-executes each remote file independently, so the wrapper
+        can still carry the marker while the attention classes the instance
+        holds were replaced. Probing only the wrapper skips the repair exactly
+        then and the model keeps running unpatched code.
+        """
+        import sys
+        import types
+
+        import torch.nn as nn
+
+        from tensor_cast.transformers.builtin_model import kimi_k3 as _km
+
+        package = "transformers_modules.test_kimi_k3_partial_ensure"
+        k3_name = f"{package}.modeling_kimi_k3"
+        linear_name = f"{package}.modeling_kimi_linear"
+
+        class KimiDeltaAttention(nn.Module):
+            def __init__(self):
+                nn.Module.__init__(self)
+
+        KimiDeltaAttention.__module__ = linear_name
+
+        class KimiK3ForConditionalGeneration(nn.Module):
+            def __init__(self):
+                nn.Module.__init__(self)
+                self.self_attn = KimiDeltaAttention()
+
+        KimiK3ForConditionalGeneration.__module__ = k3_name
+
+        class _Config:
+            model_type = "kimi_k3"
+            name_or_path = "moonshotai/Kimi-K3"
+
+        saved = sys.modules.get(k3_name)
+        sys.modules[k3_name] = types.ModuleType(k3_name)
+        try:
+            model = SimpleNamespace(_inner=KimiK3ForConditionalGeneration(), hf_config=_Config())
+            captured = {}
+
+            def _fake_patch(config, model_id):
+                captured["overrides"] = dict(_km._k3_class_overrides())
+                return True
+
+            setattr(KimiK3ForConditionalGeneration, _km._K3_CLASS_PATCH_MARKER, True)
+            with mock.patch.object(_km, "_patch_model_classes_for_kimi_k3", side_effect=_fake_patch):
+                self.assertTrue(_km._ensure_k3_class_patches(model))
+
+            overrides = captured["overrides"]
+            self.assertIs(overrides[f"modeling_kimi_linear.{KimiDeltaAttention.__name__}"], KimiDeltaAttention)
+            self.assertIs(
+                overrides[f"modeling_kimi_k3.{KimiK3ForConditionalGeneration.__name__}"], KimiK3ForConditionalGeneration
+            )
+            self.assertEqual(_km._k3_class_overrides(), {})
+        finally:
+            if saved is None:
+                sys.modules.pop(k3_name, None)
+            else:
+                sys.modules[k3_name] = saved
+            if hasattr(KimiK3ForConditionalGeneration, _km._K3_CLASS_PATCH_MARKER):
+                delattr(KimiK3ForConditionalGeneration, _km._K3_CLASS_PATCH_MARKER)
+
+    def test_class_overrides_do_not_leak_across_threads(self):
+        """Parallel captures must not share the in-flight class pins.
+
+        A module-level dict made ``update``/``clear`` visible to every capture
+        thread in the process, so one thread's ``clear()`` could yank the pins
+        out from under another's patch pass. The context-local storage keeps
+        each pass isolated.
+        """
+        import threading
+
+        from tensor_cast.transformers.builtin_model import kimi_k3 as _km
+
+        pinned = type("Pinned", (), {})
+        token = _km._K3_CLASS_OVERRIDES.set({"modeling_kimi_k3.Pinned": pinned})
+        try:
+            self.assertIs(_km._k3_class_overrides()["modeling_kimi_k3.Pinned"], pinned)
+            seen = {}
+
+            def _worker():
+                seen["overrides"] = dict(_km._k3_class_overrides())
+
+            thread = threading.Thread(target=_worker)
+            thread.start()
+            thread.join()
+            self.assertEqual(seen["overrides"], {})
+        finally:
+            _km._K3_CLASS_OVERRIDES.reset(token)
+
+    def test_ensure_k3_class_patches_skips_the_model_walk_until_the_generation_changes(self):
+        """The guard runs before every inference; only a new generation re-walks.
+
+        ``named_modules()`` over a 61-layer K3 tree costs ~1.6 ms and the guard
+        runs once per ``run_inference``.  Fingerprinting the two remote modules
+        replaces that walk with two ``vars()`` scans, and still detaches as soon
+        as either file is re-executed in place.
+        """
+        import sys
+        import types
+
+        import torch.nn as nn
+
+        from tensor_cast.transformers.builtin_model import kimi_k3 as _km
+
+        package = "transformers_modules.test_kimi_k3_generation"
+        k3_name = f"{package}.modeling_kimi_k3"
+        linear_name = f"{package}.modeling_kimi_linear"
+
+        class KimiDeltaAttention(nn.Module):
+            def __init__(self):
+                nn.Module.__init__(self)
+
+        class KimiK3ForConditionalGeneration(nn.Module):
+            def __init__(self):
+                nn.Module.__init__(self)
+                self.self_attn = KimiDeltaAttention()
+
+        KimiDeltaAttention.__module__ = linear_name
+        KimiK3ForConditionalGeneration.__module__ = k3_name
+
+        k3_module = types.ModuleType(k3_name)
+        k3_module.KimiK3ForConditionalGeneration = KimiK3ForConditionalGeneration
+        linear_module = types.ModuleType(linear_name)
+        linear_module.KimiDeltaAttention = KimiDeltaAttention
+
+        class _Config:
+            model_type = "kimi_k3"
+
+        saved = {name: sys.modules.get(name) for name in (k3_name, linear_name)}
+        sys.modules[k3_name] = k3_module
+        sys.modules[linear_name] = linear_module
+        try:
+            model = SimpleNamespace(_inner=KimiK3ForConditionalGeneration(), hf_config=_Config())
+            patch_calls = []
+
+            def _fake_patch(config, model_id):
+                patch_calls.append(model_id)
+                for cls in (KimiK3ForConditionalGeneration, KimiDeltaAttention):
+                    setattr(cls, _km._K3_CLASS_PATCH_MARKER, True)
+                return True
+
+            with mock.patch.object(_km, "_patch_model_classes_for_kimi_k3", side_effect=_fake_patch):
+                self.assertTrue(_km._ensure_k3_class_patches(model))
+                self.assertEqual(len(patch_calls), 1)
+
+                # Same generation: the verified fingerprint short-circuits the
+                # walk, so the guard costs two module scans per inference.
+                with mock.patch.object(_km, "_k3_live_classes", side_effect=AssertionError("walked the model")):
+                    self.assertFalse(_km._ensure_k3_class_patches(model))
+
+                # Only the linear file is re-executed in place.  The instance's
+                # classes are still the marked ones, but the generation moved,
+                # so the guard must walk again instead of trusting the memo.
+                linear_module.KimiDeltaAttention = type(
+                    "KimiDeltaAttention",
+                    (nn.Module,),
+                    {"__init__": lambda self: nn.Module.__init__(self), "__module__": linear_name},
+                )
+                with mock.patch.object(_km, "_k3_live_classes", wraps=_km._k3_live_classes) as walk:
+                    self.assertFalse(_km._ensure_k3_class_patches(model))
+                walk.assert_called_once()
+        finally:
+            for name, original in saved.items():
+                if original is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = original
+            for cls in (KimiK3ForConditionalGeneration, KimiDeltaAttention):
+                if hasattr(cls, _km._K3_CLASS_PATCH_MARKER):
+                    delattr(cls, _km._K3_CLASS_PATCH_MARKER)
+
+    def test_ensure_k3_class_patches_retries_after_a_partial_pass(self):
+        """A pass that swallowed an exception must not memoize the generation.
+
+        ``_patch_model_classes_for_kimi_k3`` returns True as soon as one block
+        succeeded, but it writes the class markers only when every block
+        completed.  Keying the memo to the return value would let the fast path
+        skip the retry forever and keep the model on the classes whose patch
+        blocks failed.
+        """
+        import sys
+        import types
+
+        import torch.nn as nn
+
+        from tensor_cast.transformers.builtin_model import kimi_k3 as _km
+
+        package = "transformers_modules.test_kimi_k3_partial"
+        k3_name = f"{package}.modeling_kimi_k3"
+        linear_name = f"{package}.modeling_kimi_linear"
+
+        class KimiDeltaAttention(nn.Module):
+            pass
+
+        class KimiK3ForConditionalGeneration(nn.Module):
+            def __init__(self):
+                nn.Module.__init__(self)
+                self.self_attn = KimiDeltaAttention()
+
+        KimiDeltaAttention.__module__ = linear_name
+        KimiK3ForConditionalGeneration.__module__ = k3_name
+
+        k3_module = types.ModuleType(k3_name)
+        k3_module.KimiK3ForConditionalGeneration = KimiK3ForConditionalGeneration
+        linear_module = types.ModuleType(linear_name)
+        linear_module.KimiDeltaAttention = KimiDeltaAttention
+
+        class _Config:
+            model_type = "kimi_k3"
+
+        markers = (KimiK3ForConditionalGeneration, KimiDeltaAttention)
+        saved = {name: sys.modules.get(name) for name in (k3_name, linear_name)}
+        sys.modules[k3_name] = k3_module
+        sys.modules[linear_name] = linear_module
+        try:
+            model = SimpleNamespace(_inner=KimiK3ForConditionalGeneration(), hf_config=_Config())
+
+            # Partial pass: one block succeeded while another swallowed an
+            # exception, so the return value is True but no marker was written.
+            with mock.patch.object(_km, "_patch_model_classes_for_kimi_k3", return_value=True):
+                self.assertTrue(_km._ensure_k3_class_patches(model))
+            self.assertIsNone(_km._k3_verified_generation(model))
+
+            # The next call must walk the model again: a memo would freeze the
+            # half-patched generation for the instance's whole lifetime.
+            with (
+                mock.patch.object(_km, "_patch_model_classes_for_kimi_k3", return_value=True),
+                mock.patch.object(_km, "_k3_live_classes", wraps=_km._k3_live_classes) as walk,
+            ):
+                self.assertTrue(_km._ensure_k3_class_patches(model))
+            walk.assert_called_once()
+
+            # Only a complete pass, which stamps every live class, is memoized.
+            def _complete_pass(config, model_id):
+                for cls in markers:
+                    setattr(cls, _km._K3_CLASS_PATCH_MARKER, True)
+                return True
+
+            with mock.patch.object(_km, "_patch_model_classes_for_kimi_k3", side_effect=_complete_pass):
+                self.assertTrue(_km._ensure_k3_class_patches(model))
+            self.assertIsNotNone(_km._k3_verified_generation(model))
+        finally:
+            for name, original in saved.items():
+                if original is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = original
+            for cls in markers:
+                if hasattr(cls, _km._K3_CLASS_PATCH_MARKER):
+                    delattr(cls, _km._K3_CLASS_PATCH_MARKER)
+
+    def test_ensure_k3_class_patches_pins_every_live_remote_class(self):
+        """Re-patching must span the whole instance, not just the wrapper.
+
+        The patch pass resolves each target through ``_get_k3_class_from_source``
+        by name. After an in-place re-execution those names resolve to the new
+        generation, so pinning only the wrapper would patch attention/MoE/MLP
+        classes nothing calls and leave the live model unpatched.
+        """
+        import sys
+        import types
+
+        import torch.nn as nn
+
+        from tensor_cast.transformers.builtin_model import kimi_k3 as _km
+
+        package = "transformers_modules.test_kimi_k3_deep"
+
+        class _Config:
+            model_type = "kimi_k3"
+            name_or_path = "moonshotai/Kimi-K3"
+
+        def _module_cls(name, module_name, children=(), base=nn.Module):
+            cls = type(name, (base,), {"__module__": module_name})
+
+            def __init__(self, _children=children):
+                base.__init__(self)
+                for attr, child in _children:
+                    if isinstance(child, tuple):
+                        setattr(self, attr, nn.ModuleList([child[0]() for _ in range(child[1])]))
+                    else:
+                        setattr(self, attr, child())
+
+            cls.__init__ = __init__
+            return cls
+
+        linear = f"{package}.modeling_kimi_linear"
+        KimiMoEGate = _module_cls("KimiMoEGate", linear)
+        KimiSparseMoeBlock = _module_cls("KimiSparseMoeBlock", linear, (("gate", KimiMoEGate),))
+        KimiDeltaAttention = _module_cls("KimiDeltaAttention", linear)
+        KimiMLP = _module_cls("KimiMLP", linear)
+        KimiDecoderLayer = _module_cls(
+            "KimiDecoderLayer",
+            linear,
+            (("self_attn", KimiDeltaAttention), ("mlp", KimiMLP), ("block_sparse_moe", KimiSparseMoeBlock)),
+        )
+        KimiLinearModel = _module_cls("KimiLinearModel", linear, (("layers", (KimiDecoderLayer, 1)),))
+        KimiLinearForCausalLM = _module_cls("KimiLinearForCausalLM", linear, (("model", KimiLinearModel),))
+        KimiK3ForConditionalGeneration = _module_cls(
+            "KimiK3ForConditionalGeneration",
+            f"{package}.modeling_kimi_k3",
+            (("language_model", KimiLinearForCausalLM),),
+        )
+
+        k3_name = f"{package}.modeling_kimi_k3"
+        saved = sys.modules.get(k3_name)
+        sys.modules[k3_name] = types.ModuleType(k3_name)
+        try:
+            inner = KimiK3ForConditionalGeneration()
+            model = SimpleNamespace(_inner=inner, hf_config=_Config())
+            captured = {}
+
+            def _fake_patch(config, model_id):
+                captured["overrides"] = dict(_km._k3_class_overrides())
+                return True
+
+            with mock.patch.object(_km, "_patch_model_classes_for_kimi_k3", side_effect=_fake_patch):
+                self.assertTrue(_km._ensure_k3_class_patches(model))
+
+            overrides = captured["overrides"]
+            for cls in (
+                KimiK3ForConditionalGeneration,
+                KimiLinearForCausalLM,
+                KimiLinearModel,
+                KimiDecoderLayer,
+                KimiDeltaAttention,
+                KimiMLP,
+                KimiSparseMoeBlock,
+                KimiMoEGate,
+            ):
+                # Both ref prefixes name the live class, so whichever prefix a
+                # patch site asks for, it lands on the object the model calls.
+                self.assertIs(overrides[f"modeling_kimi_linear.{cls.__name__}"], cls)
+                self.assertIs(overrides[f"modeling_kimi_k3.{cls.__name__}"], cls)
+            self.assertEqual(_km._k3_class_overrides(), {})
+        finally:
+            if saved is None:
+                sys.modules.pop(k3_name, None)
+            else:
+                sys.modules[k3_name] = saved
 
     def test_patch_model_classes_not_marked_after_partial_failure(self):
         """Issue #596 review: when a patch block swallows an exception, the
@@ -820,13 +1443,6 @@ class TestKimiK3Patches(unittest.TestCase):
                 else:
                     sys.modules[name] = original
 
-        def _restore_flag(cls, name, saved_value):
-            if saved_value is None:
-                if name in cls.__dict__:
-                    delattr(cls, name)
-            else:
-                setattr(cls, name, saved_value)
-
         class _KimiConfig:
             model_type = "kimi_k3"
 
@@ -857,8 +1473,8 @@ class TestKimiK3Patches(unittest.TestCase):
         finally:
             setattr(linear_module, "KimiMoEGate", saved_gate)
             _restore()
-            _restore_flag(ModelWrapper, "_patched_for_k3_mtp", saved_mw_flag)
-            _restore_flag(ModelRunner, "_tensor_cast_k3_constant_folder_guard", saved_runner_flag)
+            _restore_class_flag(ModelWrapper, "_patched_for_k3_mtp", saved_mw_flag)
+            _restore_class_flag(ModelRunner, "_tensor_cast_k3_constant_folder_guard", saved_runner_flag)
 
     def test_non_quantized_mla_prolog_forwards_phase_metadata(self):
         """The K3 custom BF16 prolog must preserve Chunked-Prefill phase metadata."""
