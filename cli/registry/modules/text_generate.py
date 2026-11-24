@@ -484,6 +484,7 @@ SPEC = ModuleSpec(
         EXPORT_EMPIRICAL_METRICS,
     ],
     validators=[
+        ValidatorRef(name="linearQuantMma", fn=V.linear_quant_mma),
         ValidatorRef(name="prefillDecodeMutex", fn=V.prefill_decode_mutex, wants_provided=True),
         ValidatorRef(name="productEqNumDevices", fn=V.product_eq_num_devices),
         ValidatorRef(name="moeProductEqNumDevices", fn=V.moe_product_eq_num_devices),

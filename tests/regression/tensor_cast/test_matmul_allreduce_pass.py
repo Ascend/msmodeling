@@ -47,6 +47,9 @@ class MatmulAllReducePassTestCase(unittest.TestCase):
             context_length=1000,
             do_compile=True,
             quantize_linear_action=quant_action,
+            device="ATLAS_850_486T_128G"
+            if quant_action in (QuantizeLinearAction.FP8, QuantizeLinearAction.MXFP4, QuantizeLinearAction.MXFP8)
+            else "TEST_DEVICE",
             num_mtp_tokens=0,
             num_hidden_layers_override=1,
             world_size=2,
@@ -79,6 +82,10 @@ class MatmulAllReducePassTestCase(unittest.TestCase):
             (
                 QuantizeLinearAction.MXFP4,
                 "tensor_cast.mxfp4_linear_all_reduce.default",
+            ),
+            (
+                QuantizeLinearAction.MXFP8,
+                "tensor_cast.mxfp8_linear_all_reduce.default",
             ),
         ]
     )

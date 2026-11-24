@@ -352,6 +352,16 @@ def test_quantization_enum_members_survive_artifact_roundtrip(enum_name):
         assert restored['quantization'] is member
 
 
+@pytest.mark.parametrize('module_name', ['tensor_cast.quantize_utils', 'tensor_cast.core.quantization.datatypes'])
+def test_linear_quant_type_old_and_new_export_paths_remain_compatible(module_name):
+    from tensor_cast.core.quantization.datatypes import LinearQuantType
+    from template_engine.graph_codec import decode_value
+
+    for member in LinearQuantType:
+        payload = {'__enum__': f'{module_name}.LinearQuantType.{member.name}'}
+        assert decode_value(payload, []) is member
+
+
 def test_glm5_attention_metadata_roundtrip_keeps_exact_export_boundary():
     from tensor_cast.layers.glm5 import Glm5SparseAttention, glm5_uses_indexshare
     from template_engine.graph_codec import GraphCodecError, decode_document, encode_document

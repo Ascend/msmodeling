@@ -225,3 +225,37 @@ def _(
     x2 = torch.empty_like(x).contiguous()
     x1, scale = torch.ops.tensor_cast.dynamic_quantize_mxfp4(x, group_size=group_size)
     return x1, scale, x2
+
+
+@register_tensor_cast_op("rms_norm_dynamic_quant_mxfp8")
+def _(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    group_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.tensor_cast.dynamic_quantize_mxfp8(x, group_size=group_size)
+
+
+@register_tensor_cast_op("add_rms_norm_dynamic_quant_mxfp8")
+def _(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    group_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.tensor_cast.dynamic_quantize_mxfp8(x, group_size=group_size)
+
+
+@register_tensor_cast_op("add_rms_norm_dynamic_quant2_mxfp8")
+def _(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    group_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    x2 = torch.empty_like(x).contiguous()
+    x1, scale = torch.ops.tensor_cast.dynamic_quantize_mxfp8(x, group_size=group_size)
+    return x1, scale, x2

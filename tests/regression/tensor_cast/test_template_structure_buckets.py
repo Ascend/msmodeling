@@ -993,6 +993,24 @@ def test_review_squeeze_matches_torch(shape, dim, expected):
     assert derive_shape_semantically(op)["out"]["shape"] == expected
 
 
+@pytest.mark.parametrize("with_residual", [False, True])
+def test_mxfp8_norm_quant_shape_rule_matches_block_scales(with_residual):
+    from template_engine.shape_rules import derive_shape_semantically
+
+    x = torch.empty((2, 3, 65), device="meta", dtype=torch.bfloat16)
+    weight = torch.empty((65,), device="meta", dtype=torch.bfloat16)
+    if with_residual:
+        func = "tensor_cast.add_rms_norm_dynamic_quant2_mxfp8.default"
+        args = (x, torch.empty_like(x), weight, 1e-6, 32)
+    else:
+        func = "tensor_cast.rms_norm_dynamic_quant_mxfp8.default"
+        args = (x, weight, 1e-6, 32)
+    expected = ({"shape": [2, 3, 65]}, {"shape": [2, 3, 3]})
+    if with_residual:
+        expected = (*expected, {"shape": [2, 3, 65]})
+    assert derive_shape_semantically(CapturedOp(func, args, {}, None))["out"] == expected
+
+
 def test_review_symbolic_squeeze_and_slice_maximum_start():
     from template_engine.shape_rules import _rule_squeeze, _Spec, derive_shape_semantically
 

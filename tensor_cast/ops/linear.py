@@ -118,6 +118,7 @@ def _(
     return torch.empty((x.shape[0], w.shape[1]), dtype=out_dtype, device="meta")
 
 
+@register_tensor_cast_op("mxfp8_linear")
 @register_tensor_cast_op("mxfp4_linear")
 def _(
     x: torch.Tensor,
@@ -128,23 +129,22 @@ def _(
     out_dtype: Optional[torch.dtype],
 ) -> torch.Tensor:
     """
-    MXFP4 linear operation. Both x and w are in MXFP4 format with logical
-    dimension as (M, K) and (K, N). The MXFP4 format is logically represented
-    with torch.int4.
+    Block-scaled linear operation with E8M0 scales.
+    MXFP4 uses a torch.int4 payload and MXFP8 uses a torch.float8_e4m3fn payload.
 
     Semantically equivalent to:
-    `out = (dequant_mxfp4(x) @ dequant_mxfp4(w) + bias).to_dtype(out_dtype)`
+    `out = (dequant_mx(x) @ dequant_mx(w) + bias).to_dtype(out_dtype)`
 
     Args:
-        x: (M, K) in MXFP4 format
-        w: (K, N) in MXFP4 format
+        x: (M, K) in the selected MX format
+        w: (K, N) in the selected MX format
         x_scale: (M, Kg) for activation scale in torch.float8_e8m0fnu
         w_scale: (N, Kg) for weight scale in torch.float8_e8m0fnu
         bias: Optional[(N,)] bias tensor
         out_dtype: output data type
     """
     if out_dtype is None:
-        out_dtype = torch.float16  # Default output for MXFP4
+        out_dtype = torch.float16
     return torch.empty((x.shape[0], w.shape[1]), dtype=out_dtype, device="meta")
 
 

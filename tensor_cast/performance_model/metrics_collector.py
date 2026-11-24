@@ -73,6 +73,8 @@ DEFAULT_FUSED_GROUPS = {
         "tensor_cast.matmul_all_reduce",
         "tensor_cast.static_quant_linear_all_reduce",
         "tensor_cast.fp8_linear_all_reduce",
+        "tensor_cast.mxfp4_linear_all_reduce",
+        "tensor_cast.mxfp8_linear_all_reduce",
     ],
 }
 

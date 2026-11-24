@@ -568,6 +568,7 @@ SPEC = ModuleSpec(
             wants_provided=True,
         ),
         ValidatorRef(name="validParallelCombo", fn=V.valid_parallel_combo),
+        ValidatorRef(name="linearQuantMma", fn=V.linear_quant_mma),
         ValidatorRef(name="effectiveLenGe1", fn=V.effective_len_ge1_to),
         ValidatorRef(name="pdRatioMutexDisagg", fn=V.pd_ratio_mutex_disagg),
         ValidatorRef(name="mtpTokensVsAcceptanceRate", fn=V.mtp_tokens_vs_acceptance_rate),

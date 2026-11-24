@@ -86,9 +86,12 @@ _GEMM_TARGETS = _targets(
     ("tensor_cast", "static_quant_linear_int4"),
     ("tensor_cast", "fp8_linear"),
     ("tensor_cast", "mxfp4_linear"),
+    ("tensor_cast", "mxfp8_linear"),
     ("tensor_cast", "grouped_matmul"),
     ("tensor_cast", "grouped_matmul_quant"),
     ("tensor_cast", "grouped_matmul_quant_swiglu"),
+    ("tensor_cast", "grouped_matmul_mxfp8"),
+    ("tensor_cast", "grouped_matmul_mxfp8_swiglu_quant"),
 )
 
 _ACTIVATION_TARGETS = _targets(
@@ -103,6 +106,10 @@ _ACTIVATION_TARGETS = _targets(
 
 _QUANT_TARGETS = _targets(
     ("tensor_cast", "dynamic_quantize_symmetric"),
+    ("tensor_cast", "dynamic_quantize_mxfp8"),
+    ("tensor_cast", "rms_norm_dynamic_quant_mxfp8"),
+    ("tensor_cast", "add_rms_norm_dynamic_quant_mxfp8"),
+    ("tensor_cast", "add_rms_norm_dynamic_quant2_mxfp8"),
     ("prims", "convert_element_type"),
     ("aten", "_to_copy"),
 )

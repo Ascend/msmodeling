@@ -235,6 +235,7 @@ class TestGetValidatorUI:
         """video_generate exposes UI metadata for its cross-field validators."""
         validator_ui = get_validator_ui("video_generate")
         assert set(validator_ui) == {
+            "linearQuantMma",
             "cfgParallelRequiresUseCfg",
             "numDevicesMatchesUlyssesSize",
             "blockSparseAttentionRejectsAttentionQuantization",
@@ -249,6 +250,7 @@ class TestGetValidatorUI:
             "attention-backend",
             "quantize-attention-action",
         ]
+        assert validator_ui["linearQuantMma"]["fields"] == ["device", "quantize-linear-action"]
 
     def test_get_validator_ui_unknown_module_raises(self):
         """get_validator_ui() with unknown module raises ModuleNotFoundError."""

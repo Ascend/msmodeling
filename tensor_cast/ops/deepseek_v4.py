@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 import torch
 from torch._subclasses.fake_tensor import is_fake
 
-from ..quantize_utils import require_metadata_tensor, validate_hif8_kv_payload
+from ..quantize_utils import validate_hif8_kv_payload
 from ..utils import register_tensor_cast_op
 
 
@@ -107,7 +107,6 @@ def _(
     if kv_format not in (None, "hif8"):
         raise ValueError(f"Unsupported V4 KV format: {kv_format}")
     if kv_format == "hif8":
-        require_metadata_tensor(hidden_states)
         if kv_scale is None or rotate:
             raise ValueError("HIF8 compression requires a static scale and the main shared-KV stream")
         validate_hif8_kv_payload(kv_cache, kv_scale)
@@ -265,7 +264,6 @@ def _(
     if kv_format not in (None, "hif8"):
         raise ValueError(f"Unsupported V4 KV format: {kv_format}")
     if kv_format == "hif8":
-        require_metadata_tensor(q)
         if kv_scale is None:
             raise ValueError("HIF8 shared-KV attention requires a static scale")
         validate_hif8_kv_payload(kv, kv_scale)

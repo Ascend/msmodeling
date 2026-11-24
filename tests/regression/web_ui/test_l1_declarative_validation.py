@@ -54,6 +54,32 @@ def _build_valid_params(spec):
     return params
 
 
+@pytest.mark.parametrize(
+    "module_id, quant_field",
+    [
+        ("text_generate", "quantize-linear-action"),
+        ("text_generate", "quantize-non-expert-linear-action"),
+        ("throughput_optimizer", "quantize-linear-action"),
+        ("throughput_optimizer", "quantize-non-expert-linear-action"),
+        ("image_generate", "quantize-linear-action"),
+        ("video_generate", "quantize-linear-action"),
+    ],
+)
+@pytest.mark.parametrize("action", ["FP8", "MXFP4", "MXFP8"])
+def test_linear_quant_mma_validates_web_cases_before_execution(module_id, quant_field, action):
+    from tensor_cast.device import ATLAS_800
+
+    params = _build_valid_params(get_spec(module_id))
+    params.update({"model-id": "offline/model", "device": ATLAS_800.A3_752T_128G_DIE.name, quant_field: action})
+    if module_id == "image_generate":
+        params["output-image-size"] = [512, 512]
+    error, fields = validate_case_for_module(module_id, params, set())
+    assert f"{action} Linear quantization simulation requires a positive" in error
+    assert "device" in fields and quant_field in fields
+    params["device"] = "TEST_DEVICE"
+    assert validate_case_for_module(module_id, params, set()) == (None, None)
+
+
 class TestCheckDeclarative:
     """Test check_declarative() L1 validation."""
 

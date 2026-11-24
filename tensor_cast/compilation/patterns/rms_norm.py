@@ -19,6 +19,7 @@ import torch._prims as prims
 import torch.nn.functional as F
 
 from ... import config
+from ...core.quantization.datatypes import MXFP8_GROUP_SIZE
 
 _RMS_NORM_DTYPE_LIST = [torch.float16, torch.bfloat16]
 _LAYER_NORM_DTYPE_LIST = [torch.float16, torch.bfloat16, torch.float32]
@@ -568,11 +569,14 @@ class AddRMSNormDynamicQuant2Pattern:
         return (pattern, replacement, get_inputs())
 
 
-class RMSNormDynamicQuantMXFP4Pattern:
-    """Pattern for RMS norm followed by MXFP4 dynamic quantization."""
+class RMSNormDynamicQuantMXPattern:
+    """Pattern for RMS norm followed by MX dynamic quantization."""
 
     @staticmethod
-    def create(eps: float = 1e-6, group_size: int = 32):
+    def create(eps: float = 1e-6, group_size: int = 32, quant_format: str = "mxfp4"):
+        dynamic_quantize = getattr(torch.ops.tensor_cast, f"dynamic_quantize_{quant_format}")
+        rms_norm_dynamic_quant = getattr(torch.ops.tensor_cast, f"rms_norm_dynamic_quant_{quant_format}")
+
         def get_inputs():
             hidden_states = torch.empty(2, 4, device="meta")
             weight = torch.empty(4, device="meta")
@@ -580,10 +584,10 @@ class RMSNormDynamicQuantMXFP4Pattern:
 
         def pattern(hidden_states, weight):
             out = torch.ops.tensor_cast.rms_norm(hidden_states, weight, eps)
-            return torch.ops.tensor_cast.dynamic_quantize_mxfp4(out, group_size=group_size)
+            return dynamic_quantize(out, group_size=group_size)
 
         def replacement(hidden_states, weight):
-            return torch.ops.tensor_cast.rms_norm_dynamic_quant_mxfp4(
+            return rms_norm_dynamic_quant(
                 hidden_states,
                 weight,
                 eps,
@@ -593,11 +597,14 @@ class RMSNormDynamicQuantMXFP4Pattern:
         return (pattern, replacement, get_inputs())
 
 
-class AddRMSNormDynamicQuantMXFP4Pattern:
-    """Pattern for add RMS norm followed by MXFP4 dynamic quantization."""
+class AddRMSNormDynamicQuantMXPattern:
+    """Pattern for add RMS norm followed by MX dynamic quantization."""
 
     @staticmethod
-    def create(eps: float = 1e-6, group_size: int = 64):
+    def create(eps: float = 1e-6, group_size: int = 64, quant_format: str = "mxfp4"):
+        rms_norm_dynamic_quant = getattr(torch.ops.tensor_cast, f"rms_norm_dynamic_quant_{quant_format}")
+        add_rms_norm_dynamic_quant = getattr(torch.ops.tensor_cast, f"add_rms_norm_dynamic_quant_{quant_format}")
+
         def get_inputs():
             hidden_states = torch.empty(2, 4, device="meta")
             residual = torch.empty(2, 4, device="meta")
@@ -605,7 +612,7 @@ class AddRMSNormDynamicQuantMXFP4Pattern:
             return [hidden_states, residual, weight]
 
         def pattern(hidden_states, residual, weight):
-            return torch.ops.tensor_cast.rms_norm_dynamic_quant_mxfp4(
+            return rms_norm_dynamic_quant(
                 hidden_states + residual,
                 weight,
                 eps,
@@ -613,7 +620,7 @@ class AddRMSNormDynamicQuantMXFP4Pattern:
             )
 
         def replacement(hidden_states, residual, weight):
-            return torch.ops.tensor_cast.add_rms_norm_dynamic_quant_mxfp4(
+            return add_rms_norm_dynamic_quant(
                 hidden_states,
                 residual,
                 weight,
@@ -624,11 +631,14 @@ class AddRMSNormDynamicQuantMXFP4Pattern:
         return (pattern, replacement, get_inputs())
 
 
-class AddRMSNormDynamicQuant2MXFP4Pattern:
-    """Pattern for add RMS norm2 followed by MXFP4 dynamic quantization."""
+class AddRMSNormDynamicQuant2MXPattern:
+    """Pattern for add RMS norm2 followed by MX dynamic quantization."""
 
     @staticmethod
-    def create(eps: float = 1e-6, group_size: int = 64):
+    def create(eps: float = 1e-6, group_size: int = 64, quant_format: str = "mxfp4"):
+        rms_norm_dynamic_quant = getattr(torch.ops.tensor_cast, f"rms_norm_dynamic_quant_{quant_format}")
+        add_rms_norm_dynamic_quant2 = getattr(torch.ops.tensor_cast, f"add_rms_norm_dynamic_quant2_{quant_format}")
+
         def get_inputs():
             hidden_states = torch.empty(2, 4, device="meta")
             residual = torch.empty(2, 4, device="meta")
@@ -637,7 +647,7 @@ class AddRMSNormDynamicQuant2MXFP4Pattern:
 
         def pattern(hidden_states, residual, weight):
             residual = hidden_states + residual
-            result = torch.ops.tensor_cast.rms_norm_dynamic_quant_mxfp4(
+            result = rms_norm_dynamic_quant(
                 residual,
                 weight,
                 eps,
@@ -646,7 +656,7 @@ class AddRMSNormDynamicQuant2MXFP4Pattern:
             return *result, residual
 
         def replacement(hidden_states, residual, weight):
-            out, scale, residual = torch.ops.tensor_cast.add_rms_norm_dynamic_quant2_mxfp4(
+            out, scale, residual = add_rms_norm_dynamic_quant2(
                 hidden_states,
                 residual,
                 weight,
@@ -812,20 +822,20 @@ def register_all_patterns():
                         *AddRMSNormDynamicQuant2Pattern.create(symmetric=symmetric, per_sample=per_sample),
                     )
 
-        # Register MXFP4 patterns
-        for group_size in [32, 64]:
+        # Register MX dynamic quantization patterns
+        for quant_format, group_size in (("mxfp4", 32), ("mxfp4", 64), ("mxfp8", MXFP8_GROUP_SIZE)):
             register_pattern(
-                f"rms_norm_dynamic_quant_mxfp4_g{group_size}_pattern",
-                *RMSNormDynamicQuantMXFP4Pattern.create(group_size=group_size),
+                f"rms_norm_dynamic_quant_{quant_format}_g{group_size}_pattern",
+                *RMSNormDynamicQuantMXPattern.create(group_size=group_size, quant_format=quant_format),
             )
 
             if config.compilation.fusion_patterns.enable_add_rms_norm:
                 register_pattern(
-                    f"add_rms_norm_dynamic_quant_mxfp4_g{group_size}_pattern",
-                    *AddRMSNormDynamicQuantMXFP4Pattern.create(group_size=group_size),
+                    f"add_rms_norm_dynamic_quant_{quant_format}_g{group_size}_pattern",
+                    *AddRMSNormDynamicQuantMXPattern.create(group_size=group_size, quant_format=quant_format),
                 )
 
                 register_pattern(
-                    f"add_rms_norm_dynamic_quant2_mxfp4_g{group_size}_pattern",
-                    *AddRMSNormDynamicQuant2MXFP4Pattern.create(group_size=group_size),
+                    f"add_rms_norm_dynamic_quant2_{quant_format}_g{group_size}_pattern",
+                    *AddRMSNormDynamicQuant2MXPattern.create(group_size=group_size, quant_format=quant_format),
                 )

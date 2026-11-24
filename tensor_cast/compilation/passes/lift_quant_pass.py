@@ -23,6 +23,7 @@ import torch.fx as fx
 from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from ... import ops  # noqa: F401
+from ...core.quantization.datatypes import MXFP8_GROUP_SIZE
 from ..pass_base import TensorCastGraphModulePass
 from ..topo_sort import stable_topo_sort
 
@@ -40,6 +41,7 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
         torch.ops.tensor_cast.dynamic_quantize_asymmetric.default,
         torch.ops.tensor_cast.dynamic_quantize_symmetric.default,
         torch.ops.tensor_cast.dynamic_quantize_mxfp4.default,
+        torch.ops.tensor_cast.dynamic_quantize_mxfp8.default,
         torch.ops.tensor_cast.dynamic_quantize_hif8.default,
         torch.ops.tensor_cast.quantize_hif8.default,
     ]
@@ -121,8 +123,28 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
                     torch.ops.tensor_cast.dynamic_quantize_symmetric.default,
                     torch.ops.tensor_cast.dynamic_quantize_asymmetric.default,
                 ) and bool(reduction_dims)
+                is_mx_quant = quantize_op in (
+                    torch.ops.tensor_cast.dynamic_quantize_mxfp4.default,
+                    torch.ops.tensor_cast.dynamic_quantize_mxfp8.default,
+                )
+                group_size = (
+                    original_quant_node.args[1]
+                    if len(original_quant_node.args) > 1
+                    else original_quant_node.kwargs.get("group_size", MXFP8_GROUP_SIZE)
+                )
+                scale_width = 1
                 while is_swappable(current_input) and "hif8" not in str(quantize_op):
-                    if has_reduction and (tuple(reduction_dims) != (-1,) or not preserves_last_dim(current_input)):
+                    if is_mx_quant:
+                        # Moving MX quantization across a view must preserve every block along K.
+                        if not preserves_last_dim(current_input):
+                            break
+                        width = current_input.meta.get("val", current_input.meta.get("tensor_meta")).shape[-1]
+                        if not isinstance(width, int) or width <= 0:
+                            break
+                        if not isinstance(group_size, int) or isinstance(group_size, bool) or group_size <= 0:
+                            break
+                        scale_width = (width + group_size - 1) // group_size
+                    elif has_reduction and (tuple(reduction_dims) != (-1,) or not preserves_last_dim(current_input)):
                         break
                     # As a safety check, we only lift through an op if it has a single user.
                     # Lifting an op with multiple users would affect other paths in the graph.
@@ -221,9 +243,9 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
                             else:
                                 assert idx in new_getitem_nodes
                                 scale_node = new_getitem_nodes[idx]
-                                if has_reduction and swappable_ops_chain:
+                                if (has_reduction or is_mx_quant) and swappable_ops_chain:
                                     # Keep scale/offset in the original view's row layout.
-                                    scale_shape = [*original_quant_node.args[0].args[1][:-1], 1]
+                                    scale_shape = [*original_quant_node.args[0].args[1][:-1], scale_width]
                                     with graph.inserting_after(scale_node):
                                         scale_node = graph.call_function(
                                             torch.ops.aten.reshape.default, (scale_node, scale_shape)

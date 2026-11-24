@@ -228,6 +228,7 @@ SPEC = ModuleSpec(
         S.CHROME_TRACE.override(group=None, cli_help="Write chrome trace JSON."),
     ],
     validators=[
+        ValidatorRef(name="linearQuantMma", fn=V.linear_quant_mma),
         ValidatorRef(name="cfgParallelRequiresUseCfg", fn=V.cfg_parallel_requires_use_cfg),
         ValidatorRef(name="numDevicesMatchesUlyssesSize", fn=V.num_devices_matches_ulysses_size),
         ValidatorRef(name="cfgParallelRequiresWorldSize2", fn=V.cfg_parallel_requires_world_size_2),

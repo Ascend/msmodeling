@@ -164,6 +164,7 @@ _TRUSTED_EXPORTS = {
         "DiffusersVaeConfig",
     },
     "tensor_cast.core.quantization.datatypes": {
+        "LinearQuantType",
         "QuantScheme",
         "QuantGranularity",
         "QuantizeLinearAction",

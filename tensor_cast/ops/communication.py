@@ -183,3 +183,25 @@ def _(
         out_dtype,
     )
     return torch.empty_like(linear_out)
+
+
+@register_tensor_cast_op("mxfp8_linear_all_reduce")
+def _(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    out_dtype: Optional[torch.dtype],
+    rank: int,
+    rank_group: List[int],
+) -> torch.Tensor:
+    linear_out = torch.ops.tensor_cast.mxfp8_linear.default(
+        x,
+        w,
+        x_scale,
+        w_scale,
+        bias,
+        out_dtype,
+    )
+    return torch.empty_like(linear_out)

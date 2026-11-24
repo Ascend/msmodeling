@@ -75,6 +75,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         torch.ops.tensor_cast.static_quant_linear_int4_all_reduce.default,
         torch.ops.tensor_cast.fp8_linear_all_reduce.default,
         torch.ops.tensor_cast.mxfp4_linear_all_reduce.default,
+        torch.ops.tensor_cast.mxfp8_linear_all_reduce.default,
     }
     ANCHOR_TARGETS = {
         torch.ops.tensor_cast._internal_wait_and_bind.default,

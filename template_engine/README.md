@@ -260,7 +260,7 @@ python -m cli.inference.template_graph generate --model-id deepseek-ai/DeepSeek-
 | `--num-mtp-tokens` | MTP token 数，默认 0；Decode query length 为 MTP+1。 |
 | `--compile` | 使用 `torch.compile()`；本模板流程须显式开启，生成配置须与模板一致。 |
 | `--compilation-config` | 编译选项：`enable_multistream`、`enable_sequence_parallel`、`enable_matmul_allreduce`、`enable_dispatch_ffn_combine`、`enable_mlapo`、`multistream_overlap_shared_expert`。本流程当前使用 `enable_dispatch_ffn_combine` 表示 DFC；其他选项只有在采集、构建和验证都明确覆盖时才应加入模板请求。 |
-| `--quantize-linear-action` | 线性量化动作。公开选项：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`HIF8`；默认 `W8A8_DYNAMIC`。 |
+| `--quantize-linear-action` | 线性量化动作。公开选项：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`MXFP8`、`HIF8`；默认 `W8A8_DYNAMIC`。 |
 | `--quantize-attention-action` | KV cache 注意力量化动作。公开选项：`DISABLED`、`INT8`、`FP8`、`HIF8`；默认 `DISABLED`。HIF8 当前仅为仿真选项。 |
 | `--tp-size`、`--ep-size`、`--moe-dp-size`、`--dcp-size` | TP、EP、专家 DP 和 Decode Context Parallel；默认均为 1，组合须符合项目并行约束。DCP 复用 TP 设备且必须整除 TP。 |
 | `--num-hidden-layers-override` | 调试用层数覆盖，默认使用模型原生层数；正式模板采集和验证不应覆盖原生层数。 |

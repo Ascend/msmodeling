@@ -756,3 +756,25 @@ def target_qps_num_devices_semantics(params: dict[str, Any], provided: set[str])
     if params.get("target-qps") is not None and "num-devices" not in provided:
         params["num-devices"] = None
     return None
+
+
+def linear_quant_mma(params: dict[str, Any]) -> str | None:
+    """Require the corresponding MMA capability for FP8 and MX linear quantization."""
+    from tensor_cast.device import DeviceProfile, require_linear_quant_mma
+
+    devices = params.get("device") or []
+    if isinstance(devices, str):
+        devices = [devices]
+    actions = tuple(
+        str(params.get(name, "")).upper().replace("-", "_")
+        for name in ("quantize-linear-action", "quantize-non-expert-linear-action")
+    )
+    for device in devices:
+        profile = DeviceProfile.all_device_profiles.get(device)
+        if profile is None:
+            continue
+        try:
+            require_linear_quant_mma(profile, *actions)
+        except ValueError as exc:
+            return str(exc)
+    return None

@@ -19,7 +19,7 @@ from typing import Optional
 
 import torch
 
-from ..quantize_utils import require_metadata_tensor, validate_hif8_kv_payload
+from ..quantize_utils import validate_hif8_kv_payload
 from ..utils import register_tensor_cast_op
 
 
@@ -39,7 +39,6 @@ def hif8_kv_cache_write(
     validate_hif8_kv_payload(kv_cache, kv_scale)
     for x in (key, value):
         if x is not None:
-            require_metadata_tensor(x)
             if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
                 raise ValueError("HIF8 KV cache writes require floating-point rows")
             if x.shape[0] != slot_mapping.numel():
@@ -185,7 +184,6 @@ def attention_hif8_kv(
     BF16 cache. This is an analytic semantic boundary, not a verified NPU fusion.
     Q, probabilities and output are never quantized to HIF8.
     """
-    require_metadata_tensor(query)
     validate_hif8_kv_payload(key, kv_scale)
     validate_hif8_kv_payload(value, kv_scale)
     if query.dtype != torch.bfloat16:

@@ -19,12 +19,29 @@
 datatypes of quantization
 """
 
+from enum import auto, Enum
+
+
 try:
     # Native in Python 3.11+
     from enum import StrEnum
 except ImportError:
     # Fallback for Python 3.10
     from strenum import StrEnum
+
+
+class LinearQuantType(Enum):
+    W8A16 = auto()  # Weight in int8, activation in bfloat16 or half
+    W8A8 = auto()  # Weight in int8, activation in int8
+    W4A8 = auto()  # Weight in int4, activation in int8
+    FP8 = auto()  # Weight in float8, activation in float8
+    MXFP4 = auto()  # both weight and activation in MXFP4
+    HIF8 = auto()  # HiFloat8 W8A8; uint8 is only its payload carrier
+    MXFP8 = auto()  # Float8 payload with E8M0 block scales
+
+
+MX_QUANT_TYPES = (LinearQuantType.MXFP4, LinearQuantType.MXFP8)
+MXFP8_GROUP_SIZE = 32
 
 
 class QuantizeLinearAction(StrEnum):
@@ -37,6 +54,7 @@ class QuantizeLinearAction(StrEnum):
     W4A8_DYNAMIC = "W4A8_DYNAMIC"
     FP8 = "FP8"
     MXFP4 = "MXFP4"
+    MXFP8 = "MXFP8"
     HIF8 = "HIF8"
 
 

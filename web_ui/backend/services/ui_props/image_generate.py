@@ -26,7 +26,7 @@ from cli.registry.modules import get_spec
 from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
-VERSION = "2.3.5"
+VERSION = "2.3.6"
 
 TITLE = I18nText("图像生成", "Image Generate")
 RUNNER = "ImageGenerateRunner"
@@ -55,6 +55,13 @@ OPTION_SOURCE_REGISTRY = {
 
 # Cross-field validator UI mappings
 VALIDATOR_UI = {
+    "linearQuantMma": {
+        "fields": ["device", "quantize-linear-action"],
+        "message": I18nText(
+            "FP8、MXFP4 和 MXFP8 线性层量化需要设备具备对应的 MMA 峰值",
+            "FP8, MXFP4 and MXFP8 linear quantization require corresponding device MMA peak rates",
+        ),
+    },
     "cfgParallelRequiresUseCfg": {
         "fields": ["cfg-parallel", "use-cfg"],
         "message": I18nText(
@@ -217,6 +224,7 @@ UI: dict[str, UIFieldProps] = {
                 {"value": "FP8", "label": "FP8"},
                 {"value": "HIF8", "label": "HIF8"},
                 {"value": "MXFP4", "label": "MXFP4"},
+                {"value": "MXFP8", "label": "MXFP8"},
             ],
         },
     ),

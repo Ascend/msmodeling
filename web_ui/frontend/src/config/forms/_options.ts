@@ -34,7 +34,7 @@ const v = (s: string) => ({ value: s, label: s })
 /** quantize-{linear,backbone-linear}-action — 9 values (doc §2.1.3 / §5.2). */
 export const QUANTIZE_LINEAR_OPTIONS = [
   v('DISABLED'), v('W8A16_STATIC'), v('W8A8_STATIC'), v('W4A8_STATIC'),
-  v('W8A16_DYNAMIC'), v('W8A8_DYNAMIC'), v('W4A8_DYNAMIC'), v('FP8'), v('MXFP4'),
+  v('W8A16_DYNAMIC'), v('W8A8_DYNAMIC'), v('W4A8_DYNAMIC'), v('FP8'), v('MXFP4'), v('MXFP8'),
 ]
 
 /** HIF8 stores KV in HIF8 and computes attention in BF16. */

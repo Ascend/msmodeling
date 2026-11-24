@@ -66,6 +66,7 @@ def _(
 
 @register_tensor_cast_op("grouped_matmul_fp8")
 @register_tensor_cast_op("grouped_matmul_mxfp4")
+@register_tensor_cast_op("grouped_matmul_mxfp8")
 def _(
     x: List[torch.Tensor],
     w: List[torch.Tensor],
@@ -76,7 +77,7 @@ def _(
     *,
     is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
-    """Similar to `grouped_matmul` but for FP8 quantization."""
+    """Grouped matmul with FP8 or MX block scales."""
     if out_dtype is None:
         out_dtype = x[0].dtype
     M = sum(xi.shape[0] for xi in x)
@@ -271,3 +272,20 @@ def _(
         torch.empty((M, swiglu_width), dtype=torch.int4, device="meta"),
         torch.empty((M, scale_width), dtype=torch.float8_e8m0fnu, device="meta"),
     )
+
+
+@register_tensor_cast_op("grouped_matmul_mxfp8_swiglu_quant")
+def _(
+    x: List[torch.Tensor],
+    w: List[torch.Tensor],
+    w_scale: List[torch.Tensor],
+    x_scale: List[torch.Tensor],
+    bias: List[Optional[torch.Tensor]],
+    out_dtype: Optional[torch.dtype],
+    group_size: int,
+    *,
+    is_mtp_unfused: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fused MXFP8 grouped matmul, SwiGLU and block quantization."""
+    out = _grouped_matmul_swiglu_out(x, w, out_dtype or torch.bfloat16, packed_4bit_weight=False)
+    return torch.ops.tensor_cast.dynamic_quantize_mxfp8(out, group_size=group_size)

@@ -20,6 +20,7 @@ import pytest
 import torch
 
 from cli.inference.text_generate import arg_parse
+from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.quantization.config import (
     _filter_action_kwargs,
     _set_linear_patterns,
@@ -27,6 +28,7 @@ from tensor_cast.core.quantization.config import (
 )
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
+from tensor_cast.device import A5, ATLAS_800
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
 from tensor_cast.model_config import QuantConfig
 from tensor_cast.quantize_utils import LinearQuantType, QuantGranularity, get_quant_config, quantize_linear_modules
@@ -246,3 +248,52 @@ class TestQuantizationConfigHelpers:
 
         assert enabled.modules_to_not_convert == []
         assert disabled.modules_to_not_convert == ["lm_head"]
+
+
+@pytest.mark.parametrize("mxfp8_is_non_expert", [False, True])
+def test_cli_mxfp8_uses_32_element_blocks_alongside_mxfp4(mxfp8_is_non_expert):
+    expert, non_expert = ("MXFP4", "MXFP8") if mxfp8_is_non_expert else ("MXFP8", "MXFP4")
+    args = arg_parse(
+        [
+            "Qwen/Qwen3-32B",
+            f"--device={A5.A850_486T_128G.name}",
+            "--num-queries=1",
+            "--query-length=8",
+            f"--quantize-linear-action={expert}",
+            f"--quantize-non-expert-linear-action={non_expert}",
+            "--mxfp4-group-size=64",
+        ]
+    )
+    user_input = UserInputConfig.from_args(args)
+    assert ModelRunner.create_performance_models(user_input, A5.A850_486T_128G)
+    config = user_input.get_quant_config()
+    for module, action in (
+        ("model.layers.0.mlp.experts.0.gate_proj", expert),
+        ("model.layers.0.self_attn.q_proj", non_expert),
+    ):
+        linear = get_quant_config(module, config, None)
+        assert linear.quant_type == LinearQuantType[action]
+        assert linear.weight_group_size == (32 if action == "MXFP8" else 64)
+        assert linear.dynamic_quant_granularity == QuantGranularity.PER_GROUP
+        assert linear.activation_scale is None
+
+
+@pytest.mark.parametrize("action", ["MXFP8", "MXFP4", "FP8"])
+@pytest.mark.parametrize("flag", ["--quantize-linear-action", "--quantize-non-expert-linear-action"])
+def test_a3_rejects_linear_quantization_without_mma_peak(action, flag):
+    device = ATLAS_800.A3_752T_128G_DIE
+    args = arg_parse(["Qwen/Qwen3-32B", f"--device={device.name}", "--num-queries=1", "--query-length=8"])
+    user_input = UserInputConfig.from_args(args)
+    # Bypass CLI validation to cover ServingCast reuse and direct runner callers.
+    setattr(user_input, flag.removeprefix("--").replace("-", "_"), QuantizeLinearAction[action])
+    with pytest.raises(ValueError, match=rf"{action} Linear quantization simulation requires a positive"):
+        ModelRunner.create_performance_models(user_input, device)
+
+
+@pytest.mark.parametrize("action", ["MXFP8", "MXFP4", "FP8"])
+@pytest.mark.parametrize("flag", ["--quantize-linear-action", "--quantize-non-expert-linear-action"])
+def test_synthetic_device_accepts_linear_quantization_with_mma_peak(action, flag):
+    from tensor_cast.device import TEST_DEVICE
+
+    args = arg_parse(["Qwen/Qwen3-32B", "--device=TEST_DEVICE", "--num-queries=1", "--query-length=8", flag, action])
+    assert ModelRunner.create_performance_models(UserInputConfig.from_args(args), TEST_DEVICE)

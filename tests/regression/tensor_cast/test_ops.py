@@ -140,6 +140,31 @@ def test_dynamic_quantize_mxfp4_uses_per_row_block_scales_and_costs():
     assert properties.compute_ops[torch.bfloat16].gp_ops == 2 * x.numel() + scale.numel()
 
 
+@pytest.mark.parametrize("width,scale_width", [(32, 1), (65, 3)])
+@pytest.mark.parametrize("input_dtype", [torch.float16, torch.bfloat16])
+def test_mxfp8_residual_norm_quant_preserves_shape_and_block_scales(width, scale_width, input_dtype):
+    x = torch.empty((2, 3, width), device="meta", dtype=input_dtype)
+    residual = torch.empty_like(x)
+    weight = torch.empty((width,), device="meta", dtype=input_dtype)
+
+    payload, scale = torch.ops.tensor_cast.add_rms_norm_dynamic_quant_mxfp8.default(x, residual, weight, 1e-6, 32)
+
+    assert payload.shape == (2, 3, width)
+    assert payload.dtype == torch.float8_e4m3fn
+    assert payload.device.type == "meta"
+    assert scale.shape == (2, 3, scale_width)
+    assert scale.dtype == torch.float8_e8m0fnu
+    assert scale.device.type == "meta"
+
+
+def test_mxfp8_residual_norm_quant_rejects_nonstandard_group_size():
+    x = torch.empty((2, 64), device="meta", dtype=torch.bfloat16)
+    weight = torch.empty((64,), device="meta", dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match="MXFP8 requires group_size=32"):
+        torch.ops.tensor_cast.add_rms_norm_dynamic_quant_mxfp8.default(x, torch.empty_like(x), weight, 1e-6, 64)
+
+
 def test_dynamic_quantize_symmetric_per_sample_models_scale_and_reduction_costs():
     x = torch.empty((4, 32), device="meta", dtype=torch.bfloat16)
     op = torch.ops.tensor_cast.dynamic_quantize_symmetric.default

@@ -220,7 +220,7 @@ def _static_quant_linear_properties_helper(
     # W4A8 is modeled as an explicit lowered dequantization path because its
     # packed payload cannot be consumed directly by the modeled MMA.  MXFP4
     # deliberately does not use this branch: its block scale work is modeled
-    # by _mxfp4_linear_properties_helper without materializing high-precision
+    # by _mx_linear_properties_helper without materializing high-precision
     # weights.
     dequant_ops = 0
     if requires_explicit_dequant:
@@ -259,7 +259,7 @@ def _static_quant_linear_properties_helper(
     return properties
 
 
-def _mxfp4_linear_properties_helper(
+def _mx_linear_properties_helper(
     op_invoke_info: OpInvokeInfo,
     x: torch.Tensor,
     w: torch.Tensor,
@@ -267,11 +267,11 @@ def _mxfp4_linear_properties_helper(
     w_scale: torch.Tensor,
     bias: Optional[torch.Tensor],
 ) -> OpInvokeInfo.PerformanceProperties:
-    """Model a native fused MXFP4 matmul.
+    """Model a native fused MXFP4 or MXFP8 matmul.
 
     ``torch.int4`` is an MXFP4 payload carrier, not a request for the W4A8
     unpack/dequant path.  The native kernel consumes the microscale tensors
-    inside its FP4 MMA pipeline and writes ``out_dtype`` directly.  Scale
+    inside its MMA pipeline and writes ``out_dtype`` directly.  Scale
     tensors therefore contribute their normal HBM reads through
     ``get_memory_access_properties()``, but do not imply a separate FP32 GP
     kernel or a materialized high-precision intermediate.
@@ -377,10 +377,11 @@ def _(
     )
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mxfp8_linear.default)
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mxfp4_linear.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     assert len(op_invoke_info.args) >= 5
-    return _mxfp4_linear_properties_helper(
+    return _mx_linear_properties_helper(
         op_invoke_info,
         x=op_invoke_info.args[0],
         w=op_invoke_info.args[1],
@@ -478,13 +479,14 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dynamic_quantize_mxfp8.default)
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dynamic_quantize_mxfp4.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     x = op_invoke_info.args[0]
     _, scale = op_invoke_info.out
     properties = op_invoke_info.get_memory_access_properties()
     # Every payload element participates in block reduction and is converted
-    # to MXFP4.  A scale is then constructed for each block.  This remains a
+    # to the MX payload dtype. A scale is then constructed for each block.  This remains a
     # format-level estimate and deliberately avoids hardware-specific tiling.
     _accumulate_compute_ops(properties, x.dtype, gp_ops=2 * x.numel() + scale.numel())
     return properties
@@ -762,6 +764,22 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     num_rows, row_width = _norm_rows_and_width(x)
     properties = op_invoke_info.get_memory_access_properties()
     _accumulate_compute_ops(properties, torch.float32, gp_ops=_rmsnorm_ops(num_rows, row_width))
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.rms_norm_dynamic_quant_mxfp8.default)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.add_rms_norm_dynamic_quant_mxfp8.default)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.add_rms_norm_dynamic_quant2_mxfp8.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    x = op_invoke_info.args[0]
+    scale = op_invoke_info.out[1]
+    num_rows, row_width = _norm_rows_and_width(x)
+    properties = op_invoke_info.get_memory_access_properties()
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=_rmsnorm_ops(num_rows, row_width))
+    vector_ops = 2 * x.numel() + scale.numel()
+    if op_invoke_info.func != torch.ops.tensor_cast.rms_norm_dynamic_quant_mxfp8.default:
+        vector_ops += x.numel()
+    _accumulate_compute_ops(properties, x.dtype, gp_ops=vector_ops)
     return properties
 
 
@@ -2327,6 +2345,7 @@ def _(
     return properties
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_mxfp8.default)
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_mxfp4.default)
 def _(
     op_invoke_info: OpInvokeInfo,
@@ -2340,7 +2359,7 @@ def _(
     assert len(x) == len(w) == len(w_scale) == len(x_scale) == len(bias)
     properties = op_invoke_info.get_memory_access_properties()
     for xi, wi, w_scalei, x_scalei, biasi in zip(x, w, w_scale, x_scale, bias):
-        properties_i = _mxfp4_linear_properties_helper(op_invoke_info, xi, wi, x_scalei, w_scalei, biasi)
+        properties_i = _mx_linear_properties_helper(op_invoke_info, xi, wi, x_scalei, w_scalei, biasi)
         properties.combine(properties_i, compute_only=True)
     return properties
 
@@ -2391,12 +2410,12 @@ def _grouped_static_quant_matmul_properties_helper(
     )
 
 
-def _grouped_mxfp4_matmul_properties_helper(
+def _grouped_mx_matmul_properties_helper(
     op_invoke_info: OpInvokeInfo,
     context: _GroupedMatmulContext,
 ) -> OpInvokeInfo.PerformanceProperties:
     assert context.w_scale is not None and context.x_scale is not None
-    return _mxfp4_linear_properties_helper(
+    return _mx_linear_properties_helper(
         op_invoke_info,
         context.x,
         context.w,
@@ -2673,7 +2692,7 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
         op_invoke_info.args[1],
         _SwiGLUFusionConfig(
             bias=op_invoke_info.args[4],
-            matmul_helper=_grouped_mxfp4_matmul_properties_helper,
+            matmul_helper=_grouped_mx_matmul_properties_helper,
             is_int4_weight=False,
             w_scale=op_invoke_info.args[2],
             x_scale=op_invoke_info.args[3],
@@ -2682,6 +2701,7 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     )
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_mxfp8_swiglu_quant.default)
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     # Args: (x, w, w_scale, x_scale, bias, out_dtype, group_size)
@@ -2691,7 +2711,7 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
         op_invoke_info.args[1],
         _SwiGLUFusionConfig(
             bias=op_invoke_info.args[4],
-            matmul_helper=_grouped_mxfp4_matmul_properties_helper,
+            matmul_helper=_grouped_mx_matmul_properties_helper,
             is_int4_weight=False,
             w_scale=op_invoke_info.args[2],
             x_scale=op_invoke_info.args[3],
@@ -3375,8 +3395,9 @@ def _estimate_fp8_linear_all_reduce(
     )
 
 
+@register_op_estimator(torch.ops.tensor_cast.mxfp8_linear_all_reduce.default, None)
 @register_op_estimator(torch.ops.tensor_cast.mxfp4_linear_all_reduce.default, None)
-def _estimate_mxfp4_linear_all_reduce(
+def _estimate_mx_linear_all_reduce(
     op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
 ) -> PerformanceModel.Result:
     (
@@ -3390,8 +3411,14 @@ def _estimate_mxfp4_linear_all_reduce(
         rank_group,
     ) = op_invoke_info.args
 
+    linear_target = (
+        torch.ops.tensor_cast.mxfp8_linear.default
+        if op_invoke_info.func == torch.ops.tensor_cast.mxfp8_linear_all_reduce.default
+        else torch.ops.tensor_cast.mxfp4_linear.default
+    )
+    linear_name = linear_target._schema.name.split("::")[1]
     linear_info = OpInvokeInfo(
-        torch.ops.tensor_cast.mxfp4_linear.default,
+        linear_target,
         (x, w, x_scale, w_scale, bias, out_dtype),
         None,
         op_invoke_info.out,
@@ -3409,9 +3436,9 @@ def _estimate_mxfp4_linear_all_reduce(
     return _combine_linear_all_reduce_results(
         linear_result,
         comm_result,
-        "max(mxfp4_linear, all_reduce)",
-        "mxfp4_linear",
-        "mxfp4_linear_time_s",
+        f"max({linear_name}, all_reduce)",
+        linear_name,
+        f"{linear_name}_time_s",
     )
 
 

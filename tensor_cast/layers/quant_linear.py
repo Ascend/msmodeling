@@ -21,13 +21,13 @@ import torch
 from .. import ops  # noqa: F401
 from ..model_config import LinearQuantConfig
 from ..utils import HIF8_STORAGE_DTYPE
+from ..core.quantization.datatypes import MX_QUANT_TYPES
 from ..quantize_utils import (
     LinearQuantType,
     quant_type_to_dynamic_quant_dtype,
     quant_type_to_weight_dtype,
     QuantGranularity,
     QuantScheme,
-    require_metadata_tensor,
 )
 from ..utils import DTYPE_FP4, DTYPE_FP8
 
@@ -56,11 +56,13 @@ class QuantLinearBase(torch.nn.Module):
             self.register_buffer("bias", None)
 
         q_weight_dtype = quant_type_to_weight_dtype(quant_config.quant_type)
+        if quant_config.quant_type in MX_QUANT_TYPES:
+            if quant_config.weight_group_size is None or quant_config.weight_group_size <= 0:
+                raise ValueError(f"{quant_config.quant_type.name} requires a positive weight_group_size")
 
         weight_scale = quant_config.weight_scale
         weight_offset = quant_config.weight_offset
         if quant_config.quant_type == LinearQuantType.HIF8:
-            require_metadata_tensor(linear_layer.weight)
             scale_shape = (
                 (self.out_features,) if quant_config.weight_quant_granularity == QuantGranularity.PER_CHANNEL else ()
             )
@@ -71,6 +73,14 @@ class QuantLinearBase(torch.nn.Module):
                     "HIF8 weight_scale must match "
                     f"{quant_config.weight_quant_granularity.name}: expected shape {scale_shape}, "
                     f"got {tuple(weight_scale.shape)}"
+                )
+            else:
+                weight_scale = weight_scale.to(device=linear_layer.weight.device)
+        elif quant_config.quant_type == LinearQuantType.MXFP8:
+            if weight_scale is None:
+                groups = (self.in_features + quant_config.weight_group_size - 1) // quant_config.weight_group_size
+                weight_scale = torch.empty(
+                    (self.out_features, groups), dtype=torch.float8_e8m0fnu, device=linear_layer.weight.device
                 )
             else:
                 weight_scale = weight_scale.to(device=linear_layer.weight.device)
@@ -89,23 +99,19 @@ class QuantLinearBase(torch.nn.Module):
         else:
             self.register_buffer("weight_offset", None)
 
-        # Store group_size for MXFP4
-        if quant_config.quant_type == LinearQuantType.MXFP4:
-            # MXFP4 stores one E8M0 scale per output channel and K block.
-            # The int4 tensor is only a payload carrier; the scale shape keeps
-            # the MX block semantics explicit.
+        # MX formats store one E8M0 scale per output channel and K block.
+        if quant_config.quant_type in MX_QUANT_TYPES:
+            name = quant_config.quant_type.name
             if self.weight_scale.ndim != 2 or self.weight_scale.shape[0] != self.out_features:
                 raise ValueError(
-                    f"MXFP4 weight_scale must have shape (out_features, K_group), got {tuple(self.weight_scale.shape)}"
+                    f"{name} weight_scale must have shape (out_features, K_group), got {tuple(self.weight_scale.shape)}"
                 )
-            if quant_config.weight_group_size is None or quant_config.weight_group_size <= 0:
-                raise ValueError("MXFP4 requires a positive weight_group_size")
             expected_k_groups = (
                 self.in_features + quant_config.weight_group_size - 1
             ) // quant_config.weight_group_size
             if self.weight_scale.shape[-1] != expected_k_groups:
                 raise ValueError(
-                    "MXFP4 weight_scale K-group dimension does not match weight_group_size: "
+                    f"{name} weight_scale K-group dimension does not match weight_group_size: "
                     f"expected {expected_k_groups}, got {self.weight_scale.shape[-1]}"
                 )
             self.group_size = quant_config.weight_group_size
@@ -162,8 +168,9 @@ class QuantLinearBase(torch.nn.Module):
     ) -> torch.Tensor:
         """Generic quantization function."""
         if self.quant_config.quant_type == LinearQuantType.HIF8:
-            require_metadata_tensor(tensor)
             return torch.empty_like(tensor, dtype=HIF8_STORAGE_DTYPE)
+        if self.quant_config.quant_type == LinearQuantType.MXFP8:
+            return torch.empty_like(tensor, dtype=dtype)
         if offset is not None:
             # Asymmetric quantization
             tensor = tensor / scale + offset
@@ -207,7 +214,9 @@ class QuantLinearBase(torch.nn.Module):
     def dequantize_weight(self) -> torch.Tensor:
         """Dequantizes the weight tensor."""
         if self.quant_config.quant_type == LinearQuantType.HIF8:
-            raise ValueError("HIF8 numerical dequantization is not implemented; use TensorCastQuantLinear")
+            if not self.qweight.is_meta:
+                raise ValueError("HIF8 numerical dequantization is not implemented; use TensorCastQuantLinear")
+            return torch.empty_like(self.qweight, dtype=self.weight_dtype)
         if self.quant_config.quant_type == LinearQuantType.W4A8:
             unpacked_qweight = self.unpack_int4(self.qweight)
         else:
@@ -343,8 +352,13 @@ class QuantLinearBase(torch.nn.Module):
         """
         Performs the forward pass of the quantized linear layer.
         """
-        if self.quant_config.quant_type == LinearQuantType.MXFP4:
-            raise ValueError("MXFP4 simulation is not supported in QuantLinearBase, use TensorCastQuantLinear instead.")
+        if self.quant_config.quant_type == LinearQuantType.HIF8 and not x.is_meta:
+            raise ValueError("HIF8 numerical execution is not implemented; use TensorCastQuantLinear")
+        if self.quant_config.quant_type in MX_QUANT_TYPES:
+            name = self.quant_config.quant_type.name
+            raise ValueError(
+                f"{name} simulation is not supported in QuantLinearBase, use TensorCastQuantLinear instead."
+            )
         # Dequantize weights
         dequantized_weight = self.dequantize_weight().to(x.dtype)
 
@@ -451,12 +465,13 @@ class TensorCastQuantLinear(QuantLinearBase):
             else:
                 dims = []
 
-            if self.quant_config.quant_type == LinearQuantType.MXFP4:
-                # MXFP4 dynamic quantization
-                x, activation_scale = torch.ops.tensor_cast.dynamic_quantize_mxfp4(
-                    x,
-                    group_size=self.group_size,
+            if self.quant_config.quant_type in MX_QUANT_TYPES:
+                quantize_mx = (
+                    torch.ops.tensor_cast.dynamic_quantize_mxfp8
+                    if self.quant_config.quant_type == LinearQuantType.MXFP8
+                    else torch.ops.tensor_cast.dynamic_quantize_mxfp4
                 )
+                x, activation_scale = quantize_mx(x, group_size=self.group_size)
                 activation_offset = None
             elif self.quant_config.dynamic_quant_scheme == QuantScheme.SYMMETRIC:
                 x, activation_scale = torch.ops.tensor_cast.dynamic_quantize_symmetric(
@@ -498,9 +513,13 @@ class TensorCastQuantLinear(QuantLinearBase):
                 bias=self.bias,
                 out_dtype=out_dtype,
             )
-        elif self.quant_config.quant_type == LinearQuantType.MXFP4:
-            # Use MXFP4 linear operation
-            out = torch.ops.tensor_cast.mxfp4_linear(
+        elif self.quant_config.quant_type in MX_QUANT_TYPES:
+            mx_linear = (
+                torch.ops.tensor_cast.mxfp8_linear
+                if self.quant_config.quant_type == LinearQuantType.MXFP8
+                else torch.ops.tensor_cast.mxfp4_linear
+            )
+            out = mx_linear(
                 x,
                 qweight,
                 x_scale=activation_scale,

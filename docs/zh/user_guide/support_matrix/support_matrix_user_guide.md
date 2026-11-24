@@ -46,7 +46,7 @@
 | 编译与图优化 | 对前向计算图进行编译改写，将 RMSNorm、Grouped Matmul 等典型子图融合为统一性能算子，更贴近实际部署下的执行形态。 |
 | 多流通算掩盖 | 在编译路径中通过多流调度将计算与通信拆分到不同执行流，建模流间同步开销与通算掩盖带来的端到端收益。 |
 | 共享专家多流重叠 | 把每层共享专家分支绑定到独立 stream，按阶段与路由分支错峰重叠（入口量化对 router GEMM、gate/up 对 dispatch、激活对逐专家矩阵乘、down 对 combine），并把任一阶段掩盖不掉的实测残差以显式等待呈现在路由侧泳道。用 `--compilation-config multistream_overlap_shared_expert` 启用；与 `enable_multistream` 相互独立，检测到 `dispatch_ffn_combine` 融合时默认让位。 |
-| 量化仿真 | 分别建模 Linear、非 Expert Linear、LMHead、Attention 等路径的量化计算与访存成本，支持 W8A8、W4A8、FP8、MXFP4、HIF8 等多种策略组合。HIF8 支持 A5 上的 Dense Linear、Attention 线性投影和 MoE 专家 GMM，以及编译与 TP/EP 路径；Attention/KV 量化独立配置。MiMo V2 Flash 不支持 HIF8 KV Cache，CLI 与 Web UI 在配置解析阶段拒绝该组合；其原有 Attention 路径和独立的 Linear HIF8 不受影响。 |
+| 量化仿真 | 分别建模 Linear、非 Expert Linear、LMHead、Attention 等路径的量化计算与访存成本，支持 W8A8、W4A8、FP8、MXFP4、MXFP8、HIF8 等多种策略组合。FP8 和 MXFP8 的 Linear 量化需要设备配置有效且为正的 FP8 MMA 峰值，MXFP4 需要对应的 FP4 MMA 峰值；内置 A5 已配置。HIF8 支持 A5 上的 Dense Linear、Attention 线性投影和 MoE 专家 GMM，以及编译与 TP/EP 路径；Attention/KV 量化独立配置。MiMo V2 Flash 不支持 HIF8 KV Cache，CLI 与 Web UI 在配置解析阶段拒绝该组合；其原有 Attention 路径和独立的 Linear HIF8 不受影响。 |
 | 并行与 MoE 扩展 | 建模全局 TP / DP / EP 及细粒度并行（Embedding TP、Vision TP 等）切分后的通信与计算开销，覆盖 redundant experts、external/shared expert 等 MoE 部署形态。 |
 | 流水线并行（PP）仿真 | 支持 stage-local 模型构造、逻辑 send/recv 通信、stage 显存估算与显式层划分。 |
 | 解码上下文并行（DCP）仿真 | 沿序列维度切分 Decode 阶段 KV cache，建模 DCP 的显存、attention 计算与集合通信变化；不表示支持 Prefill Context Parallel。 |

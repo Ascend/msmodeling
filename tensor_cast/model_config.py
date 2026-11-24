@@ -29,6 +29,7 @@ from torch._subclasses.fake_tensor import FakeTensor
 from transformers import PretrainedConfig
 from transformers.utils.quantization_config import QuantizationConfigMixin
 
+from .core.quantization.datatypes import MX_QUANT_TYPES, MXFP8_GROUP_SIZE
 from .quantize_utils import (
     AttentionQuantType,
     get_torch_dtype_from_quant_type,
@@ -66,7 +67,7 @@ class LinearQuantConfig:
     weight_int4_pack_dim: int = 1
     """The dim to pack two int4 into an int8"""
     weight_group_size: Optional[int] = None
-    """Group size for weight quantization along k-dim. For MXFP4, it also implies
+    """Group size for weight quantization along k-dim. For MX formats, it also implies
     the channel group size for activation quantization. The shape of weight_scale
     should be aligned with this setting."""
     weight_quant_granularity: Optional[QuantGranularity] = None
@@ -126,14 +127,26 @@ class LinearQuantConfig:
             if self.activation_scale is not None or self.activation_offset is not None:
                 raise ValueError("FP8 quantization does not support static activation quantization")
 
-        # Validate MXFP4 configuration
-        if self.quant_type == LinearQuantType.MXFP4:
+        if self.quant_type in MX_QUANT_TYPES:
+            name = self.quant_type.name
             if self.dynamic_quant_granularity != QuantGranularity.PER_GROUP:
-                raise ValueError("MXFP4 quantization only supports PER_GROUP granularity")
+                raise ValueError(f"{name} quantization only supports PER_GROUP granularity")
             if self.dynamic_quant_scheme is not None and self.dynamic_quant_scheme != QuantScheme.SYMMETRIC:
-                raise ValueError("MXFP4 quantization only supports symmetric scheme")
+                raise ValueError(f"{name} quantization only supports symmetric scheme")
             if self.activation_scale is not None or self.activation_offset is not None:
-                raise ValueError("MXFP4 quantization does not support static activation quantization")
+                raise ValueError(f"{name} quantization does not support static activation quantization")
+        if self.quant_type == LinearQuantType.MXFP8:
+            if self.weight_group_size != MXFP8_GROUP_SIZE:
+                raise ValueError(f"MXFP8 requires weight_group_size={MXFP8_GROUP_SIZE}")
+            if (
+                self.weight_quant_granularity != QuantGranularity.PER_GROUP
+                or self.weight_quant_scheme != QuantScheme.SYMMETRIC
+            ):
+                raise ValueError("MXFP8 requires symmetric PER_GROUP weight quantization")
+            if self.weight_offset is not None:
+                raise ValueError("MXFP8 does not support weight_offset")
+            if self.weight_scale is not None and self.weight_scale.dtype != torch.float8_e8m0fnu:
+                raise ValueError("MXFP8 weight_scale must have E8M0 dtype")
 
     def _validate_hif8(self):
         if self.weight_quant_granularity is None:

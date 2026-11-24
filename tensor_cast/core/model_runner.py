@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 import torch
 
-from ..device import DeviceProfile
+from ..device import DeviceProfile, require_linear_quant_mma
 from ..layers.sampler import Sampler
 from ..performance_model.analytic import AnalyticPerformanceModel
 from ..performance_model.calibrated_analytic import CalibratedAnalyticPerformanceModel
@@ -226,6 +226,11 @@ class ModelRunner:
         the replay path uses exactly the same analytic/profiling setup as
         ``ModelRunner``'s direct path.
         """
+        require_linear_quant_mma(
+            device_profile,
+            getattr(user_input, "quantize_linear_action", ""),
+            getattr(user_input, "quantize_non_expert_linear_action", ""),
+        )
         if any(
             str(getattr(user_input, name, "")) == "HIF8"
             for name in ("quantize_linear_action", "quantize_non_expert_linear_action")

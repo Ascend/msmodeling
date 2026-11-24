@@ -16,6 +16,7 @@
 
 import unittest
 
+import pytest
 import torch
 
 from tensor_cast.device import (
@@ -765,3 +766,55 @@ class A5RegistrationTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("action", ["FP8", "MXFP4", "MXFP8"])
+def test_linear_quantization_uses_mma_capabilities(monkeypatch, action):
+    from dataclasses import replace
+    from tensor_cast.device import A5, DeviceProfile, TEST_DEVICE, require_linear_quant_mma
+
+    monkeypatch.setattr(DeviceProfile, "all_device_profiles", dict(DeviceProfile.all_device_profiles))
+    profiles = [profile for profile in vars(A5).values() if isinstance(profile, DeviceProfile)]
+    assert profiles
+    for profile in [*profiles, TEST_DEVICE]:
+        require_linear_quant_mma(profile, action)
+    derived = replace(A5.A850_486T_128G, name="TEST_CUSTOM_A5", memory_efficiency=0.5)
+    require_linear_quant_mma(derived, action)
+    custom = replace(
+        ATLAS_800.A3_752T_128G_DIE,
+        name="TEST_CUSTOM_MX_DEVICE",
+        mma_ops={torch.float8_e4m3fn: 1e12, DTYPE_FP4: 2e12},
+    )
+    require_linear_quant_mma(custom, action)
+
+
+@pytest.mark.parametrize("action", ["FP8", "MXFP4", "MXFP8"])
+@pytest.mark.parametrize("peak", [None, 0, -1, float("nan"), float("inf")])
+def test_linear_quantization_rejects_missing_or_invalid_peak(monkeypatch, action, peak):
+    from dataclasses import replace
+    from tensor_cast.device import require_linear_quant_mma
+
+    monkeypatch.setattr(DeviceProfile, "all_device_profiles", dict(DeviceProfile.all_device_profiles))
+    mma_ops = dict(A5.A850_486T_128G.mma_ops)
+    dtype = DTYPE_FP4 if action == "MXFP4" else DTYPE_FP8
+    mma_ops.pop(dtype)
+    if peak is not None:
+        mma_ops[dtype] = peak
+    device = replace(A5.A850_486T_128G, name="TEST_INVALID_MX_DEVICE", mma_ops=mma_ops)
+    with pytest.raises(ValueError, match=rf"{action}.*positive.*MMA rate on {device.name}"):
+        require_linear_quant_mma(device, action)
+
+
+@pytest.mark.parametrize("dtype", [DTYPE_FP4, DTYPE_FP8])
+@pytest.mark.parametrize("action", ["FP8", "MXFP4", "MXFP8"])
+def test_linear_quantization_requires_the_selected_format(monkeypatch, dtype, action):
+    from dataclasses import replace
+    from tensor_cast.device import require_linear_quant_mma
+
+    monkeypatch.setattr(DeviceProfile, "all_device_profiles", dict(DeviceProfile.all_device_profiles))
+    device = replace(ATLAS_800.A3_752T_128G_DIE, name="TEST_PARTIAL_MX_DEVICE", mma_ops={dtype: 1e12})
+    if (action == "MXFP4") == (dtype == DTYPE_FP4):
+        require_linear_quant_mma(device, action)
+    else:
+        with pytest.raises(ValueError, match="requires a positive"):
+            require_linear_quant_mma(device, action)

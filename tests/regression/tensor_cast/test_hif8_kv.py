@@ -198,11 +198,11 @@ def test_calibration_and_profiling_keep_storage_recipe_distinct():
     assert source.last_miss_reason == "hif8_requires_verified_profile"
 
 
-def test_payload_ops_reject_real_numerical_execution():
-    with pytest.raises(ValueError, match="numerical execution"):
-        torch.ops.tensor_cast.hif8_kv_cache_write(
-            torch.ones(1, 8), None, torch.empty(1, 16, 8, dtype=torch.uint8), torch.tensor([0]), torch.tensor(1.0)
-        )
+def test_cache_write_accepts_cpu_metadata():
+    result = torch.ops.tensor_cast.hif8_kv_cache_write(
+        torch.empty(1, 8), None, torch.empty(1, 16, 8, dtype=torch.uint8), torch.tensor([0]), torch.tensor(1.0)
+    )
+    assert result is None
 
 
 def test_empty_cache_write_keeps_layout_and_has_no_conversion_work():

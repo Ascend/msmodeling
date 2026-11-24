@@ -232,6 +232,7 @@ SPEC = ModuleSpec(
     log_options_after_group="Sampling",
     requires_model_id=True,
     validators=[
+        ValidatorRef(name="linearQuantMma", fn=V.linear_quant_mma),
         ValidatorRef(name="cfgParallelRequiresUseCfg", fn=V.cfg_parallel_requires_use_cfg),
         ValidatorRef(name="numDevicesMatchesUlyssesSize", fn=V.num_devices_matches_ulysses_size),
         ValidatorRef(

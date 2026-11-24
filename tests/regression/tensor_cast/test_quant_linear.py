@@ -19,9 +19,10 @@ import unittest
 import pytest
 import torch
 from parameterized import parameterized
+from tensor_cast.core.quantization.config import create_linear_quant_config
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
-from tensor_cast.device import TEST_DEVICE
+from tensor_cast.device import A5, TEST_DEVICE
 from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
 from tensor_cast.layers.quant_linear import QuantLinearBase, TensorCastQuantLinear
 from tensor_cast.layers.sampler import SamplingMetadata
@@ -748,3 +749,37 @@ def test_fused_quantized_activation_preserves_float_output_dtype(output_dtype):
     actual = layer(payload, external_activation_scale=scale)
     assert actual.shape == (2, 8)
     assert actual.dtype == (torch.bfloat16 if output_dtype is None else output_dtype)
+
+
+def test_mxfp8_linear_records_block_scales_and_fp8_mma():
+    device = A5.A850_486T_128G
+    layer = TensorCastQuantLinear(
+        torch.nn.Linear(65, 4, device="meta", dtype=torch.bfloat16),
+        create_linear_quant_config(QuantizeLinearAction.MXFP8),
+    )
+    x = torch.empty(2, 3, 65, device="meta", dtype=torch.bfloat16)
+
+    with Runtime(AnalyticPerformanceModel(device), device) as runtime:
+        out = layer(x)
+
+    assert out.shape == (2, 3, 4)
+    assert out.dtype == torch.bfloat16
+    assert layer.weight_scale.shape == (4, 3)
+    assert layer.weight_scale.dtype == torch.float8_e8m0fnu
+    info = next(info for info in runtime.op_invoke_infos if info.func == torch.ops.tensor_cast.mxfp8_linear.default)
+    x_quant, w_quant, x_scale, w_scale, *_ = info.args
+    assert x_quant.dtype == w_quant.dtype == torch.float8_e4m3fn
+    assert x_scale.shape == (6, 3)
+    assert x_scale.dtype == torch.float8_e8m0fnu
+    assert w_scale.shape == (4, 3)
+    assert info.get_perf_properties().compute_ops[torch.float8_e4m3fn].mma_ops == 2 * 6 * 65 * 4
+
+
+@pytest.mark.parametrize("group_size", [None, 0, -1])
+def test_mxfp8_layer_rejects_mutated_invalid_group_size_before_allocating_scales(group_size):
+    from tensor_cast.core.quantization.config import create_linear_quant_config
+
+    config = create_linear_quant_config("MXFP8")
+    config.weight_group_size = group_size
+    with pytest.raises(ValueError, match="MXFP8 requires a positive weight_group_size"):
+        TensorCastQuantLinear(torch.nn.Linear(64, 32, device="meta"), config)

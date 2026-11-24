@@ -271,6 +271,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
             {0, 1},
         )
         add_config(torch.ops.tensor_cast.dynamic_quantize_mxfp4.default, {0}, {0})
+        add_config(torch.ops.tensor_cast.dynamic_quantize_mxfp8.default, {0}, {0})
 
         def hif8_quant_extra_check(split_node, source_op_group, split_args, uniform_args, template_kwargs):
             source = source_op_group[0]
@@ -334,6 +335,12 @@ class SinkSplitPass(TensorCastGraphModulePass):
             {0, 2},
             {0},
             torch.ops.tensor_cast.grouped_matmul_mxfp4.default,
+        )
+        add_config(
+            torch.ops.tensor_cast.mxfp8_linear.default,
+            {0, 2},
+            {0},
+            torch.ops.tensor_cast.grouped_matmul_mxfp8.default,
         )
 
     @staticmethod

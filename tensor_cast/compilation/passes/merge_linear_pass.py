@@ -121,13 +121,14 @@ class MergeLinearPass(TensorCastGraphModulePass):
             torch.ops.tensor_cast.fp8_linear.default,
             torch.ops.tensor_cast.hif8_linear.default,
             torch.ops.tensor_cast.mxfp4_linear.default,
+            torch.ops.tensor_cast.mxfp8_linear.default,
         ):
             # Group by: x, x_scale, w_scale, out_dtype
             grouping_key_args = (0, 2, 5)
             # Concat: w (idx 1) and bias (idx 4)
             w_idx, bias_idx, w_scale = 1, 4, 3
 
-            def grouping_key_func_fp8_mxfp4(n):
+            def grouping_key_func_float_quant(n):
                 key = default_grouping_key_func(grouping_key_args, n)
                 if n.target == torch.ops.tensor_cast.hif8_linear.default:
                     # Scalar scales may differ; require the same node rather
@@ -136,12 +137,13 @@ class MergeLinearPass(TensorCastGraphModulePass):
                     w_scale_key = n.args[w_scale] if shape == () else ndim_key(n, w_scale)
                 elif n.target == torch.ops.tensor_cast.fp8_linear.default:
                     w_scale_key = ndim_key(n, w_scale)
+                elif n.target == torch.ops.tensor_cast.mxfp8_linear.default:
+                    w_scale_key = shape_key(n, w_scale)[1:]
                 else:
-                    assert n.target == torch.ops.tensor_cast.mxfp4_linear.default
                     w_scale_key = shape_key(n, w_scale)
                 return key + (w_scale_key,)
 
-            return grouping_key_func_fp8_mxfp4, w_idx, bias_idx, w_scale, None
+            return grouping_key_func_float_quant, w_idx, bias_idx, w_scale, None
 
         return None
 
@@ -277,6 +279,13 @@ class MergeLinearPass(TensorCastGraphModulePass):
                         assert shape is not None
                         if len(shape) == 1:
                             w_offset_cat_node = insert_concat_node(insertion_point, w_offset_nodes, len(shape) - 1)
+
+            if ref_node.target in (
+                torch.ops.tensor_cast.mxfp4_linear.default,
+                torch.ops.tensor_cast.mxfp8_linear.default,
+            ):
+                # Weight scales are [N, K_groups], so merge along output channels.
+                w_scale_cat_node = insert_concat_node(insertion_point, w_scale_nodes, 0)
 
             # Create the new merged op
             new_args = list(ref_node.args)

@@ -204,11 +204,15 @@ def test_hif8_merge_preserves_weight_scale_identity(scale_mode):
     assert [out.shape for out in gm(*args)] == [(3, 32), (3, 64)]
 
 
-def test_real_weights_are_not_silently_integer_quantized():
-    with pytest.raises(ValueError, match="numerical execution"):
-        QuantLinearBase(torch.nn.Linear(16, 32), create_linear_quant_config("HIF8"))
-    with pytest.raises(ValueError, match="numerical execution"):
-        torch.ops.tensor_cast.dynamic_quantize_hif8(torch.randn(3, 16))
+def test_cpu_tensors_produce_quantization_metadata():
+    layer = QuantLinearBase(torch.nn.Linear(16, 32), create_linear_quant_config("HIF8"))
+    assert layer.qweight.shape == (32, 16)
+    assert layer.qweight.dtype == torch.uint8
+    payload, scale = torch.ops.tensor_cast.dynamic_quantize_hif8(torch.empty(3, 16))
+    assert payload.shape == (3, 16)
+    assert payload.dtype == torch.uint8
+    assert scale.shape == (3, 1)
+    assert scale.dtype == torch.float32
 
 
 def test_nonexpert_override_and_mxfp4_kwargs_do_not_leak():
@@ -416,3 +420,18 @@ def test_calibration_preserves_one_token_scale_mode():
     raw = AnalyticPerformanceModel(TEST_DEVICE).process_op(info)
     signature = build_calibration_signature(info, raw, device_name=TEST_DEVICE.name)
     assert signature.features["activation_scale_mode"] == "per_token"
+
+
+def test_hif8_real_forward_and_dequantization_fail_explicitly():
+    layer = QuantLinearBase(torch.nn.Linear(16, 32), create_linear_quant_config("HIF8"))
+    with pytest.raises(ValueError, match="HIF8 numerical execution is not implemented"):
+        layer(torch.empty(3, 16))
+    with pytest.raises(ValueError, match="HIF8 numerical dequantization is not implemented"):
+        layer.dequantize_weight()
+
+
+def test_hif8_meta_forward_remains_available():
+    layer = QuantLinearBase(torch.nn.Linear(16, 32, device="meta"), create_linear_quant_config("HIF8"))
+    output = layer(torch.empty((3, 16), device="meta"))
+    assert output.shape == (3, 32)
+    assert output.is_meta

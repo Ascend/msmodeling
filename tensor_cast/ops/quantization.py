@@ -18,7 +18,8 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from ..quantize_utils import _HIF8_OUTPUT_DTYPES, require_metadata_tensor
+from ..core.quantization.datatypes import MXFP8_GROUP_SIZE
+from ..quantize_utils import _HIF8_OUTPUT_DTYPES
 from ..utils import HIF8_STORAGE_DTYPE, register_tensor_cast_op
 
 
@@ -114,19 +115,30 @@ def _(
         - The E8M0 scale tensor of shape ``(*x.shape[:-1], K_group)``. Every
           logical row receives independent block scales along K.
     """
+    return _dynamic_quantize_mx(x, group_size, torch.int4)
+
+
+@register_tensor_cast_op("dynamic_quantize_mxfp8")
+def _(x: torch.Tensor, group_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return the E4M3 payload and one E8M0 scale per block along K."""
+    if group_size != MXFP8_GROUP_SIZE:
+        raise ValueError(f"MXFP8 requires group_size={MXFP8_GROUP_SIZE}")
+    return _dynamic_quantize_mx(x, group_size, torch.float8_e4m3fn)
+
+
+def _dynamic_quantize_mx(x: torch.Tensor, group_size: int, dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
     if group_size <= 0:
         raise ValueError(f"group_size must be positive, got {group_size}")
     K = x.shape[-1]
     K_group = (K + group_size - 1) // group_size
     return (
-        torch.empty_like(x, dtype=torch.int4),
+        torch.empty_like(x, dtype=dtype),
         torch.empty((*x.shape[:-1], K_group), dtype=torch.float8_e8m0fnu, device="meta"),
     )
 
 
 @register_tensor_cast_op("dynamic_quantize_hif8")
 def dynamic_quantize_hif8(x: torch.Tensor, per_token: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
-    require_metadata_tensor(x)
     if x.ndim != 2 or x.dtype not in _HIF8_OUTPUT_DTYPES:
         raise ValueError("HIF8 dynamic quantization requires a 2D floating-point input")
     shape = (x.shape[0], 1) if per_token else ()
@@ -138,7 +150,6 @@ def dynamic_quantize_hif8(x: torch.Tensor, per_token: bool = True) -> Tuple[torc
 
 @register_tensor_cast_op("quantize_hif8")
 def quantize_hif8(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    require_metadata_tensor(x)
     if x.dtype not in _HIF8_OUTPUT_DTYPES or scale.dtype != torch.float32 or scale.numel() != 1:
         raise ValueError("HIF8 static quantization requires floating-point input and a scalar float32 scale")
     return torch.empty_like(x, dtype=HIF8_STORAGE_DTYPE)

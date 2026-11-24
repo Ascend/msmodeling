@@ -16,6 +16,7 @@
 
 import unittest
 
+import pytest
 import torch
 from parameterized import parameterized
 from tensor_cast.compilation import get_backend
@@ -140,3 +141,42 @@ class MergeLinearPassTestCase(unittest.TestCase):
         expected_linear_count = 5 if quant_type == LinearQuantType.MXFP4 else 4
         self.assertEqual(count_events(runtime, expected_op), expected_linear_count)
         self.assertEqual(count_events(runtime, torch.ops.aten.split_with_sizes.default), 2)
+
+
+@pytest.mark.parametrize("quant_format,dtype", [("mxfp4", torch.int4), ("mxfp8", torch.float8_e4m3fn)])
+def test_merge_mx_linear_concatenates_each_projection_weight_scale(quant_format, dtype):
+    from torch.fx.experimental.proxy_tensor import make_fx
+    from tensor_cast.compilation.passes.merge_linear_pass import MergeLinearPass
+
+    op = getattr(torch.ops.tensor_cast, f"{quant_format}_linear").default
+
+    def projections(x, w1, w2, x_scale, w_scale1, w_scale2):
+        return (
+            op(x, w1, x_scale, w_scale1, None, torch.bfloat16),
+            op(x, w2, x_scale, w_scale2, None, torch.bfloat16),
+        )
+
+    args = (
+        torch.empty((3, 64), device="meta", dtype=dtype),
+        torch.empty((64, 32), device="meta", dtype=dtype),
+        torch.empty((64, 32), device="meta", dtype=dtype),
+        torch.empty((3, 2), device="meta", dtype=torch.float8_e8m0fnu),
+        torch.empty((32, 2), device="meta", dtype=torch.float8_e8m0fnu),
+        torch.empty((32, 2), device="meta", dtype=torch.float8_e8m0fnu),
+    )
+    gm = make_fx(projections)(*args)
+    original_scales = [node.args[3].name for node in gm.graph.nodes if node.target == op]
+
+    MergeLinearPass()(gm)
+
+    merged = [node for node in gm.graph.nodes if node.target == op]
+    assert len(merged) == 1
+    scale_cat = merged[0].args[3]
+    assert scale_cat.target == torch.ops.tensor_cast.cat.default
+    assert [node.name for node in scale_cat.args[0]] == original_scales
+    assert scale_cat.args[1] == 0
+    interpreter = torch.fx.Interpreter(gm, garbage_collect_values=False)
+    outputs = interpreter.run(*args)
+    assert interpreter.env[scale_cat].shape == (64, 2)
+    assert interpreter.env[merged[0].args[1]].shape == (64, 64)
+    assert [output.shape for output in outputs] == [(3, 32), (3, 32)]

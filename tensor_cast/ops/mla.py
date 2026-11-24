@@ -18,7 +18,7 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from ..quantize_utils import require_metadata_tensor, validate_hif8_kv_payload
+from ..quantize_utils import validate_hif8_kv_payload
 from ..utils import register_tensor_cast_op
 
 
@@ -472,7 +472,6 @@ def multihead_latent_attention_hif8_kv(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     validate_hif8_kv_payload(kv_cache, kv_scale)
     for x in (q, projected_kv, absorbed_q):
-        require_metadata_tensor(x)
         if x.dtype != torch.bfloat16:
             raise ValueError("HIF8 KV MLA requires BF16 queries and projections")
     return (

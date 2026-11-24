@@ -180,7 +180,7 @@ VL adds image input parameters on top of the LLM simulation.
 | ep-size                              | Number of Expert Parallel workers, commonly used for MoE models |
 | num-mtp-tokens                       | Number of MTP tokens, available for models that support MTP, such as DeepSeek |
 | prefix-cache-hit-rate                | Prefix Cache hit rate, in the range [0,1), used to estimate the reuse benefit of prefill tokens |
-| quantize-linear-action               | Quantization method for Linear layers, for example, `W8A8_DYNAMIC`, `FP8`, `MXFP4`, or `HIF8` |
+| quantize-linear-action               | Quantization method for Linear layers, for example, `W8A8_DYNAMIC`, `FP8`, `MXFP4`, `MXFP8`, or `HIF8` |
 | quantize-non-expert-linear-action    | Quantization override for non-expert Linear layers, mainly used for DeepSeek V4. It applies to attention projections, dense MLP, and shared experts, while routed MoE experts still use `quantize-linear-action` |
 | quantize-attention-action            | Quantization method for KV Cache/Attention, for example, `disabled`, `int8`, `fp8`, or `hif8` |
 | image-height/image-width             | VL image size |

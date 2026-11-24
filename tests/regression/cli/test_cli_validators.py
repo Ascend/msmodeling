@@ -610,3 +610,57 @@ def test_per_layer_parallelism_uses_pipeline_stage_devices(prefix, dp):
 
 def test_per_layer_pipeline_requires_divisible_device_count():
     assert V.per_layer_product_eq_num_devices({"num-devices": 15, "pp-size": 4}) is not None
+
+
+@pytest.mark.parametrize("module_id", ["text_generate", "throughput_optimizer", "image_generate", "video_generate"])
+@pytest.mark.parametrize("action", ["FP8", "MXFP4", "MXFP8"])
+def test_linear_quant_mma_rejects_unsupported_device_before_execution(module_id, action, capsys):
+    from tensor_cast.device import ATLAS_800
+
+    spec = get_spec(module_id)
+    parser = build_argparser(spec)
+    argv = [
+        "prog",
+        "--model-id",
+        "offline/model",
+        "--device",
+        ATLAS_800.A3_752T_128G_DIE.name,
+        "--quantize-linear-action",
+        action,
+    ]
+    if module_id == "text_generate":
+        argv += ["--num-queries", "1", "--query-length", "128"]
+    if module_id == "throughput_optimizer":
+        argv += ["--input-length", "128", "--output-length", "1"]
+    if module_id == "image_generate":
+        argv += ["--batch-size", "1", "--text-seq-len", "128", "--output-image-size", "512", "512"]
+    if module_id == "video_generate":
+        argv += ["--batch-size", "1", "--seq-len", "128"]
+    with patch.object(sys, "argv", argv), pytest.raises(SystemExit) as exc:
+        parse_module_args(spec, parser)
+    assert exc.value.code == 2
+    assert f"{action} Linear quantization simulation requires a positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("action", ["FP8", "MXFP4", "MXFP8", "mxfp8"])
+def test_linear_quant_mma_uses_mma_capabilities(action):
+    from tensor_cast.device import A5, ATLAS_800
+
+    assert V.linear_quant_mma({"device": A5.A850_486T_128G.name, "quantize-linear-action": action}) is None
+    assert V.linear_quant_mma({"device": "TEST_DEVICE", "quantize-linear-action": action}) is None
+    assert "requires a positive" in V.linear_quant_mma(
+        {"device": ATLAS_800.A3_752T_128G_DIE.name, "quantize-linear-action": action}
+    )
+    assert V.linear_quant_mma({"device": "TEST_DEVICE", "quantize-linear-action": "DISABLED"}) is None
+    assert V.linear_quant_mma({"device": "UNKNOWN", "quantize-linear-action": action}) is None
+
+
+@pytest.mark.parametrize("flag", ["quantize-linear-action", "quantize-non-expert-linear-action"])
+def test_linear_quant_mma_checks_every_selected_device(flag):
+    from tensor_cast.device import ATLAS_800
+
+    params = {"device": ["TEST_DEVICE", ATLAS_800.A3_752T_128G_DIE.name], flag: "MXFP8"}
+    error = V.linear_quant_mma(params)
+    assert "requires a positive FP8 MMA rate" in error
+    assert ATLAS_800.A3_752T_128G_DIE.name in error
+    assert V.linear_quant_mma({"device": ["TEST_DEVICE"], flag: "MXFP8"}) is None

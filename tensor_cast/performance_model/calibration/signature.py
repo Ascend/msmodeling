@@ -200,6 +200,7 @@ _LINEAR_QUANTIZATION = {
     "tensor_cast.static_quant_linear_int4.default": "w4a8",
     "tensor_cast.fp8_linear.default": "fp8",
     "tensor_cast.mxfp4_linear.default": "mxfp4",
+    "tensor_cast.mxfp8_linear.default": "mxfp8",
 }
 
 _BATCH_MATMUL_QUANTIZATION = {

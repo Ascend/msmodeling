@@ -140,6 +140,20 @@ class DeviceProfile:
         self.all_device_profiles[self.name] = self
 
 
+def require_linear_quant_mma(device_profile: DeviceProfile, *actions: str) -> None:
+    """Validate the selected Linear formats against the device's MMA capabilities."""
+    requested = sorted({action for action in actions if action in ("MXFP8", "MXFP4", "FP8")})
+    for action in requested:
+        dtype = DTYPE_FP4 if action == "MXFP4" else DTYPE_FP8
+        peak = device_profile.mma_ops.get(dtype, 0)
+        if not math.isfinite(peak) or peak <= 0:
+            format_name = "FP4" if action == "MXFP4" else "FP8"
+            raise ValueError(
+                f"{action} Linear quantization simulation requires a positive {format_name} MMA rate "
+                f"on {device_profile.name}."
+            )
+
+
 def require_hif8_support(device_profile):
     peak = device_profile.mma_ops.get(SimFormat.HIF8, 0)
     efficiency = device_profile.compute_efficiency

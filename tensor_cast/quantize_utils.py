@@ -21,19 +21,14 @@ from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
-from torch._subclasses.fake_tensor import FakeTensor
 
-from .core.quantization.datatypes import QuantizeAttentionAction
+from .core.quantization.datatypes import (
+    QuantizeAttentionAction,
+    LinearQuantType as LinearQuantType,
+    MX_QUANT_TYPES as MX_QUANT_TYPES,
+    MXFP8_GROUP_SIZE as MXFP8_GROUP_SIZE,
+)
 from .utils import DTYPE_FP4, DTYPE_FP8, HIF8_STORAGE_DTYPE, pattern_match
-
-
-class LinearQuantType(Enum):
-    W8A16 = auto()  # Weight in int8, activation in bfloat16 or half
-    W8A8 = auto()  # Weight in int8, activation in int8
-    W4A8 = auto()  # Weight in int4, activation in int8
-    FP8 = auto()  # Weight in float8, activation in float8
-    MXFP4 = auto()  # both weight and activation in MXFP4
-    HIF8 = auto()  # HiFloat8 W8A8; uint8 is only its payload carrier
 
 
 def quant_type_to_dynamic_quant_dtype(
@@ -47,6 +42,8 @@ def quant_type_to_dynamic_quant_dtype(
         return HIF8_STORAGE_DTYPE
     elif quant_type == LinearQuantType.MXFP4:
         return DTYPE_FP4
+    elif quant_type == LinearQuantType.MXFP8:
+        return torch.float8_e4m3fn
     elif quant_type == LinearQuantType.W8A16:
         return None
     else:
@@ -66,6 +63,8 @@ def quant_type_to_weight_dtype(quant_type: LinearQuantType) -> torch.dtype:
         return DTYPE_FP8
     elif quant_type == LinearQuantType.MXFP4:
         return DTYPE_FP4
+    elif quant_type == LinearQuantType.MXFP8:
+        return torch.float8_e4m3fn
     else:
         raise ValueError(f"Unsupported quant_type for weight quant: {quant_type}")
 
@@ -125,11 +124,6 @@ class QuantScheme(Enum):
 _HIF8_OUTPUT_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
 
-def require_metadata_tensor(x: torch.Tensor):
-    if not x.is_meta and not isinstance(x, FakeTensor):
-        raise ValueError("HIF8 supports meta/FakeTensor performance simulation only, not numerical execution")
-
-
 def validate_hif8_kv_scale(scale: torch.Tensor) -> None:
     """Validate KV scale metadata; configuration owns real-value checks.
 
@@ -141,8 +135,6 @@ def validate_hif8_kv_scale(scale: torch.Tensor) -> None:
 
 
 def validate_hif8_matmul(x, w, x_scale, w_scale, bias, out_dtype):
-    require_metadata_tensor(x)
-    require_metadata_tensor(w)
     if x.dtype != HIF8_STORAGE_DTYPE or w.dtype != HIF8_STORAGE_DTYPE:
         raise ValueError("HIF8 matmul requires uint8 payloads from HIF8 quantization")
     if x.ndim != 2 or w.ndim != 2 or x.shape[1] != w.shape[0]:
@@ -160,7 +152,6 @@ def validate_hif8_matmul(x, w, x_scale, w_scale, bias, out_dtype):
 
 
 def validate_hif8_kv_payload(payload, scale):
-    require_metadata_tensor(payload)
     if payload.dtype != torch.uint8:
         raise ValueError("HIF8 KV cache requires uint8 storage")
     validate_hif8_kv_scale(scale)

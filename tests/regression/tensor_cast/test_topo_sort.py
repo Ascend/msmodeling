@@ -138,3 +138,31 @@ def test_lift_quant_keeps_scalar_scale_lifting():
     output, scale = gm(torch.empty(1, 4, 1, 8, 1, device="meta"))
     assert output.shape == (4, 8)
     assert scale.shape == ()
+
+
+@pytest.mark.parametrize("quant_format,group_size", [("mxfp4", 32), ("mxfp4", 64), ("mxfp8", 32)])
+@pytest.mark.parametrize("keyword_group_size", [False, True])
+@pytest.mark.parametrize("changes_width", [False, True])
+def test_lift_mx_quant_preserves_blocks_and_scale_layout(quant_format, group_size, keyword_group_size, changes_width):
+    target = getattr(torch.ops.tensor_cast, f"dynamic_quantize_{quant_format}").default
+    output_shape = (2, 195) if changes_width else (6, 65)
+
+    def quantize(x):
+        viewed = x.reshape(output_shape)
+        return target(viewed, group_size=group_size) if keyword_group_size else target(viewed, group_size)
+
+    x = torch.empty((2, 3, 65), device="meta", dtype=torch.bfloat16)
+    gm = make_fx(quantize)(x)
+    if keyword_group_size:
+        original_quantized = gm.graph.find_nodes(op="call_function", target=target)[0]
+        original_quantized.args = (original_quantized.args[0],)
+        original_quantized.kwargs = {"group_size": group_size}
+        gm.recompile()
+    expected = [(t.shape, t.dtype) for t in gm(x)]
+
+    LiftCombineQuantPass()(gm)
+
+    gm.graph.lint()
+    assert [(t.shape, t.dtype) for t in gm(x)] == expected
+    quantized = gm.graph.find_nodes(op="call_function", target=target)[0]
+    assert (quantized.args[0].op == "placeholder") is (not changes_width)

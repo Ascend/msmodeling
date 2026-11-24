@@ -85,7 +85,13 @@ def test_grouped_matmul_swiglu_pass_rejects_unsafe_shapes_and_users():
     assert not any(node.target == torch.ops.tensor_cast.swiglu.default for node in split_sizes.graph.nodes)
 
 
-def test_grouped_mxfp4_swiglu_pass_fuses_post_activation_quantization():
+@pytest.mark.parametrize("quant_format", ["mxfp4", "mxfp8"])
+@pytest.mark.parametrize("matching_format", [True, False])
+def test_grouped_mx_swiglu_pass_fuses_matching_post_activation_quantization(quant_format, matching_format):
+    post_format = quant_format if matching_format else ("mxfp4" if quant_format == "mxfp8" else "mxfp8")
+    grouped_op = getattr(torch.ops.tensor_cast, f"grouped_matmul_{quant_format}").default
+    quant_op = getattr(torch.ops.tensor_cast, f"dynamic_quantize_{post_format}").default
+    fused_op = getattr(torch.ops.tensor_cast, f"grouped_matmul_{quant_format}_swiglu_quant").default
     graph = fx.Graph()
     x = graph.placeholder("x")
     w = graph.placeholder("w")
@@ -93,15 +99,16 @@ def test_grouped_mxfp4_swiglu_pass_fuses_post_activation_quantization():
     x_scale = graph.placeholder("x_scale")
     bias = graph.placeholder("bias")
     gmm = graph.call_function(
-        torch.ops.tensor_cast.grouped_matmul_mxfp4.default,
+        grouped_op,
         args=([x], [w], [w_scale], [x_scale], [bias], torch.bfloat16),
     )
-    split = graph.call_function(torch.ops.aten.split.Tensor, args=(gmm, 2, -1))
+    gmm.meta["val"] = torch.empty((3, 68), dtype=torch.bfloat16, device="meta")
+    split = graph.call_function(torch.ops.aten.split.Tensor, args=(gmm, 34, -1))
     gate = graph.call_function(operator.getitem, args=(split, 0))
     up = graph.call_function(operator.getitem, args=(split, 1))
     swiglu = graph.call_function(torch.ops.tensor_cast.swiglu.default, args=(gate, up))
     quant = graph.call_function(
-        torch.ops.tensor_cast.dynamic_quantize_mxfp4.default,
+        quant_op,
         args=(swiglu,),
         kwargs={"group_size": 32},
     )
@@ -113,9 +120,18 @@ def test_grouped_mxfp4_swiglu_pass_fuses_post_activation_quantization():
     result = GroupedMatmulSwigluPass()(graph_module)
 
     targets = [node.target for node in result.graph.nodes if node.op == "call_function"]
-    assert torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default in targets
-    assert torch.ops.tensor_cast.dynamic_quantize_mxfp4.default not in targets
-    assert torch.ops.tensor_cast.swiglu.default not in targets
+    assert (fused_op in targets) is matching_format
+    assert (quant_op not in targets) is matching_format
+    if quant_format == "mxfp8" and matching_format:
+        activation = torch.empty((3, 64), dtype=torch.float8_e4m3fn, device="meta")
+        weight = torch.empty((64, 68), dtype=torch.float8_e4m3fn, device="meta")
+        weight_scale = torch.empty((68, 2), dtype=torch.float8_e8m0fnu, device="meta")
+        activation_scale = torch.empty((3, 2), dtype=torch.float8_e8m0fnu, device="meta")
+        payload, scale = result(activation, weight, weight_scale, activation_scale, None)
+        assert payload.shape == (3, 34)
+        assert payload.dtype == torch.float8_e4m3fn
+        assert scale.shape == (3, 2)
+        assert scale.dtype == torch.float8_e8m0fnu
 
 
 def test_sink_split_fuses_tuple_returning_dynamic_quant_before_quantized_gmm():

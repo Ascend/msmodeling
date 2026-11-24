@@ -105,6 +105,22 @@ mxfp4_linear_allreduce_pattern = CallFunction(
 )
 
 
+mxfp8_linear_allreduce_pattern = CallFunction(
+    torch.ops.tensor_cast.all_reduce.default,
+    CallFunction(
+        torch.ops.tensor_cast.mxfp8_linear.default,
+        _arg("x"),
+        _arg("w"),
+        _arg("x_scale"),
+        _arg("w_scale"),
+        _arg("bias"),
+        _arg("out_dtype"),
+    ),
+    _arg("rank"),
+    _arg("rank_group"),
+)
+
+
 def _is_allreduce_after_target(match: Match, linear_target) -> bool:
     allreduce_node = match.output_node()
     if allreduce_node.target != torch.ops.tensor_cast.all_reduce.default:
@@ -139,6 +155,10 @@ def _is_fp8_linear_allreduce(match: Match) -> bool:
 
 def _is_mxfp4_linear_allreduce(match: Match) -> bool:
     return _is_allreduce_after_target(match, torch.ops.tensor_cast.mxfp4_linear.default)
+
+
+def _is_mxfp8_linear_allreduce(match: Match) -> bool:
+    return _is_allreduce_after_target(match, torch.ops.tensor_cast.mxfp8_linear.default)
 
 
 def _replace_with_fused_op(match: Match, fused_target, fused_args) -> None:
@@ -217,7 +237,7 @@ def _fuse_fp8_linear_allreduce(
     )
 
 
-def _fuse_mxfp4_linear_allreduce(
+def _fuse_mx_linear_allreduce(
     match: Match,
     x,
     w,
@@ -228,9 +248,15 @@ def _fuse_mxfp4_linear_allreduce(
     rank,
     rank_group,
 ):
+    linear_target = match.output_node().args[0].target
+    fused_target = (
+        torch.ops.tensor_cast.mxfp8_linear_all_reduce
+        if linear_target == torch.ops.tensor_cast.mxfp8_linear.default
+        else torch.ops.tensor_cast.mxfp4_linear_all_reduce
+    )
     _replace_with_fused_op(
         match,
-        torch.ops.tensor_cast.mxfp4_linear_all_reduce,
+        fused_target,
         (x, w, x_scale, w_scale, bias, out_dtype, rank, rank_group),
     )
 
@@ -268,6 +294,13 @@ def register_all_patterns():
     register_pattern(
         name="mxfp4_linear_allreduce_pattern",
         pattern=mxfp4_linear_allreduce_pattern,
-        handler=_fuse_mxfp4_linear_allreduce,
+        handler=_fuse_mx_linear_allreduce,
         extra_check=_is_mxfp4_linear_allreduce,
+    )
+
+    register_pattern(
+        name="mxfp8_linear_allreduce_pattern",
+        pattern=mxfp8_linear_allreduce_pattern,
+        handler=_fuse_mx_linear_allreduce,
+        extra_check=_is_mxfp8_linear_allreduce,
     )

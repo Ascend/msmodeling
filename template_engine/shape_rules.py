@@ -606,6 +606,7 @@ GMM_PLAIN_FUNCS = frozenset(
         "tensor_cast.grouped_matmul_quant_int4.default",
         "tensor_cast.grouped_matmul_fp8.default",
         "tensor_cast.grouped_matmul_mxfp4.default",
+        "tensor_cast.grouped_matmul_mxfp8.default",
     }
 )
 
@@ -627,7 +628,9 @@ GMM_SWIGLU_PACKED_FUNCS = frozenset(
 )
 
 #: GMM + SwiGLU + post-quant: out = ((M, N // 2), (M, ceil(N / 2 / group_size))).
-GMM_SWIGLU_QUANT_FUNCS = frozenset({"tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default"})
+GMM_SWIGLU_QUANT_FUNCS = frozenset(
+    {"tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default", "tensor_cast.grouped_matmul_mxfp8_swiglu_quant.default"}
+)
 
 
 def _gmm_group_tensors(op: Any, specs: list[_Spec]) -> tuple[list[_Spec], list[_Spec]] | None:
@@ -767,6 +770,34 @@ def _rule_grouped_matmul_swiglu_quant(op: Any, specs: list[_Spec]) -> dict[str, 
 
 
 # --------------------------------------------------------------------------------------
+# Rule: MX block quantization, optionally fused with RMSNorm and residual add
+# --------------------------------------------------------------------------------------
+
+MX_QUANT_GROUP_SIZE_ARG = {
+    "tensor_cast.dynamic_quantize_mxfp8.default": 1,
+    "tensor_cast.rms_norm_dynamic_quant_mxfp8.default": 3,
+    "tensor_cast.add_rms_norm_dynamic_quant_mxfp8.default": 4,
+    "tensor_cast.add_rms_norm_dynamic_quant2_mxfp8.default": 4,
+}
+
+
+def _rule_mx_quant(op: Any, specs: list[_Spec]) -> dict[str, Any] | None:
+    if not specs or not specs[0].shape:
+        return None
+    func = _rule_name(op.func)
+    group_size = _arg(op, MX_QUANT_GROUP_SIZE_ARG[func], "group_size")
+    shape = list(specs[0].shape)
+    width = shape[-1]
+    if is_symbolic(width) or isinstance(group_size, bool) or not isinstance(group_size, int) or group_size <= 0:
+        return None
+    scale_width = (int(width) + group_size - 1) // group_size
+    outputs = ({"shape": shape}, {"shape": [*shape[:-1], scale_width]})
+    if func == "tensor_cast.add_rms_norm_dynamic_quant2_mxfp8.default":
+        outputs = (*outputs, {"shape": shape})
+    return {"out": outputs}
+
+
+# --------------------------------------------------------------------------------------
 # Rule: empty_like / clone-style shape preservation
 # --------------------------------------------------------------------------------------
 
@@ -815,6 +846,8 @@ for _func in GMM_SWIGLU_PACKED_FUNCS:
     RULES[_func] = ("grouped_matmul_swiglu_packed", _rule_grouped_matmul_swiglu_packed)
 for _func in GMM_SWIGLU_QUANT_FUNCS:
     RULES[_func] = ("grouped_matmul_swiglu_quant", _rule_grouped_matmul_swiglu_quant)
+for _func in MX_QUANT_GROUP_SIZE_ARG:
+    RULES[_func] = ("mx_quant", _rule_mx_quant)
 for _func in EMPTY_LIKE_FUNCS:
     RULES[_func] = ("empty_like", _rule_empty_like)
 

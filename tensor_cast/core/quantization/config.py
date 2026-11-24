@@ -26,8 +26,12 @@ from ...model_config import (
     MultiheadLatentAttentionQuantConfig,
     QuantConfig,
 )
-from ...quantize_utils import get_attention_quant_type, LinearQuantType, QuantGranularity
-from .datatypes import QuantizeAttentionAction, QuantizeLinearAction
+from ...quantize_utils import (
+    get_attention_quant_type,
+    LinearQuantType,
+    QuantGranularity,
+)
+from .datatypes import QuantizeAttentionAction, QuantizeLinearAction, MX_QUANT_TYPES, MXFP8_GROUP_SIZE
 
 
 def create_linear_quant_config(quantize_linear_action: QuantizeLinearAction, **kwargs):
@@ -46,6 +50,10 @@ def create_linear_quant_config(quantize_linear_action: QuantizeLinearAction, **k
         quant_type = LinearQuantType.MXFP4
         if "weight_group_size" not in kwargs:
             raise ValueError("weight_group_size must be provided for MXFP4 quantization")
+    elif quantize_linear_action == "MXFP8":
+        quant_type = LinearQuantType.MXFP8
+        kwargs.setdefault("weight_group_size", MXFP8_GROUP_SIZE)
+        kwargs.setdefault("weight_quant_granularity", QuantGranularity.PER_GROUP)
     elif quantize_linear_action in ("W4A8_STATIC", "W4A8_DYNAMIC"):
         quant_type = LinearQuantType.W4A8
     else:
@@ -55,8 +63,8 @@ def create_linear_quant_config(quantize_linear_action: QuantizeLinearAction, **k
         "quant_type": quant_type,
     }
 
-    if "weight_scale" not in kwargs and quant_type not in (LinearQuantType.MXFP4, LinearQuantType.HIF8):
-        # For MXFP4, weight_scale is created from the weight tensor during model initialization
+    if "weight_scale" not in kwargs and quant_type not in (*MX_QUANT_TYPES, LinearQuantType.HIF8):
+        # MX block scales are created during layer initialization.
         config_args["weight_scale"] = torch.tensor(1.0)
 
     if quantize_linear_action in ("W8A16_STATIC", "W8A8_STATIC", "W4A8_STATIC"):

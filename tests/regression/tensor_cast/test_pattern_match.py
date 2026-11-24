@@ -434,21 +434,22 @@ class PatternReplaceTestCase(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ["Qwen/Qwen3-32B", 64],
-            ["Qwen/Qwen3-32B", 32],
+            ["Qwen/Qwen3-32B", 64, LinearQuantType.MXFP4],
+            ["Qwen/Qwen3-32B", 32, LinearQuantType.MXFP4],
+            ["Qwen/Qwen3-32B", 32, LinearQuantType.MXFP8],
         ]
     )
-    def test_rms_norm_dynamic_quant_pattern_mxfp4(self, model_id, group_size):
+    def test_rms_norm_dynamic_quant_pattern_mx(self, model_id, group_size, quant_type):
         num_tokens = 100
-        mxfp4_quant_config = get_quant_config(
-            quant_type=LinearQuantType.MXFP4,
+        mx_quant_config = get_quant_config(
+            quant_type=quant_type,
             weight_group_size=group_size,
             weight_quant_granularity=QuantGranularity.PER_GROUP,
             weight_quant_scheme=QuantScheme.SYMMETRIC,
         )
         model_config = ModelConfig(
             ParallelConfig(),
-            mxfp4_quant_config,
+            mx_quant_config,
             quant_linear_cls=TensorCastQuantLinear,
             attention_cls=AttentionTensorCast,
             num_hidden_layers_override=1,
@@ -464,8 +465,9 @@ class PatternReplaceTestCase(unittest.TestCase):
         result = runtime.table_averages()
         self.assertIn("tensor_cast.rms_norm.default", result)
         self.assertIn("tensor_cast.add_rms_norm.default", result)
-        self.assertIn("tensor_cast.rms_norm_dynamic_quant_mxfp4.default", result)
-        self.assertIn("tensor_cast.add_rms_norm_dynamic_quant2_mxfp4.default", result)
+        quant_format = quant_type.name.lower()
+        self.assertIn(f"tensor_cast.rms_norm_dynamic_quant_{quant_format}.default", result)
+        self.assertIn(f"tensor_cast.add_rms_norm_dynamic_quant2_{quant_format}.default", result)
 
     @parameterized.expand(
         [
