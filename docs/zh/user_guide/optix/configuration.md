@@ -58,7 +58,7 @@ benchmark_run_count = 2
 |取值| 说明                            |CONCURRENCY|REQUESTRATE|
 |---|-------------------------------|---|---|
 |`true`（默认）| 在 `CONCURRENCY` 固定的情况下，搜索较优的 `REQUESTRATE` |固定为 `max`，不参与搜索|先以最大施压速率实测，再按实测吞吐校准|
-|`false`| 开箱阶段，目标搜索较优的 `CONCURRENCY`    |在 `[min, max]` 内参与 PSO 搜索|固定为最大施压速率|
+|`false`| 开箱阶段，搜索较优的 `CONCURRENCY`    |在 `[min, max]` 内参与 PSO 搜索|固定为最大施压速率|
 
 `REQUESTRATE=0` 表示不限速，因此“最大施压速率”按业务语义取值：范围包含 `0` 时取 `0`，否则取配置的数值 `max`。Agent 模式下该开关必须为 `false`，原因见[寻优模式：PSO 与 Agent](plugin_and_modes.md#6-寻优模式pso-与-agent)。
 

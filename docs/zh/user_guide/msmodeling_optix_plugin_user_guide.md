@@ -150,8 +150,8 @@
 
 3. 设置插件入口点
 
-    将自定义的内容的注册函数添加到入口组'optix.plugins'即可。
-    例如通过调用vllm_inference_optimization模块的register来注册，例如：
+    将自定义的注册函数添加到入口组'optix.plugins'即可。
+    通过调用vllm_inference_optimization模块的register来注册，例如：
 
     ```toml
     [project.entry-points.'optix.plugins']

@@ -115,7 +115,7 @@ msmodeling optix --mode pd_disagg -e vllm -b ais_bench -c ./pd_search.toml
 |`throughput(requests/s)`|测试吞吐，单位为请求数/秒。|
 |`CONCURRENCY`|并发数。|
 |`REQUESTRATE(requests/s)`|发送速率，单位为请求数/秒。|
-|`error`|记录这次参数没有正常执行的原因，在发送错误时记录。|
+|`error`|记录这次参数没有正常执行的原因，在发生错误时记录。|
 |`backup`|数据记录地址，当开启 `--backup` 时记录。|
 |`real_evaluation`|标记数据是否由真实测试结果得到。`false` 代表该组数据由 GP 模型预测得到。|
 |`fitness`|寻优算法优化值，该值越小代表该组参数效果越好。|

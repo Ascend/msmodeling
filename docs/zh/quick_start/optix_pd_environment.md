@@ -1,6 +1,6 @@
 # PD 分离寻优公共环境准备
 
-本文用于 PD 分离多机寻优，以四台 Atlas 800I A3 服务器和 vLLM Ascend 容器为例，A 为控制端。每台示例使用 16 个设备节点（0～15）。命令中的机器、设备、模型和路径均按实际环境替换。已有的环境可跳过对应步骤。
+本文用于 PD 分离多机寻优，以四台 Atlas 800I A3 服务器和 vLLM Ascend 容器为例，A 为控制端。每台使用 16 个设备节点（0～15）。命令中的机器、设备、模型和路径均按实际环境替换。已有的环境可跳过对应步骤。
 
 ```mermaid
 flowchart TB
@@ -153,7 +153,6 @@ done
 四台均显示 vLLM 路径和 `OK` 后继续。如果重新打开了终端，请先重新设置第 1 节的 SSH 账号、端口和 IP。
 
 通过标准：容器持续运行、16 个设备节点可见、模型可见、vLLM 命令和 Ascend 插件可用。镜像挂载要求参考 [官方快速开始](https://docs.vllm.ai/projects/ascend/en/main/getting_started/quick_start.html)，以对应版本说明为准。
-
 
 ## 4. 在控制端安装 OptiX 和 AISBench
 
