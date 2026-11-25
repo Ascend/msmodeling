@@ -1,5 +1,7 @@
 # 推荐实践：服务化实测寻优环境与部署栈
 
+本文档介绍服务化实测寻优环境与部署栈的配置方法，涵盖在uv虚拟环境中安装msmodeling、确认系统vLLM或MindIE部署栈可用、按需指定部署根目录以及在虚拟环境中运行OptiX，适用于已部署vLLM或MindIE并需单独安装msmodeling的用户。
+
 典型场景：系统里已经部署好 vLLM 或 MindIE，msmodeling 单独装在 uv 虚拟环境里。
 
 ## 1. 安装 msmodeling（uv）
@@ -22,7 +24,7 @@ vllm --help
 
 `which vllm` 应落在系统路径，例如 `/usr/local/bin/vllm`，而不是 msmodeling 的 `.venv/bin/vllm`。
 
-MindIE 场景请确认 `mindieservice_daemon` 可用，或 `MIES_INSTALL_PATH` 指向的安装正确。
+MindIE 场景请确认 `mindieservice_daemon` 可用，或 `MIES_INSTALL_PATH` 指向的安装路径正确。
 
 > [!NOTE]
 > 部署栈的完整部署可参考 [VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)、[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)，以及 [AISBench 测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)。

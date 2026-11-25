@@ -1,10 +1,12 @@
 # 服务化细粒度仿真 使用指南
 
+本文档介绍服务化细粒度仿真（ServingCast），基于 YAML 配置模拟多实例、多请求的端到端服务推理场景，输出 TTFT、TPOT、吞吐量等系统级性能指标，适用于需要在实际部署前分析服务能力与配置瓶颈的用户。
+
 > **实验性功能**：本指南描述的服务化细粒度仿真能力仍在持续迭代中，接口与行为可能发生变化，仿真结果仅供评估参考。
 
 ## 1 简介
 
-ServingCast 仿真基于 YAML 配置，模拟多实例、多请求的端到端 serving 场景，并输出系统级指标，如吞吐、延迟（TTFT、TPOT）。它通过 YAML 配置描述实例组、模型结构、请求负载和服务限制，输出 TTFT、TPOT、吞吐量、请求数等性能指标，帮助用户在实际部署前分析服务能力与配置瓶颈。
+ServingCast 仿真基于 YAML 配置，模拟多实例、多请求的端到端 serving 场景，并输出系统级指标，如吞吐量、延迟（TTFT、TPOT）。它通过 YAML 配置描述实例组、模型结构、请求负载和服务限制，输出 TTFT、TPOT、吞吐量、请求数等性能指标，帮助用户在实际部署前分析服务能力与配置瓶颈。
 
 **适用场景：**
 
@@ -47,7 +49,7 @@ ServingCast 仿真基于 YAML 配置，模拟多实例、多请求的端到端 s
 
 其一般用法如下所示：
 
-```text
+```output
 usage: python -m serving_cast.main [-h] --instance_config_path INSTANCE_CONFIG_PATH [INSTANCE_CONFIG_PATH ...] --common_config_path COMMON_CONFIG_PATH
 
 Run a service inference simulation driven by YAML configuration files.
@@ -99,7 +101,7 @@ bash serving_cast/example/pd_disaggregation/run_pd_disaggregation.sh
 
 仿真结束后，控制台会打印类似以下的性能摘要：
 
-```text
+```output
          E2E_TIME(s)  CLIENT_TTFT(s)  SERVER_TTFT(s)  ADMISSION_WAIT(s)  TPOT(s)  INPUT_TOKENS  OUTPUT_TOKENS  OUTPUT_TOKEN_THROUGHPUT(tok/s)
 AVERAGE     1052.591           0.378           0.301              0.077    0.301        1500.0         3500.0                           3.327
 MIN         1050.000           0.300           0.300              0.000    0.300        1500.0         3500.0                           2.978

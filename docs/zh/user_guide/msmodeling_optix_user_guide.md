@@ -1,5 +1,7 @@
 # 服务化实测寻优使用指南
 
+本文档介绍OptiX服务化实测寻优工具，涵盖公共环境准备、Agent方式与命令行方式两种寻优方式的选择以及参考资料，帮助用户在真实部署环境中启动服务、执行测评并迭代调整配置，找到满足时延要求、吞吐较高的部署方案，适用于在vLLM PD分离等场景下开展部署方案寻优的用户。
+
 ## 1. 简介
 
 OptiX 是 msmodeling 的服务化实测寻优工具。它根据模型、设备、业务负载和性能目标，在真实部署环境中启动服务、执行测评并迭代调整配置，帮助用户找到满足时延要求、吞吐较高的部署方案。
@@ -68,7 +70,7 @@ OptiX 的主要能力包括：
 - <a id="vllm_benchmark-工具参数"></a>[3.2 vllm_benchmark 工具参数](optix/configuration.md#vllm_benchmark-工具参数)
 - <a id="服务化参数"></a>[4. 服务化参数](optix/configuration.md#服务化参数)
 - <a id="vllm-服务化参数"></a>[4.1 vLLM 服务化参数](optix/configuration.md#vllm-服务化参数)
-- <a id="vllm-自定义参数寻优"></a>[4.2 VLLM 自定义参数寻优](optix/configuration.md#vllm-自定义参数寻优)
+- <a id="vllm-自定义参数寻优"></a>[4.2 vLLM 自定义参数寻优](optix/configuration.md#vllm-自定义参数寻优)
 - <a id="示例一vllm-环境变量寻优"></a>[4.2.1 示例一：VLLM 环境变量寻优](optix/configuration.md#示例一vllm-环境变量寻优)
 - <a id="示例二命令行参数寻优"></a>[4.2.2 示例二：命令行参数寻优](optix/configuration.md#示例二命令行参数寻优)
 - <a id="vllm-常用寻优字段"></a>[4.3 VLLM 常用寻优字段](optix/configuration.md#vllm-常用寻优字段)

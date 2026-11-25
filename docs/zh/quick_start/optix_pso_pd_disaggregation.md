@@ -387,7 +387,7 @@ uv run --no-sync msmodeling optix --mode pd_disagg -e vllm -b ais_bench -c ./pd_
 | P、D 单侧结果 | `prefill/phase_result.json`、`decode/phase_result.json` |
 | 每次候选的实测记录 | 各阶段输出目录中的 `data_storage_*.csv` |
 
-报告中 `status` 表示流程是否完成，`full_service.slo_met` 表示完整服务的指标是否满足目标。发生失败时查看报告中的失败阶段、原因及对应日志。完整服务阶段结束后工具会停止服务；需要再次部署时，可参考 `full_service/deployment.json` 中的配置和实际部署环境进行复现。 报告还汇总最终并发、请求速率、实测指标、机器与设备分配及部署配置。未启用完整服务时不会生成该完整流程报告。
+报告中 `status` 表示流程是否完成，`full_service.slo_met` 表示完整服务的指标是否满足目标。发生失败时查看报告中的失败阶段、原因及对应日志。完整服务阶段结束后工具会停止服务；需要再次部署时，可参考 `full_service/deployment.json` 中的配置和实际部署环境进行复现。报告还汇总最终并发、请求速率、实测指标、机器与设备分配及部署配置。未启用完整服务时不会生成该完整流程报告。
 
 <a id="第-4-步根据结果部署-pd-和-proxy"></a>
 

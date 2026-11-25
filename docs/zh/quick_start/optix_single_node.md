@@ -14,7 +14,7 @@ cd /workspace/msmodeling
 uv sync
 ```
 
-先按 [uv 官方说明](https://docs.astral.sh/uv/getting-started/installation/)安装 uv。镜像中的 vLLM、驱动和模型需适配设备；以下示例假设当前环境可访问模型。
+先按 [uv官方说明](https://docs.astral.sh/uv/getting-started/installation/)安装 uv。镜像中的 vLLM、驱动和模型需适配设备；以下示例假设当前环境可访问模型。
 
 在运行寻优的环境中验证：
 

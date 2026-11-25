@@ -1,5 +1,7 @@
 # OptiX 插件、安装与寻优模式
 
+本文档介绍服务化实测寻优的内置插件与扩展插件接入、环境准备与安装步骤、快速入门操作流程以及PSO与Agent两种寻优模式，适用于需要在vLLM/MindIE服务化环境中完成参数寻优的用户。
+
 [使用指南](../msmodeling_optix_user_guide.md) | [插件与模式](plugin_and_modes.md) | [配置参数](configuration.md) | [命令与结果](commands_and_results.md) | [环境与排障](troubleshooting.md)
 
 <a id="3-插件支持"></a>
@@ -22,7 +24,7 @@
 |插件名称|类型|提供者|插件描述|插件目录|
 |---|---|---|---|---|
 |`custom_vllm`|服务框架（`-e`）|contrib 示例|通过 Docker + SSH 拉起本地与远端 vLLM 容器，演示自定义服务框架接入|`contrib/optix/vllm_msserviceprofiler/`|
-|`multihost_infer`|服务框架（`-e`）|小巧灵突击队|vLLM 多机混合部署插件，基于多节点 DP（Data Parallel）+ headless 方案，node 主节点对外提供 API、work 节点仅作工作节点|`contrib/optix/multihost_infer/`|
+|`multihost_infer`|服务框架（`-e`）|小巧灵突击队|vLLM 多机混合部署插件，基于多节点 DP（Data Parallelism）+ headless 方案，node 主节点对外提供 API、work 节点仅作工作节点|`contrib/optix/multihost_infer/`|
 |`vllm_pd`|服务框架（`-e`）|小巧灵突击队|vLLM PD（Prefill-Decode）分离部署集群插件，通过 SSH 远程管理多节点启停与健康检查|`contrib/optix/vllm_pd_simulator/`|
 |`evalscopeperf`|测评工具（`-b`）|小巧灵突击队|封装 `evalscope perf` 命令作为测评工具，演示自定义测评工具接入|`contrib/optix/evalscopeplugin/`|
 
@@ -36,9 +38,9 @@
 
 ### 2.1 环境隔离原则
 
-确认系统已部署 vLLM/MindIE：例如一个vLLM服务容器，容器内安装服务化实测寻优 optix 工具，推荐装在虚拟环境里。在仓库根目录执行 `uv sync` 即可自动创建 `.venv` 并完成安装。
+确认系统已部署 vLLM/MindIE：例如一个vLLM服务容器，容器内安装服务化实测寻优 OptiX 工具，推荐装在虚拟环境里。在仓库根目录执行 `uv sync` 即可自动创建 `.venv` 并完成安装。
 
-安装 msmodeling 会同时装上 `torch`、`transformers` 等包，如果在系统 Python 里安装 msModeling，可能会与系统里原有的 `torch`、`transformers` 版本冲突，导致：
+安装 msmodeling 会同时装上 `torch`、`transformers` 等包，如果在系统Python里安装 msModeling，可能会与系统里原有的 `torch`、`transformers` 版本冲突，导致：
 
 - vLLM、MindIE 起不来或推理报错
 - 和 Ascend 推理栈上已验证的版本对不上
@@ -54,7 +56,7 @@ uv sync
 ```
 
 > [!WARNING]
-> 不要在 msmodeling 虚拟环境里 `pip install vllm`、`mindie_llm` 等部署包，也不要在未建 venv 的系统 Python 里安装 msmodeling，若有疑问，可参考[推荐实践：服务化实测寻优环境与部署栈](../../install_guide/msmodeling_optix_env_and_deployment_stack.md)
+> 不要在 msmodeling 虚拟环境里 `pip install vllm`、`mindie_llm` 等部署包，也不要在未建 venv 的系统 Python 里安装 msmodeling，若有疑问，可参考[推荐实践：服务化实测寻优环境与部署栈](../../install_guide/msmodeling_optix_env_and_deployment_stack.md)。
 
 <a id="验证安装"></a>
 
@@ -132,5 +134,5 @@ Agent 模式下，工具不在内部运行 PSO，而是从 `[agent_optimizer].ru
 推荐通过 **`optix-assistant` 寻优 skill** 使用 Agent 模式。该 skill 提供配置预检（config_preflight）、上下文采集（collect_context）、配置参数检查（check_search_space）与最优配置导出（export_best_config）等配套脚本，并对候选生成、失败分析与判优规则遵循统一的行为契约。典型使用流程：
 
 1. 按[环境准备与安装](#4-环境准备与安装)完成安装，并确认部署栈可用；
-2. 安装并启动 AI Agent 工具，推荐使用 [MindStudioAgent](https://gitcode.com/Ascend/msagent)，或按 [OpenCode 官方文档](https://dev.opencode.ai/v2/docs)安装 OpenCode 并配置模型服务。进入 msmodeling 仓库目录后，在 Agent 对话中输入“请读取本仓库的 `.agents/skills/optix-assistant/SKILL.md`，使用 optix-assistant 进行 Agent 模式寻优”，然后按提示选择全自动或交互式执行方式；
+2. 安装并启动 AI Agent 工具，推荐使用 [msAgent](https://gitcode.com/Ascend/msagent)，或按 [OpenCode官方文档](https://dev.opencode.ai/v2/docs)安装 OpenCode 并配置模型服务。进入 msmodeling 仓库目录后，在 Agent 对话中输入“请读取本仓库的 `.agents/skills/optix-assistant/SKILL.md`，使用 optix-assistant 进行 Agent 模式寻优”，然后按提示选择全自动或交互式执行方式；
 3. 完成配置预检与上下文采集后，agent 按目标路由读取方法卡；基础配置通过 `config_writer` 登记到 TOML，每轮更新 `context.search_space`，候选 `params` 只写取值。校验后执行实测；每轮进程退出后，将 context.json 复制为 context.round-N.json，再准备下一轮。收敛后按最佳结果所属轮次的 context 归档导出配置，归档缺失或损坏时拒绝导出。

@@ -6,7 +6,7 @@
 >
 > **本服务仅限单用户、单机使用。** 请勿在多用户共享主机上运行。若服务进程以高权限（root / 管理员）运行，则构成本地提权风险。
 
-本文档面向 Modeling 的日常使用者和即将接入项目的开发者，目标是帮助你快速理解工具能做什么、如何从 Web UI 或 CLI 发起仿真、如何解读结果，以及在不同业务场景下应该如何配置参数。
+本文档面向 msModeling 的日常使用者和即将接入项目的开发者，目标是帮助你快速理解工具能做什么、如何从 Web UI 或 CLI 发起仿真、如何解读结果，以及在不同业务场景下应该如何配置参数。
 
 如果只想启动 Web UI，在仓库根目录（venv 已激活）运行启动器即可：
 
@@ -38,7 +38,7 @@ Modeling 是一个面向模型推理性能分析的仿真工具，核心能力�
 - 支持 LLM 文本推理、VL 多模态推理、视频生成 Diffusion Transformer 推理，以及服务化吞吐寻优。
 - 支持多芯片横向对比，帮助判断同一个模型在不同设备上的性能差异。
 - 支持并发、TP、量化、MTP、Prefix Cache、Ulysses、DiT Cache、PD 混部、PD 分离、PD 配比等参数组合分析。
-- Web UI 提供可视化图表、明细表格、case 选择、CSV 导出、任务历史、Chrome trace 下载和历史缓存；CLI 适合脚本化批量实验。
+- Web UI 提供可视化图表、明细表格、case 选择、CSV 导出、任务历史、Chrome Trace 下载和历史缓存；CLI 适合脚本化批量实验。
 
 仓库中与用户最相关的入口如下：
 
@@ -624,7 +624,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --prefill-devices-per-instance 4 \
   --decode-devices-per-instance 4 \
   --ttft-limit 10000 \
-  --tpot-limit 3000 \
+  --tpot-limit 3000
 ```
 
 PD 配比的核心思想是分别计算 Prefill QPS 和 Decode QPS，再寻找更平衡的 Prefill / Decode 实例配比。

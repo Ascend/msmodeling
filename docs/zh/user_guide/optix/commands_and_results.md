@@ -1,5 +1,7 @@
 # OptiX 命令与结果参考
 
+本文档介绍OptiX工具的命令参数与结果文件字段，涵盖msmodeling optix的命令格式、参数说明、使用示例和PD分离寻优方式，以及结果CSV中各字段的含义与用途，适用于使用OptiX进行推理服务参数寻优和结果解读的用户。
+
 [使用指南](../msmodeling_optix_user_guide.md) | [插件与模式](plugin_and_modes.md) | [配置参数](configuration.md) | [命令与结果](commands_and_results.md) | [环境与排障](troubleshooting.md)
 
 <a id="8-命令参数说明"></a>
@@ -29,7 +31,7 @@ msmodeling optix [options]
 
 |参数|可选/必选|说明|
 |---|---|---|
-|`--mode`|可选|选择寻优流程。`standard` 为默认的通用寻优流程，`pd_disagg` 分别搜索 P、D 参数并推荐配比。|
+|--mode|可选|选择寻优流程。`standard` 为默认的通用寻优流程，`pd_disagg` 分别搜索 P、D 参数并推荐配比。|
 |-e或--engine|可选|指定推理框架，可取值：<br>&#8226;vllm：使用VLLM作为推理框架<br>&#8226;mindie：使用MindIE作为推理框架<br/>默认值为`vllm`。|
 |-b或--benchmark-policy|可选|指定测评工具，可取值：<br>&#8226;`vllm_benchmark`：使用 vllm_benchmark 作为测评工具 <br/>&#8226;`ais_bench`：使用 AISBench 作为测评工具<br/>默认值为`ais_bench`。<br/>用户需自行选择适配的推理框架以及测试框架。|
 |-c或--config|可选|指定自定义配置文件路径（TOML格式）。支持以下三种形式：<br>&#8226;绝对路径：直接使用指定路径；<br>&#8226;相对路径（含目录分隔符）：相对于当前工作目录解析；<br>&#8226;仅文件名：在当前工作目录下查找。<br/>默认不指定，工具按预设路径顺序自动搜索配置文件。<br/>指定文件必须为有效 TOML 格式，且具有最高配置优先级。|
@@ -43,13 +45,13 @@ msmodeling optix [options]
 <details open>
 <summary>vLLM</summary>
 
-vLLM场景下使用ais_bench测评工具可参考
+vLLM场景下使用ais_bench测评工具可参考：
 
 ```bash
 msmodeling optix -e vllm
 ```
 
-vLLM场景下使用vllm_benchmark测评工具可参考
+vLLM场景下使用vllm_benchmark测评工具可参考：
 
 ```bash
 msmodeling optix -e vllm -b vllm_benchmark
@@ -60,7 +62,7 @@ msmodeling optix -e vllm -b vllm_benchmark
 <details>
 <summary>MindIE</summary>
 
-mindIE场景下使用ais_bench测评工具可参考
+MindIE场景下使用ais_bench测评工具可参考：
 
 ```bash
 msmodeling optix -e mindie
@@ -103,20 +105,20 @@ msmodeling optix --mode pd_disagg -e vllm -b ais_bench -c ./pd_search.toml
 
 ## 2. 结果文件说明
 
-输出 CSV 中的每一行对应一组参数。第一列 `case_id` 用于标识 Case，后续六列为性能指标。用户可以根据需求筛选满足要求的性能行，将 VLLM/MindIE 参数以及 vllm_benchmark/AISBench 的参数改为 CSV 中的数据即可。
+输出 CSV 中的每一行对应一组参数。第一列 `case_id` 用于标识 Case，后续六列为性能指标。用户可以根据需求筛选满足要求的性能行，将 vLLM/MindIE 参数以及 vllm_benchmark/AISBench 的参数改为 CSV 中的数据即可。
 
 |字段|说明|
 |---|---|
 |`case_id`|关联主结果和 metrics 采样轨迹的 Case 标识。|
-|`generate_speed(tokens/s)`|输出 token 吞吐，单位为 token/秒。|
+|`generate_speed(tokens/s)`|输出 token 吞吐，单位为 token/s。|
 |`time_to_first_token(s)`|TTFT 时延，单位为秒。|
 |`time_per_output_token(s)`|TPOT 时延，单位为秒。|
 |`success_rate`|请求成功率，无量纲比例，取值为 0～1。|
 |`throughput(requests/s)`|测试吞吐，单位为请求数/秒。|
-|`input_token_throughput(tokens/s)`|输入 token 吞吐，单位为 token/秒。 |
+|`input_token_throughput(tokens/s)`|输入 token 吞吐，单位为 token/s。 |
 |`CONCURRENCY`|并发数。|
 |`REQUESTRATE(requests/s)`|发送速率，单位为请求数/秒。|
-|`error`|记录这次参数没有正常执行的原因，在发送错误时记录。|
+|`error`|记录这次参数没有正常执行的原因，在发生错误时记录。|
 |`backup`|数据记录地址，当开启 `--backup` 时记录。|
 |`real_evaluation`|标记数据是否由真实测试结果得到。`false` 代表该组数据由 GP 模型预测得到。|
 |`fitness`|寻优算法优化值，该值越小代表该组参数效果越好。|

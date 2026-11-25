@@ -1,5 +1,7 @@
 # OptiX 配置参数参考
 
+本文档介绍OptiX的config.toml配置文件，涵盖寻优参数、测评工具参数、服务化参数与高级配置各配置段的参数取值和说明，适用于使用OptiX进行模型服务化性能寻优的配置人员。
+
 [使用指南](../msmodeling_optix_user_guide.md) | [插件与模式](plugin_and_modes.md) | [配置参数](configuration.md) | [命令与结果](commands_and_results.md) | [环境与排障](troubleshooting.md)
 
 <a id="7-配置文件说明"></a>
@@ -63,7 +65,7 @@ benchmark_run_count = 2
 `REQUESTRATE=0` 表示不限速，因此“最大施压速率”按业务语义取值：范围包含 `0` 时取 `0`，否则取配置的数值 `max`。Agent 模式下该开关必须为 `false`，原因见[寻优模式：PSO 与 Agent](plugin_and_modes.md#6-寻优模式pso-与-agent)。
 
 > [!NOTE]
-> 用户可根据预估时间自行配置种子和迭代次数。单个种子使用时间为拉起服务 + 测试数据。比如用户拉起服务 + 完成测试需 15min，且愿意用 8 小时来进行寻优，则一共可跑约 50 个种子，建议配置 `n_particles=8`、`iters=4`（种子数为迭代次数的 2 倍左右）。
+> 用户可根据预估时间自行配置种子和迭代次数。单个种子使用时间为拉起服务 + 测试数据。比如用户拉起服务 + 完成测试需 15min，且愿意用 8h 来进行寻优，则一共可跑约 50 个种子，建议配置 `n_particles=8`、`iters=4`（种子数为迭代次数的 2 倍左右）。
 
 <a id="测评工具参数"></a>
 <a id="12-测评工具参数"></a>
@@ -122,7 +124,7 @@ benchmark_run_count = 2
 
 ### 4.1 vLLM 服务化参数
 
-使用 VLLM 框架时，需修改 `config.toml` 中的 `[vllm.command]` 参数：
+使用 vLLM 框架时，需修改 `config.toml` 中的 `[vllm.command]` 参数：
 
 ```toml
 [vllm.command]
@@ -144,7 +146,7 @@ others = ""
 <a id="vllm-自定义参数寻优"></a>
 <a id="17-vllm-自定义参数寻优"></a>
 
-### 4.2 VLLM 自定义参数寻优
+### 4.2 vLLM 自定义参数寻优
 
 寻优工具支持通过 `[[vllm.target_field]]` 添加 VLLM 参数参与寻优。根据参数生效方式不同，配置方式分为两类：
 
@@ -247,7 +249,7 @@ value = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 
 ### 4.4 MindIE 服务化参数
 
-使用 MindIE 框架时，需修改 `config.toml` 中的 `[mindie.command]` 参数，可参考 [MindIE server 配置参数说明](https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindieservice/servicedev/mindie_service0285.html)进行修改。服务化参数可直接指定参数的范围，如配置 `max_batch_size` 的寻优搜索空间为 10~400：
+使用 MindIE 框架时，需修改 `config.toml` 中的 `[mindie.command]` 参数，可参考 [MindIE server配置参数说明](https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindieservice/servicedev/mindie_service0285.html)进行修改。服务化参数可直接指定参数的范围，如配置 `max_batch_size` 的寻优搜索空间为 10~400：
 
 ```toml
 [[mindie.target_field]]
@@ -292,7 +294,7 @@ dtype_param = "max_batch_size"
 <a id="target_field-配置文件说明"></a>
 <a id="1101-target_field-配置文件说明"></a>
 
-#### 4.5.1 target_field 配置文件说明
+#### 4.5.1 target_field配置文件说明
 
 | 字段 | 含义                                                                                                                                                                                          | 示例 |
 |---|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---|
@@ -340,7 +342,7 @@ dtype_param = "max_batch_size"
 
 服务化实测寻优拉起 vLLM、MindIE 或测评工具时，optix 会先去掉 msmodeling 虚拟环境相关变量，再按下面配置找部署根目录，`bin/` 下应有 `vllm`、`ais_bench` 等，部署环境配置位于 `config.toml` 中的 `[deploy]`：
 
-|参数|必选|说明|
+|参数|可选/必选|说明|
 |------|------|------|
 |`path_prefix`|可选|部署根目录，其 `bin/` 会前置到剥离 msmodeling 虚拟环境后的 PATH；未找到命令时继续搜索原有 PATH。`OPTIX_DEPLOY_PATH` 优先于此配置|
 
@@ -355,7 +357,7 @@ dtype_param = "max_batch_size"
 
 ### 5.2 结果存储与精调
 
-仅启用 TTFT 惩罚（`ttft_penalty > 0`、`tpot_penalty = 0`）时，最终判优优先选择 TTFT 低于 SLO 的候选，再在其中选择生成吞吐最高者；如果所有候选均超出 TTFT SLO，则选择 TTFT 最低者。关闭 FineTune 时，工具在复测后停止自己管理的服务；`manage_simulator_lifecycle=false` 的外部服务由调用方管理。
+仅启用 TTFT 惩罚（`ttft_penalty > 0`、`tpot_penalty = 0`）时，最终判优时优先选择 TTFT 低于 SLO 的候选，再在其中选择生成吞吐最高者；如果所有候选均超出 TTFT SLO，则选择 TTFT 最低者。关闭 FineTune 时，工具在复测后停止自己管理的服务；`manage_simulator_lifecycle=false` 的外部服务由调用方管理。
 
 PSO 阶段结束后，工具会从结果中选出若干组候选进入精调（fine-tune）阶段，`pso_top_k` 控制选取数量，结果存储与精调配置位于 `config.toml` 中的 `[data_storage]`：
 
@@ -550,7 +552,7 @@ dtype_param = {target_names = ["tp", "pp"], product = 32, dtype = "int", priorit
 #   stage1 失败时再 stage2：两个字段均可调整，按距离升序搜索
 ```
 
-> [!note] priority_policy 说明
+> [!note] priority_policy说明
 >
 > - `balanced` 是默认策略，不配置时自动生效。
 > - 修复分两阶段：stage1 固定高优先字段、调整低优先字段；stage1 失败后 stage2 两个字段均可调整。

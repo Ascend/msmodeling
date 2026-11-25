@@ -1,22 +1,24 @@
 # msModeling快速入门
 
+本文档介绍msModeling的模型推理性能仿真与服务化性能仿真能力，依次跑通LLM文本生成仿真与服务化性能仿真流程，适用于首次体验模型推理性能仿真和服务化性能仿真的用户。
+
 <br>
 
 ## 1. 概述
 
-msModeling 提供模型推理性能仿真与服务化性能仿真能力。本文档面向首次体验模型推理性能仿真和服务化性能仿真的用户，带您从环境检查开始，依次跑通 LLM 文本生成仿真与服务化性能仿真，快速理解工具的核心输入、输出与适用场景。
+msModeling提供模型推理性能仿真与服务化性能仿真能力。本文档面向首次体验模型推理性能仿真和服务化性能仿真的用户，带您从环境检查开始，依次跑通 LLM 文本生成仿真与服务化性能仿真，快速理解工具的核心输入、输出与适用场景。
 
 ### 1.1 前言
 
-**体验地图（核心操作约 10 分钟）**
+**体验地图（核心操作约10分钟）**
 
-> **执行顺序建议**：步骤 1 为基础环境检查；步骤 2 用于体验模型推理性能仿真；步骤 3 用于体验服务化性能仿真。
+> **执行顺序建议**：步骤1为基础环境检查；步骤2用于体验模型推理性能仿真；步骤3用于体验服务化性能仿真。
 
 | 步骤 | 环节 | 核心模块 | 参考操作耗时 | 建议原理学习 |
 | :---: | :---: | :--- | :---: | :---: |
-| **1** | **环境准备** | msModeling | 2 分钟 | 5 分钟 |
-| **2** | **模型推理性能仿真** | TensorCast | 1 分钟 | 10 分钟 |
-| **3** | **服务化性能仿真** | Throughput Optimizer | 2 分钟 | 15 分钟 |
+| **1** | **环境准备** | msModeling | 2分钟 | 5分钟 |
+| **2** | **模型推理性能仿真** | TensorCast | 1分钟 | 10分钟 |
+| **3** | **服务化性能仿真** | Throughput Optimizer | 2分钟 | 15分钟 |
 
 ### 1.2 环境准备
 
@@ -34,13 +36,13 @@ msModeling 提供模型推理性能仿真与服务化性能仿真能力。本文
 
 开始体验前，请先完成《[msModeling 安装指南](../install_guide/msmodeling_install_guide.md)》中的环境搭建，包括克隆仓库、创建虚拟环境、安装依赖以及配置 `PYTHONPATH`。
 
-本文后续命令默认在 msModeling 仓库根目录执行。若不在仓库根目录运行，请先设置：
+本文后续命令默认在msModeling仓库根目录执行。若不在仓库根目录运行，请先设置：
 
 ```bash
 export PYTHONPATH=/path/to/msmodeling:$PYTHONPATH
 ```
 
-模型推理性能仿真运行 Hugging Face 模型时需要读取模型配置。如果当前环境无法直接访问 Hugging Face，可设置镜像：
+模型推理性能仿真运行Hugging Face模型时需要读取模型配置。如果当前环境无法直接访问 Hugging Face，可设置镜像：
 
 ```bash
 export HF_ENDPOINT="https://hf-mirror.com"
@@ -53,16 +55,16 @@ python -m cli.inference.text_generate --help
 python -m cli.inference.throughput_optimizer --help
 ```
 
-若上述命令无法正常输出帮助信息，请优先检查虚拟环境是否已激活、依赖是否安装完成，以及 `PYTHONPATH` 是否指向 msModeling 仓库根目录。
+若上述命令无法正常输出帮助信息，请优先检查虚拟环境是否已激活、依赖是否安装完成，以及 `PYTHONPATH` 是否指向msModeling仓库根目录。
 
 ### 2.2 模型推理性能仿真
 
-TensorCast（模型推理性能仿真）面向 PyTorch 程序进行性能建模。它不会在真实加速器上执行模型，而是拦截计算图，并基于目标设备画像估算算子耗时、显存占用和整体推理性能。
+TensorCast（模型推理性能仿真）面向PyTorch程序进行性能建模。它不会在真实加速器上执行模型，而是拦截计算图，并基于目标设备画像估算算子耗时、显存占用和整体推理性能。
 
 > [!NOTE]知识点：模型推理性能仿真输出
-> TensorCast 默认输出算子级性能汇总、总执行时间、TPS/Device 与显存占用。若指定 `--chrome-trace-file`，还可以生成 Chrome Trace 文件用于可视化分析。
+> TensorCast默认输出算子级性能汇总、总执行时间、TPS/Device 与显存占用。若指定 `--chrome-trace-file`，还可以生成 Chrome Trace 文件用于可视化分析。
 
-#### 2.2.1 执行 LLM 文本生成仿真
+#### 2.2.1 执行LLM文本生成仿真
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-32B \
@@ -93,8 +95,8 @@ Total device memory: 64.000 GB
 - `analytic total`：算子估算总耗时。
 - `analytic avg`：算子每次调用的平均耗时。
 - `# of Calls`：算子被调用的次数。
-- `TPS/Device`：每设备每秒 token 数。
-- `Total device memory`：权重、KV cache、activation 等显存估算结果。
+- `TPS/Device`：每设备每秒token数。
+- `Total device memory`：权重、KV cache、activation等显存估算结果。
 
 成功标准：
 
@@ -102,7 +104,7 @@ Total device memory: 64.000 GB
 - 输出 `Total time for analytic` 或 `[analytic] TPS/Device`。
 - 输出显存估算结果，例如 `Total device memory`。
 
-#### 2.2.3 生成 Chrome Trace【可选】
+#### 2.2.3 生成Chrome Trace【可选】
 
 如需查看更细粒度的时间线，可增加 `--chrome-trace-file` 参数：
 
@@ -114,18 +116,18 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
     --chrome-trace-file ./tensorcast_trace.json
 ```
 
-生成后，可通过 `chrome://tracing` 或 MindStudio Insight 打开 trace 文件。
+生成后，可通过 `chrome://tracing` 或MindStudio Insight打开 trace 文件。
 
 ### 2.3 服务化性能仿真
 
-Throughput Optimizer（服务化性能仿真）可在 TTFT、TPOT 等 SLO 约束下，自动搜索最优并行策略和 batch 配置，帮助评估给定模型在目标硬件上的最大服务吞吐。
+Throughput Optimizer（服务化性能仿真）可在TTFT、TPOT 等 SLO 约束下，自动搜索最优并行策略和 batch 配置，帮助评估给定模型在目标硬件上的最大服务吞吐。
 
-> [!NOTE]知识点：PD 混部
-> PD（Prefill-Decode）混部表示 Prefill 与 Decode 运行在同一实例中，适合快速评估整体服务吞吐。若需要分别评估 Prefill 与 Decode，可继续阅读《[服务化性能仿真使用指南](../user_guide/msmodeling_throughput_optimizer_user_guide.md)》。
+> [!NOTE]知识点：PD混部
+> PD（Prefill-Decode）混部表示Prefill与Decode运行在同一实例中，适合快速评估整体服务吞吐。若需要分别评估 Prefill 与 Decode，可继续阅读《[服务化性能仿真使用指南](../user_guide/msmodeling_throughput_optimizer_user_guide.md)》。
 
 #### 2.3.1 执行服务化性能仿真
 
-以下命令用于快速体验 PD 混部场景。首次体验时不额外指定搜索维度，工具会使用默认 TP 搜索范围；如果运行耗时较长，可减少 `--num-devices` 或在进阶使用时显式指定 `--tp-sizes` 缩小搜索范围。
+以下命令用于快速体验PD混部场景。首次体验时不额外指定搜索维度，工具会使用默认 TP 搜索范围；如果运行耗时较长，可减少 `--num-devices` 或在进阶使用时显式指定 `--tp-sizes` 缩小搜索范围。
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -162,9 +164,9 @@ Top 4 PD Aggregated Configurations:
 
 - `TP` / `DP`：推荐的并行策略。
 - `concurrency`：当前候选配置支持的并发请求数。
-- `batch size`：满足 SLO 约束下的批大小。
-- `TTFT` / `TPOT`：首 token 时间与每输出 token 时间。
-- `Throughput (token/s)`：系统级输出 token 吞吐，数值越大表示吞吐越高。
+- `batch_size`：满足SLO约束下的批大小。
+- `TTFT` / `TPOT`：首 token 延迟与每输出token时间。
+- `Throughput (token/s)`：系统级输出token吞吐，数值越大表示吞吐越高。
 
 成功标准：
 
@@ -176,12 +178,12 @@ Top 4 PD Aggregated Configurations:
 
 如果上述命令执行成功，说明已完成模型推理性能仿真与服务化性能仿真的核心流程体验：
 
-- 模型推理性能仿真：已完成 TensorCast 仿真流程，并获得算子级耗时、TPS/Device 与显存估算。
-- 服务化性能仿真：已完成 Throughput Optimizer 仿真流程，并获得推荐并行策略与吞吐指标。
+- 模型推理性能仿真：已完成TensorCast仿真流程，并获得算子级耗时、TPS/Device 与显存估算。
+- 服务化性能仿真：已完成Throughput Optimizer仿真流程，并获得推荐并行策略与吞吐指标。
 
 常见问题：
 
-- 如果提示无法下载模型配置，请确认网络可访问 Hugging Face，或设置 `HF_ENDPOINT` 镜像。
+- 如果提示无法下载模型配置，请确认网络可访问Hugging Face，或设置 `HF_ENDPOINT` 镜像。
 - 如果提示无法找到 `cli` 或 `tensor_cast` 模块，请确认当前目录为仓库根目录，或已正确设置 `PYTHONPATH`。
 - 如果服务化性能仿真运行耗时较长，可先减小搜索范围，例如减少 `--num-devices` 或显式指定 `--tp-sizes`。
 
@@ -190,16 +192,16 @@ Top 4 PD Aggregated Configurations:
 - 《[模型推理性能仿真使用指南](../user_guide/msmodeling_tensor_cast_user_guide.md)》
 - 《[服务化性能仿真使用指南](../user_guide/msmodeling_throughput_optimizer_user_guide.md)》
 
-## 4. 【可选】Web UI 体验
+## 4. 【可选】Web UI体验
 
-若更偏好可视化操作，可在完成上述 CLI 流程后，通过 Web UI 在页面完成模型推理性能仿真、服务化性能仿真等配置，并以曲线和表格查看结果。
+若更偏好可视化操作，可在完成上述CLI流程后，通过 Web UI 在页面完成模型推理性能仿真、服务化性能仿真等配置，并以曲线和表格查看结果。
 
-在仓库根目录启动 Web UI：
+在仓库根目录启动Web UI：
 
 ```bash
 python web_ui/main.py
 ```
 
-浏览器访问 `http://127.0.0.1:5173`，即可通过页面配置模型、芯片、并行、量化和 workload 参数，并查看仿真曲线、明细表格与导出结果。
+浏览器访问 `http://127.0.0.1:5173`，即可通过页面配置模型、芯片、并行、量化和workload参数，并查看仿真曲线、明细表格与导出结果。
 
 更多页面说明、参数配置与结果解读，请参见《[Web UI 使用指南](../user_guide/msmodeling_web_ui_user_guide.md)》。

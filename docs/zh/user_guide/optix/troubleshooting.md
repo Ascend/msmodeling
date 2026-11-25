@@ -60,11 +60,11 @@ export OPTIX_LOG_LEVEL=DEBUG
 |---|---|
 |`INFO`（默认）|里程碑：baseline 通过、服务就绪、迭代摘要、最优结果；子进程启动为多行 `command:` / `log:`|
 |`DEBUG`|参数与配置细节、子进程 I/O；每行含 `file:line`；未捕获异常含完整堆栈|
-|`TRACE`|PSO 粒子级细节（fitness、粒子位置、单次评测参数）；与 DEBUG 相同含 `file:line`|
+|`TRACE`|PSO 粒子级细节（fitness、粒子位置、单次测评参数）；与 DEBUG 相同含 `file:line`|
 
-VLLM/MindIE 及测评日志写入结果目录或 `/tmp`。启动日志为多行可读格式：
+vLLM/MindIE 及测评日志写入结果目录或 `/tmp`。启动日志为多行可读格式：
 
-```text
+```output
 Starting service subprocess
   command: vllm serve model_path --host 127.0.0.1 --port 8080
   log: /tmp/ms_serviceparam_optimizer__abc123
@@ -80,11 +80,11 @@ baseline 失败时 CLI 边界仅输出一次含 `exit=`、`command:`、`log:` �
 |---|---|---|
 |退出码 `1`，提示 `No feasible solution found`|baseline 或 PSO 全部候选 fitness 为 `inf`|查看 CSV `error` 列；使用 `OPTIX_LOG_LEVEL=DEBUG`；检查服务与测评命令|
 |`Optimizer aborted` 并带堆栈|`main()` 未捕获的致命错误|根据边界单次 traceback 修复配置、路径或健康检查规则|
-|`BenchmarkResultError` / AISBench CSV 不唯一|测评输出目录下 0 个或多个 `performances/*/*.csv`|清理输出目录；确保每次评测只产生一份 CSV；立即终止整次寻优|
+|`BenchmarkResultError` / AISBench CSV 不唯一|测评输出目录下 0 个或多个 `performances/*/*.csv`|清理输出目录；确保每次测评只产生一份 CSV；立即终止整次寻优|
 |控制台仅有 `run_id`、`stage`，细节较少|默认 `INFO` 不打印粒子级日志|设置 `OPTIX_LOG_LEVEL=TRACE` 查看 PSO 内部|
 |`BenchmarkUnavailableError` 启动即失败|所选 `-b` 插件声明的 CLI 不在 `PATH`|安装 benchmark CLI 或更换 `-b`；发生在寻优开始前|
 |`SimulatorUnavailableError` 启动即失败|所选 `-e` 插件声明的 CLI 不在 `PATH`|安装推理框架 CLI 或更换 `-e`；发生在寻优开始前|
-|`BaselineRunError` 含 `exit=` / `log:`|baseline 子进程失败|先看控制台末尾日志；需要时再打开完整 log 文件|
+|`BaselineRunError` 含 `exit=` / `log:`|baseline 子进程失败|先看控制台末尾日志；需要时再打开完整日志文件|
 |`--config` 指向不存在文件|路径错误或文件未部署|检查路径；抛出 `ConfigFileNotFoundError`（退出码 `1`）|
 |启用了早停但 Case 未被停止|配置为 `action = "report"`|验证判断结果后改为 `action = "terminate"`|
 |日志提示 early exit unsupported|engine 不是 `vllm`|当前仅在 `-e vllm` 下启用早停|

@@ -1,6 +1,6 @@
 # PD 分离寻优公共环境准备
 
-本文用于 PD 分离多机寻优，以四台 Atlas 800I A3 服务器和 vLLM Ascend 容器为例，A 为控制端。每台示例使用 16 个设备节点（0～15）。命令中的机器、设备、模型和路径均按实际环境替换。已有的环境可跳过对应步骤。
+本文用于 PD 分离多机寻优，以四台 Atlas 800I A3 服务器和 vLLM Ascend 容器为例，A 为控制节点。每台示例使用 16 个设备节点（0～15）。命令中的机器、设备、模型和路径均按实际环境替换。已有的环境可跳过对应步骤。
 
 ```mermaid
 flowchart TB
@@ -175,7 +175,7 @@ cd /workspace/msmodeling
 
 安装依赖可能需要一段时间。下载较慢时，可使用国内 PyPI 镜像：`export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple`。部分依赖有独立下载源。
 
-先按 [uv 安装说明](https://docs.astral.sh/uv/getting-started/installation/)安装 uv，然后在 msmodeling 仓库根目录执行：
+先按 [uv安装说明](https://docs.astral.sh/uv/getting-started/installation/)安装 uv，然后在 msmodeling 仓库根目录执行：
 
 ```bash
 uv sync

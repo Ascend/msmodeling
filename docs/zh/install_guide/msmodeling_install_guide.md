@@ -1,4 +1,4 @@
-# msModeling 安装指南
+# msModeling安装指南
 
 本文档介绍msModeling工具的安装方式，涵盖在线安装、离线安装与源码安装三种途径，以及安装验证、卸载与升级操作，适用于需要在Linux、macOS或Windows环境部署msModeling的用户。
 
@@ -149,7 +149,7 @@ msmodeling --help
    python ms_install.py uninstall msmodeling
    ```
    
-   卸载成功打印如下信息：
+   卸载成功后打印如下信息：
 
    ```output
    Successfully uninstalled 1 tool (msmodeling)
@@ -157,7 +157,7 @@ msmodeling --help
 
 ### 4.2 通过 pip uninstall 命令卸载
 
-激活安装 msmodeling 的 Python 虚拟环境（venv），执行以下命令：
+激活已安装 msmodeling 的 Python 虚拟环境（venv），执行以下命令：
 
 ```bash
 pip uninstall msmodeling
@@ -180,7 +180,7 @@ pip show msmodeling
 
 ### 5.1 方式一：覆盖升级
 
-升级即“先卸后装”。若选择覆盖升级，直接通过[在线安装](#21-在线安装)和[离线安装](#22-离线安装)内容执行安装操作，工具将自动卸载旧版本，并引导您完成覆盖安装。
+升级即“先卸后装”。若选择覆盖升级，直接通过[在线安装](#21-在线安装)和[2.2 离线安装](#22-离线安装)内容执行安装操作，工具将自动卸载旧版本，并引导您完成覆盖安装。
 
 ### 5.2 方式二：源码升级
 
@@ -216,7 +216,7 @@ pip show msmodeling
 
 若使用 [服务化实测寻优optix](../user_guide/msmodeling_optix_user_guide.md)：
 
-- msModeling、OptiX 必须装在独立虚拟环境里，例如 `.venv`。安装会带上 `torch`、`transformers` 等依赖，它们给仿真使用，不是 OptiX 寻优使用的部署栈。
+- msModeling、OptiX 必须装在独立虚拟环境里，例如 `.venv`。安装会带上 `torch`、`transformers` 等依赖，它们是给仿真使用的，不是 OptiX 寻优使用的部署栈。
 - vLLM、MindIE、测评工具默认使用系统里已部署好的环境，一般不必再创建部署虚拟环境。
 - 不要在 msModeling 虚拟环境里执行 `pip install vllm`。
 

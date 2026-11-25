@@ -1,5 +1,7 @@
 # OptiX插件 开发指导
 
+本文档介绍OptiX插件的开发方法，涵盖自定义搜索参数配置、自定义服务框架与自定义性能测试工具的继承实现、注册与入口点声明步骤，适用于需要扩展OptiX寻优能力的开发者。
+
 ## 简介
 
 寻优工具支持自定义插件，用户可通过开发自定义插件实现：自定义搜索参数配置、自定义服务框架，以及自定义性能测试工具。
@@ -137,8 +139,8 @@
 
 3. 设置插件入口点
 
-    将自定义的内容的注册函数添加到入口组'optix.plugins'即可。
-    例如通过调用vllm_inference_optimization模块的register来注册，例如：
+    将自定义内容的注册函数添加到入口组'optix.plugins'即可。
+    例如通过调用vllm_inference_optimization模块的register来注册：
 
     ```toml
     [project.entry-points.'optix.plugins']
@@ -162,13 +164,13 @@
 5. 使用插件
 
     可以通过寻优工具的调用参数来指定插件实现的模块。
-    例如，新注册了服务框架vllm_infer和性能测试客户端vllm_infer_benchmark，先查看支持的服务和benchmark工具，是否包含刚刚注册的vllm_infer和vllm_infer_benchmark。例如：
+    例如，新注册了服务框架vllm_infer和性能测试客户端vllm_infer_benchmark，先查看支持的服务和benchmark工具，是否包含刚刚注册的vllm_infer和vllm_infer_benchmark。
 
     ```bash
     msmodeling optix -h
     ```
 
-    ```text
+    ```output
     options:
     -h, --help            show this help message and exit
     --load-breakpoint     Continue from where the last optimization was aborted.
@@ -194,9 +196,8 @@ def configure_pd_phase(self, *, phase_name, phase_config):
     """根据 prefill/decode 阶段刷新命令或流量语义。"""
 ```
 
-Prefill benchmark 插件必须在 Prefill 阶段把输出长度设置为 1 token，使请求在首 token 后结束，尽量消除 Decode
-过程对测量的影响；参数名由具体 benchmark 决定，例如通过自身命令配置传入等价的 `output_len=1`。P/D 两阶段插件都必须将请求吞吐以正数 `throughput` 返回，单位为 req/s。核心编排器直接使用该值作为各阶段 QPS，不使用 TTFT、TPOT 或并发数公式兜底。
+Prefill benchmark 插件必须在 Prefill 阶段把输出长度设置为 1 token，使请求在首 token 后结束，尽量消除 Decode过程对测量的影响；参数名由具体 benchmark 决定，例如通过自身命令配置传入等价的 `output_len=1`。P/D 两阶段插件都必须将请求吞吐以正数 `throughput` 返回，单位为 req/s。核心编排器直接使用该值作为各阶段 QPS，不使用 TTFT、TPOT 或并发数公式兜底。
 
-`pd_disagg` 只调用该扩展点搜索 Prefill 和 Decode 服务参数并推荐配比。用户启动完整 PD 服务后，使用普通
-`standard` 模式配置 `skip_pso=true` 和 `manage_simulator_lifecycle=false` 调整 benchmark 侧并发与请求率；
-该步骤不调用 PD simulator 插件。插件输出的 TTFT/TPOT 必须为秒，throughput 必须为 req/s。
+`pd_disagg` 只调用该扩展点搜索 Prefill 和 Decode 服务参数并推荐配比。用户启动完整 PD 服务后，使用普通`standard` 模式配置 `skip_pso=true` 和 `manage_simulator_lifecycle=false` 调整 benchmark 侧并发与请求率。
+
+该步骤不调用 PD simulator 插件。插件输出的 TTFT/TPOT 必须为s，throughput 必须为req/s。
