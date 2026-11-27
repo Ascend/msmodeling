@@ -21,7 +21,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -114,6 +114,24 @@ def _default_bound_components_by_model() -> BoundComponentsByModel:
     return collections.defaultdict(_default_bound_component_totals)
 
 
+def _occurrence_ranks(tags: Iterable[str]) -> List[int]:
+    """0-based per-tag occurrence rank of each element in ``tags``.
+
+    Layer reuse replays the lane graph once per layer with identical tag strings, so
+    tag equality alone cannot pair a spill with its stage record. Each replay emits
+    exactly one record and (at most) one spill per stage tag in program order, so the
+    i-th spill of a tag pairs with the i-th record of that tag — the spill only needs
+    its rank among the spills sharing the tag.
+    """
+    counts: Dict[str, int] = {}
+    ranks: List[int] = []
+    for tag in tags:
+        rank = counts.get(tag, 0)
+        ranks.append(rank)
+        counts[tag] = rank + 1
+    return ranks
+
+
 @dataclasses.dataclass
 class RuntimeEvent:
     op_invoke_info: OpInvokeInfo
@@ -187,8 +205,12 @@ class Runtime(TorchDispatchMode):
         self._pending_wait_memory_aliases: List[tuple[torch.Tensor, torch.Tensor]] = []
         # stream_id -> lane roles observed at replay time (trace lane naming).
         self._lane_roles: Dict[int, set] = collections.defaultdict(set)
-        # Lane stage tag -> token ids published by the tagged record.
-        self._tag_token_ids: Dict[str, tuple] = {}
+        # Lane stage tag -> event indices the tagged records ride on, in replay order
+        # (one entry per record occurrence). Layer reuse replays the lane graph once
+        # per layer with identical tag strings *and possibly identical output tensors*,
+        # so occurrences cannot be resolved by token id; each spill must pair with the
+        # event of its own replay (see ``_tag_occurrence_ready_s``, issue #675).
+        self._tag_record_events: Dict[str, List[int]] = {}
 
         self.exit_stack = contextlib.ExitStack()
 
@@ -337,7 +359,13 @@ class Runtime(TorchDispatchMode):
                 event.stream_id = int(op_invoke_info.args[1])
             token_ids = self._extract_tensor_token_ids(op_invoke_info.out)
             if len(op_invoke_info.args) > 2 and isinstance(op_invoke_info.args[2], str) and op_invoke_info.args[2]:
-                self._tag_token_ids[op_invoke_info.args[2]] = tuple(token_ids)
+                # Record the event the tag rides on, per replay occurrence. Layer reuse
+                # replays the same lane graph per layer, and the record's output tensor
+                # may be the *same* reused tensor across replays (identical token ids),
+                # so a token-id map collapses all layers onto the last one. Keying the
+                # occurrence to its event index keeps every replay resolvable
+                # independently (issue #675).
+                self._tag_record_events.setdefault(op_invoke_info.args[2], []).append(len(self.event_list) - 1)
             if not token_ids:
                 return
             event.produced_token_ids = list(self._dedup_token_ids(event.produced_token_ids + token_ids))
@@ -467,6 +495,13 @@ class Runtime(TorchDispatchMode):
         self._pending_wait_dependency_token_ids.clear()
         self.event_list.clear()
         self._event_reference_ids.clear()
+        # Tag -> event-index state is positional, so it must be reset with the
+        # event list: a fresh replay rebuilds the event table from scratch, and a
+        # stale index from an earlier round would point into the new table at an
+        # arbitrary position (or past its end). The token-id keyed map used before
+        # issue #675 was self-healing here — fresh tensors get fresh ids — but an
+        # event index has no such invalidation.
+        self._tag_record_events.clear()
         for op_invoke_info, reference_id in invocations:
             num_events_before_replay = len(self.event_list)
             self._replay_single_op(op_invoke_info)
@@ -945,6 +980,7 @@ class Runtime(TorchDispatchMode):
         stream_end_s: Dict[int, float] = collections.defaultdict(float)
         token_ready_s: Dict[int, float] = {}
         event_start_s: List[float] = []
+        event_end_s: List[float] = []
         event_duration_override_s: List[Optional[float]] = []
         spill_start_s: List[float] = []
         spill_index = 0
@@ -967,21 +1003,45 @@ class Runtime(TorchDispatchMode):
             for token_id in event.produced_token_ids:
                 token_ready_s[token_id] = end_time_s
             event_start_s.append(start_time_s)
+            event_end_s.append(end_time_s)
 
         return {
             "event_start_s": event_start_s,
+            "event_end_s": event_end_s,
             "event_duration_override_s": event_duration_override_s,
             "stream_end_s": dict(stream_end_s),
             "token_ready_s": token_ready_s,
             "spill_start_s": spill_start_s,
         }
 
-    def _tag_ready_s(self, tag: str, token_ready_s: Dict[int, float]) -> float:
-        """Ready time of a tagged token, or 0.0 when the tag was never published."""
-        ready_s = 0.0
-        for token_id in self._tag_token_ids.get(tag, ()):
-            ready_s = max(ready_s, token_ready_s.get(token_id, 0.0))
-        return ready_s
+    def _tag_occurrence_ready_s(self, tag: str, occurrence: int, event_end_s: List[float]) -> float:
+        """End time of the ``occurrence``-th record of ``tag``, or 0.0 when unresolvable.
+
+        Layer reuse replays one lane graph per layer with identical tag strings, and
+        the record's output tensor may be the same reused tensor across replays, so
+        occurrences are keyed by event index, not by token id. Each replay emits
+        exactly one record and (at most) one spill per stage tag, in program order, so
+        the k-th spill of a tag pairs with the k-th record of that tag regardless of
+        whether the record precedes or follows the spill inside the replay. Pairing
+        with the *last* record instead (the pre-fix behavior) made every spill wait on
+        the final layer's stage and diverged the fixed point (issue #675).
+        """
+        if not tag:
+            return 0.0
+        indices = self._tag_record_events.get(tag)
+        if not indices:
+            return 0.0
+        if occurrence >= len(indices):
+            # No matching record for this spill — the pass invariant (one record
+            # and at most one spill per stage tag per replay) is broken for this
+            # tag, e.g. a record was DCE'd. Clamping to the last record would
+            # re-introduce the cross-replay wait that diverged #675, so an
+            # unmatched spill simply has nothing to wait on (0.0).
+            return 0.0
+        index = indices[occurrence]
+        if index >= len(event_end_s):
+            return 0.0
+        return event_end_s[index]
 
     def _resolve_spill_durations(self, model_name: str) -> List[float]:
         """Fixed-point resolution of the shared-expert overflow waits.
@@ -1001,6 +1061,12 @@ class Runtime(TorchDispatchMode):
         A longer wait only pushes later events later, so the iteration converges in a
         couple of rounds. The loop is capped and falls back to the element-wise maximum,
         so a non-converged round can never under-estimate a wait.
+
+        Tag pairing is per occurrence: layer reuse replays the lane graph once per
+        layer with the same tag strings, so the k-th spill of a tag must wait on the
+        k-th record of that tag (its own replay). Pairing every spill with the last
+        record made the first layer wait on the final layer's stage and diverged
+        (issue #675).
         """
         spill_events = [event for event in self.event_list if event.is_spill]
         durations = [0.0] * len(spill_events)
@@ -1008,16 +1074,21 @@ class Runtime(TorchDispatchMode):
         if not spill_events:
             return durations
 
+        wait_occurrence = _occurrence_ranks(event.spill_wait_tag for event in spill_events)
+        window_occurrence = _occurrence_ranks(event.spill_window_tag for event in spill_events)
+
         metrics: List[Dict[str, float]] = []
         for _ in range(self._SPILL_FIXPOINT_ROUNDS):
             simulated = self._simulate_timeline(model_name, durations)
-            token_ready_s = simulated["token_ready_s"]
+            event_end_s = simulated["event_end_s"]
             spill_start_s = simulated["spill_start_s"]
             next_durations: List[float] = []
             round_metrics: List[Dict[str, float]] = []
             for index, event in enumerate(spill_events):
-                stage_ready_s = self._tag_ready_s(event.spill_wait_tag, token_ready_s)
-                window_ready_s = self._tag_ready_s(event.spill_window_tag, token_ready_s)
+                stage_ready_s = self._tag_occurrence_ready_s(event.spill_wait_tag, wait_occurrence[index], event_end_s)
+                window_ready_s = self._tag_occurrence_ready_s(
+                    event.spill_window_tag, window_occurrence[index], event_end_s
+                )
                 start_s = spill_start_s[index] if index < len(spill_start_s) else 0.0
                 delay_s = max(0.0, stage_ready_s - start_s)
                 next_durations.append(delay_s)

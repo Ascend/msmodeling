@@ -2444,6 +2444,131 @@ def test_shared_expert_spill_feedback_loop_raises():
         runtime.total_execution_time_s()
 
 
+def test_shared_expert_spill_pairs_with_own_replay_stage_token():
+    """Layer reuse: the k-th spill of a tag must wait on the k-th record, not the last.
+
+    Replaying the same lane graph once per layer (the default layer-reuse mode) publishes
+    the *same* stage tag on every replay. Before issue #675 the resolver kept only the
+    last record per tag, so every spill — including layer 1's — waited on the final
+    layer's stage; the bogus waits fed back into the timeline and the fixed point
+    diverged (~1e12 ms on Ling-3.0-flash-VL). Each spill must pair with the record of
+    its own replay, which keeps every wait bounded by its own layer.
+    """
+    durations_s = {
+        torch.ops.aten.relu.default: 3.0,  # routed work on stream 0
+        torch.ops.aten.sigmoid.default: 5.0,  # lane stage on stream 2
+    }
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def layer(t):
+        routed = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        routed = torch.ops.aten.relu.default(routed)  # routed window on stream 0
+        anchor = torch.ops.tensor_cast._internal_record.default(routed, 0)
+
+        spill_wait = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        spill = torch.ops.tensor_cast._internal_spill.default(spill_wait, "shared_expert:gate_up", "stage-tag")
+        _ = torch.ops.tensor_cast._internal_record.default(spill, 0)
+
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [anchor])
+        lane = torch.ops.aten.sigmoid.default(lane)
+        _ = torch.ops.tensor_cast._internal_record.default(lane, 2, "stage-tag")
+        return routed, lane, spill
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        for _ in range(3):
+            layer(x)
+
+    events = [event for event in runtime.get_trace_events() if event.get("ph") == "X"]
+    spill_blocks = [event for event in events if event["name"] == "shared_expert.spill[gate_up]"]
+    assert len(spill_blocks) == 3
+    # Per replay: routed 3s -> spill starts; the lane stage (gated on this replay's
+    # anchor) ends 5s later. Layer k starts at 8s * (k - 1) on stream 0 because the
+    # previous spill blocked it, so the three waits are all 5s.
+    for block in spill_blocks:
+        _assert_close(block["dur"], 5e6)
+    _assert_close(spill_blocks[0]["ts"], 3e6)
+    _assert_close(spill_blocks[1]["ts"], 11e6)
+    _assert_close(spill_blocks[2]["ts"], 19e6)
+    # No cross-layer wait: the total is the three serialized layers, not a divergence.
+    _assert_close(runtime.total_execution_time_s()[perf_model.name], 24.0)
+
+
+def test_shared_expert_spill_tag_state_resets_across_replay():
+    """A Runtime instance replayed twice must not carry stale tag->event state.
+
+    ``replay_flat_op_invoke_infos`` clears ``event_list`` and re-replays the same
+    invocations (the frozen-workload / workload-cache path). The pre-fix tag map
+    kept event indices from earlier rounds, so a replay's spill resolved against
+    positions of a *previous* event list. The token-id keyed map was self-healing
+    here (fresh tensors get fresh ids), the event-index keyed map is not — it must
+    be reset with the event list itself (issue #675 review finding).
+    """
+    durations_s = {
+        torch.ops.aten.relu.default: 3.0,  # routed window on stream 0
+        torch.ops.aten.sigmoid.default: 5.0,  # lane stage on stream 2
+    }
+    perf_model = _fixed_duration_model(durations_s)
+    x = torch.randn([8, 8], device="meta")
+
+    def layer(t):
+        routed = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        routed = torch.ops.aten.relu.default(routed)
+        anchor = torch.ops.tensor_cast._internal_record.default(routed, 0)
+        spill_wait = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 0, [])
+        spill = torch.ops.tensor_cast._internal_spill.default(spill_wait, "shared_expert:gate_up", "stage-tag")
+        _ = torch.ops.tensor_cast._internal_record.default(spill, 0)
+        lane = torch.ops.tensor_cast._internal_wait_and_bind.default(t, 2, [anchor])
+        lane = torch.ops.aten.sigmoid.default(lane)
+        _ = torch.ops.tensor_cast._internal_record.default(lane, 2, "stage-tag")
+        return routed, lane, spill
+
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        layer(x)
+    # __exit__ has run repeat + replay once: op_info_group is built and the
+    # first timeline exists. Re-replaying the same flattened invocations is
+    # the frozen-workload / workload-cache path.
+    invocations = runtime._iter_flat_invocations()
+    assert invocations, "expected flattened invocations after the runtime context"
+
+    runtime.replay_flat_op_invoke_infos(invocations)
+    first_replay_total = runtime.total_execution_time_s()[perf_model.name]
+    # The tag state must not grow across replays: one record per tag per round.
+    assert all(len(indices) == 1 for indices in runtime._tag_record_events.values())
+    runtime.replay_flat_op_invoke_infos(invocations)
+    second_replay_total = runtime.total_execution_time_s()[perf_model.name]
+    assert all(len(indices) == 1 for indices in runtime._tag_record_events.values())
+
+    # Both replays see the identical program; the totals must match exactly.
+    _assert_close(second_replay_total, first_replay_total)
+    # And the replayed program is one layer: routed 3s window, lane 3..8s, spill 3..8s.
+    _assert_close(second_replay_total, 8.0)
+
+
+def test_tag_occurrence_ready_s_unmatched_spill_has_no_wait_target():
+    """An occurrence beyond the recorded ones resolves to 0.0, never clamps to the last.
+
+    Clamping out-of-range occurrences onto the last record re-introduces the
+    cross-replay pairing that diverged #675: when a spill outlives its record
+    (e.g. the record was DCE'd while the spill survived), the unmatched spill has
+    no wait target and must not wait on the last replay's record.
+    """
+    perf_model = _fixed_duration_model({})
+    with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+        pass
+    runtime._tag_record_events["stage-tag"] = [1, 2]
+
+    # In-range occurrences pair with their own record's event end.
+    assert runtime._tag_occurrence_ready_s("stage-tag", 0, [0.0, 5.0, 9.0]) == 5.0
+    assert runtime._tag_occurrence_ready_s("stage-tag", 1, [0.0, 5.0, 9.0]) == 9.0
+    # Out of range: no matching record -> no wait (0.0), NOT the last record's end.
+    assert runtime._tag_occurrence_ready_s("stage-tag", 2, [0.0, 5.0, 9.0]) == 0.0
+    assert runtime._tag_occurrence_ready_s("stage-tag", 99, [0.0, 5.0, 9.0]) == 0.0
+    # Unknown or empty tags stay 0.0 as well.
+    assert runtime._tag_occurrence_ready_s("missing-tag", 0, [0.0, 5.0, 9.0]) == 0.0
+    assert runtime._tag_occurrence_ready_s("", 0, [0.0, 5.0, 9.0]) == 0.0
+
+
 def test_shared_expert_lane_name_in_trace():
     durations_s = {torch.ops.aten.sigmoid.default: 1.0}
     perf_model = _fixed_duration_model(durations_s)
