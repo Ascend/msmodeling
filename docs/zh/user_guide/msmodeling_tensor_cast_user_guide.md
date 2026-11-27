@@ -614,7 +614,7 @@ usage: video_generate.py [-h] [-V] [-v] [-q]
                          [--log-level {debug,info,warning,error,critical}] [--dtype {float16,float32,bfloat16}]
                          [--remote-source {huggingface,modelscope}]
                          [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4,MXFP8,HIF8}]
-                         [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg]
+                         [--quantize-attention-action {DISABLED,INT8,FP8,HIF8}] [--use-cfg]
                          [--attention-backend {dense,block_sparse_attention}] [--attention-block-size ATTENTION_BLOCK_SIZE]
                          [--attention-sparsity ATTENTION_SPARSITY] [--num-devices WORLD_SIZE]
                          [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--compile]
@@ -645,7 +645,7 @@ Run a simulated diffusion transformer forward and dump perf stats.
 | --dtype | options | 可选 | 指定模型计算数据类型。<br>1. 类型：Str。<br>2. 参考值：`float16`、`float32`、`bfloat16`。<br>3. 默认值：`float16`。 |
 | --remote-source | options | 可选 | 指定非本地 Diffusers repo ID 的远端模型来源。<br>1. 类型：Str。<br>2. 参考值：`huggingface`、`modelscope`。<br>3. 默认值：`huggingface`。 |
 | --quantize-linear-action | options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`MXFP8`、`HIF8`。<br>3. 默认值：`W8A8_DYNAMIC`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `W8A8_DYNAMIC` 与 `w8a8-dynamic`、`DISABLED` 与 `disabled`。 |
-| --quantize-attention-action | options | 可选 | 指定 attention 计算量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`。<br>3. 默认值：`DISABLED`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `DISABLED` 与 `disabled`、`INT8` 与 `int8`。 |
+| --quantize-attention-action | options | 可选 | 指定 attention 计算量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`、`HIF8`。<br>3. 默认值：`DISABLED`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `DISABLED` 与 `disabled`、`INT8` 与 `int8`。 |
 | --use-cfg | options | 可选 | 启用 classifier-free guidance 相关仿真路径。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | --attention-backend | Attention Options | 可选 | 选择 attention 后端。<br>1. 类型：Str。<br>2. 参考值：`dense`、`block_sparse_attention`。<br>3. 默认值：`dense`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `block_sparse_attention` 与 `block-sparse-attention`。 |
 | --attention-block-size | Attention Options | 可选 | 设置 BSA block size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`128`。 |
@@ -708,7 +708,7 @@ msmodeling inference image-generate MODEL --batch-size <N> --output-image-size H
 | --remote-source | options | 可选 | 指定远端模型来源；参与 exact pair 匹配。<br>1. 类型：Str。<br>2. 参考值：`huggingface`、`modelscope`。<br>3. 默认值：`huggingface`。 |
 | --quantize-linear-action | Quantization Options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`MXFP8`、`HIF8`。<br>3. 默认值：`DISABLED`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `W8A8_DYNAMIC` 与 `w8a8-dynamic`、`DISABLED` 与 `disabled`。 |
 | --mxfp4-group-size | Quantization Options | 可选 | 指定 MXFP4 量化的 group size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`32`。 |
-| --quantize-attention-action | Quantization Options | 可选 | 指定 attention 计算量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`。<br>3. 默认值：`DISABLED`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `DISABLED` 与 `disabled`、`INT8` 与 `int8`。 |
+| --quantize-attention-action | Quantization Options | 可选 | 指定 attention 计算量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`、`HIF8`。<br>3. 默认值：`DISABLED`。<br>4. 取值大小写及下划线/连字符写法均可，例如 `DISABLED` 与 `disabled`、`INT8` 与 `int8`。 |
 | --compile | Optimization Options | 可选 | 在仿真前编译主 transformer。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 使用 `dynamic=False, fullgraph=True`；启用 DiT cache 时，cache transformer 使用相同策略。 |
 | --compile-allow-graph-break | Optimization Options | 可选 | 允许编译期间发生 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 会将主 transformer 和 DiT cache transformer 的编译方式改为 `fullgraph=False`。 |
 | --num-devices | Parallel Options | 可选 | 指定参与分布式仿真的总设备数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。<br>4. 必须等于 `--ulysses-size`（启用 `--cfg-parallel` 时为 `2 * --ulysses-size`）。旧名 `--world-size` 仍可解析。 |
