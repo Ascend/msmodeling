@@ -285,6 +285,9 @@ class AutoModelConfigLoader:
         try:
             hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=False)
             self.is_transformers_natively_supported = True
+            auto_map = getattr(hf_config, "auto_map", None) or {}
+            if any(key.startswith("AutoModel") for key in auto_map) and not source_info.is_local_path:
+                self.is_transformers_natively_supported = False
         except Exception:
             hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 

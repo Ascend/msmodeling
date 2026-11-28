@@ -237,5 +237,5 @@ class DeepseekV32Model(DeepseekV3Model):
         self.post_init()
 
 
-AutoConfig.register("deepseek_v32", DeepseekV32Config)
-AutoModel.register(DeepseekV32Config, DeepseekV32Model)
+AutoConfig.register("deepseek_v32", DeepseekV32Config, exist_ok=True)
+AutoModel.register(DeepseekV32Config, DeepseekV32Model, exist_ok=True)

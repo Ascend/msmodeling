@@ -309,7 +309,7 @@ class TensorCastQuantLinear(QuantLinearBase):
     def __init__(self, linear_layer: torch.nn.Linear, quant_config: LinearQuantConfig):
         super().__init__(linear_layer, quant_config)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, activation_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Performs the quantized linear operation using custom tensor_cast ops.
 
@@ -320,7 +320,13 @@ class TensorCastQuantLinear(QuantLinearBase):
         x = x.reshape(-1, x_shape[-1])
         qweight = self.qweight.transpose(0, 1)
         out_dtype = self.quant_config.out_dtype if self.quant_config.out_dtype is not None else x.dtype
-        if self.activation_scale is None:
+        activation_offset = None
+        if activation_scale is not None:
+            if self.activation_scale is not None:
+                raise ValueError("activation_scale kwarg cannot be used with static activation quantization")
+            if x.dtype != torch.int8:
+                raise ValueError("activation_scale kwarg requires int8 activations from a fused quant op")
+        elif self.activation_scale is None:
             # Dynamic quantization path
             if self.quant_config.dynamic_quant_granularity == QuantGranularity.PER_TENSOR:
                 dims = []

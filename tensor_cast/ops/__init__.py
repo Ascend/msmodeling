@@ -13,5 +13,6 @@ from . import (  # noqa: F401
     mtp,
     quantization,
     rotary_embedding,
+    minimax_m3_sparse_attention,
     swiglu,
 )

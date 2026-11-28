@@ -373,23 +373,31 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
     def _compute_upward_ranks(self, nodes: List[fx.Node]) -> None:
         schedulable = set(nodes)
 
-        def rank_of(node: fx.Node) -> float:
-            if node in self._ranks:
-                return self._ranks[node]
+        # Topologically sort to ensure all successors are processed before
+        # their predecessors, so upward ranks are computed correctly regardless
+        # of the input order of nodes.
+        visited = set()
+        topo_order = []
+
+        def dfs_visit(n):
+            if n in visited:
+                return
+            visited.add(n)
+            for user in n.users.keys():
+                if user in schedulable:
+                    dfs_visit(user)
+            topo_order.append(n)
+
+        for node in nodes:
+            dfs_visit(node)
+
+        for node in topo_order:
             self_cost = min(self._estimate_node_cost_s(node, stream_id) for stream_id in self._allowed_streams(node))
             max_succ_rank = 0.0
             for user in node.users.keys():
                 if user in schedulable:
-                    max_succ_rank = max(
-                        max_succ_rank,
-                        rank_of(user) + self.cross_stream_sync_overhead_s,
-                    )
-            total_rank = self_cost + max_succ_rank
-            self._ranks[node] = total_rank
-            return total_rank
-
-        for node in nodes:
-            rank_of(node)
+                    max_succ_rank = max(max_succ_rank, self._ranks[user] + self.cross_stream_sync_overhead_s)
+            self._ranks[node] = self_cost + max_succ_rank
 
     def _estimate_start_time_s(
         self,

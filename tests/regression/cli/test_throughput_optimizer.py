@@ -91,6 +91,7 @@ class TestThroughputOptimizer(TestCase):
         throughput_matches = re.findall(throughput_pattern, output_text)
         self.assertGreaterEqual(len(throughput_matches), 1, "Throughput values not found in table")
 
+    @pytest.mark.network
     def test_aggregation_functionality_with_output_validation(self):
         """Test aggregation functionality with comprehensive output validation"""
         args = [
@@ -118,6 +119,7 @@ class TestThroughputOptimizer(TestCase):
         table_start_pattern = AGG_TABLE_TITLE_RE
         self._validate_table_structure(full_output, required_columns, table_start_pattern)
 
+    @pytest.mark.network
     def test_disaggregation_prefill_only_with_output_validation(self):
         """Test disaggregation prefill only functionality with comprehensive output validation"""
         args = [
@@ -146,6 +148,7 @@ class TestThroughputOptimizer(TestCase):
         table_start_pattern = DISAGG_PREFILL_TITLE_RE
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
 
+    @pytest.mark.network
     def test_disaggregation_decode_only_with_output_validation(self):
         """Test disaggregation decode only functionality with comprehensive output validation"""
         args = [
@@ -195,6 +198,7 @@ class TestThroughputOptimizer(TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("valid range [0, 1)", result.stderr)
 
+    @pytest.mark.network
     def test_prefix_cache_hit_rate_aggregation_valid(self):
         args = [
             "--input-length=64",
@@ -213,6 +217,7 @@ class TestThroughputOptimizer(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_prefix_cache_hit_rate_disaggregation_prefill_valid(self):
         args = [
             "--input-length=64",
@@ -232,6 +237,7 @@ class TestThroughputOptimizer(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_prefix_cache_hit_rate_disaggregation_decode_valid(self):
         args = [
             "--input-length=64",
@@ -251,6 +257,7 @@ class TestThroughputOptimizer(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_prefix_cache_hit_rate_allows_chunked_prefill_when_effective_input_exceeds_max_batched_tokens(
         self,
     ):

@@ -23,8 +23,24 @@ from ..transformers.custom_model_registry import (
     get_mtp_block_module_name,
 )
 from ..transformers.utils import AutoModelConfigLoader
+from ..utils import str_to_dtype
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_hf_dtype(hf_config):
+    text_config = hf_config.get_text_config() if hasattr(hf_config, "get_text_config") else None
+    for config_obj in (text_config, hf_config):
+        if config_obj is None:
+            continue
+        for attr in ("dtype", "torch_dtype"):
+            dtype = getattr(config_obj, attr, None)
+            if dtype is None:
+                continue
+            if isinstance(dtype, str):
+                return str_to_dtype(dtype)
+            return dtype
+    return None
 
 
 class ConfigResolver:
@@ -82,6 +98,9 @@ class ConfigResolver:
         )
         self.model_config.hf_config = self.hf_config
         self.model_config.trust_remote_code = not auto_loader.is_transformers_natively_supported
+        hf_dtype = _resolve_hf_dtype(self.hf_config)
+        if hf_dtype is not None:
+            self.model_config.dtype = hf_dtype
 
     def resolve(self) -> ModelConfig:
         """

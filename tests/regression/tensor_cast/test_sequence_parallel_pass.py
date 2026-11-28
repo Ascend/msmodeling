@@ -118,6 +118,7 @@ class SequenceParallelPassRegressionTestCase(unittest.TestCase):
             (16, 16),
         ]
     )
+    @pytest.mark.network
     def test_sp_throughput_optimizer_row_embedding_tp(self, tp_size: int, batch_size: int):
         """throughput_optimizer entry point works for SP + row embedding TP.
 

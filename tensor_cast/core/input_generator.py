@@ -194,6 +194,7 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
         model, num_blocks, block_size, batch_size, total_kv_tokens
     )
     kwargs.update(sparse_attention_indexer_cache)
+    kwargs.update(get_minimax_m3_indexer_cache_info(model, num_blocks, block_size))
 
     if model.model_config.hf_config.model_type in (
         "qwen3_next",
@@ -791,6 +792,60 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
                 indexer_num_blocks,
                 block_size,
                 cache_width,
+            ],
+            dtype=cache_dtype,
+            device="meta",
+        )
+        indexer_cache_per_token += bytes_of_tensor(indexer_cache_by_layers[i]) / (num_blocks * block_size)
+
+    return {
+        "indexer_cache_by_layers": indexer_cache_by_layers,
+        "indexer_cache_per_token": indexer_cache_per_token,
+    }
+
+
+def _is_minimax_m3_sparse(model):
+    """Detect a MiniMax-M3 model whose sparse layers need an index K cache."""
+    hf_config = getattr(model.model_config, "hf_config", None)
+    if hf_config is None:
+        return False
+    text_config = getattr(hf_config, "text_config", hf_config)
+    layer_types = getattr(text_config, "layer_types", None)
+    return (
+        isinstance(layer_types, list)
+        and any(layer_type == "minimax_m3_sparse" for layer_type in layer_types)
+        and hasattr(text_config, "index_head_dim")
+    )
+
+
+def get_minimax_m3_indexer_cache_info(model, num_blocks, block_size):
+    """Allocate index K cache tensors for MiniMax-M3 sparse layers.
+
+    Unlike DSV3 (``get_dsa_indexer_cache_info``), M3 only needs an index K cache
+    for sparse layers. Dense layers do not allocate one.
+    """
+    if not _is_minimax_m3_sparse(model):
+        return {}
+
+    model_config = model.model_config
+    text_config = model_config.hf_config.text_config
+    indexer_head_dim = getattr(text_config, "index_head_dim", 128)
+    layer_types = text_config.layer_types
+
+    indexer_cache_by_layers = {}
+    indexer_cache_per_token = 0
+    for i in range(model.num_hidden_layers):
+        is_sparse = i < len(layer_types) and layer_types[i] == "minimax_m3_sparse"
+        if not is_sparse:
+            continue
+        cache_dtype = model_config.dtype
+        if (attention_config := get_attention_quant_config(model, i)) is not None:
+            cache_dtype = attention_config.get_quant_dtype()
+        indexer_cache_by_layers[i] = torch.empty(
+            [
+                num_blocks,
+                block_size,
+                indexer_head_dim,
             ],
             dtype=cache_dtype,
             device="meta",

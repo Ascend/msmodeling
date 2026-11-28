@@ -276,10 +276,11 @@ class ParallelMoELayer(ModelWrapperBase):
         self.num_redundant_experts = num_redundant_experts
 
         moe_config = module.moe_config
-        experts = module.fused_moe.experts.experts if module.fused_moe.experts is not None else None
-        shared_experts = module.fused_moe.shared_experts
-        shared_experts_gate = module.fused_moe.shared_experts_gate
-        num_routing_experts = module.fused_moe.experts.num_experts if module.fused_moe.experts is not None else 0
+        old_fused_moe = module.fused_moe
+        experts = old_fused_moe.experts.experts if old_fused_moe.experts is not None else None
+        shared_experts = old_fused_moe.shared_experts
+        shared_experts_gate = old_fused_moe.shared_experts_gate
+        num_routing_experts = old_fused_moe.experts.num_experts if old_fused_moe.experts is not None else 0
 
         if moe_config.enable_external_shared_experts:
             assert shared_experts is not None
@@ -292,7 +293,21 @@ class ParallelMoELayer(ModelWrapperBase):
             for _ in range(num_redundant_experts):
                 experts.append(copy.deepcopy(experts[0]))
 
-        fused_moe_cls = moe_config.fused_moe_cls or FusedMoETensorCast
+        fused_moe_cls = moe_config.fused_moe_cls
+        if fused_moe_cls is None:
+            old_fused_moe_cls = type(old_fused_moe)
+            if (
+                isinstance(FusedMoETensorCast, type)
+                and isinstance(old_fused_moe_cls, type)
+                and old_fused_moe_cls is not FusedMoETensorCast
+                and issubclass(old_fused_moe_cls, FusedMoETensorCast)
+            ):
+                # Preserve model-specific FusedMoEBase subclasses (e.g. the
+                # MiniMax-M3 one) when re-wrapping; otherwise fall back to the
+                # module-level default so monkeypatching stays effective.
+                fused_moe_cls = old_fused_moe_cls
+            else:
+                fused_moe_cls = FusedMoETensorCast
         self._inner.fused_moe = fused_moe_cls(
             moe_config,
             experts,
@@ -304,6 +319,11 @@ class ParallelMoELayer(ModelWrapperBase):
             num_global_experts=num_routing_experts + num_redundant_experts,
             global_tp_size=global_tp_group.world_size,
         )
+        for attr in ("routed_scaling_factor", "swiglu_alpha", "swiglu_limit", "quant_type"):
+            if hasattr(old_fused_moe, attr):
+                setattr(self._inner.fused_moe, attr, getattr(old_fused_moe, attr))
+        if hasattr(self._inner.fused_moe, "refresh_expert_weight_cache"):
+            self._inner.fused_moe.refresh_expert_weight_cache()
 
         self.global_dp_group = global_dp_group
         self.global_tp_group = global_tp_group

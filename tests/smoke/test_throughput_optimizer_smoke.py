@@ -30,6 +30,7 @@ class TestThroughputOptimizerSmoke(TestCase):
             raise RuntimeError(f"throughput_optimizer failed (rc={result.returncode}): {result.stderr}")
         return result
 
+    @pytest.mark.network
     def test_prefix_cache_hit_rate_aggregation_valid(self):
         args = [
             "--input-length=64",
@@ -48,6 +49,7 @@ class TestThroughputOptimizerSmoke(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_prefix_cache_hit_rate_disaggregation_prefill_valid(self):
         args = [
             "--input-length=64",
@@ -67,6 +69,7 @@ class TestThroughputOptimizerSmoke(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_prefix_cache_hit_rate_disaggregation_decode_valid(self):
         args = [
             "--input-length=64",
@@ -86,6 +89,7 @@ class TestThroughputOptimizerSmoke(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_vl_model_image_args(self):
         """VL model aggregation with image args; guards test_vl_model_aggregation_with_output_validation."""
         args = [
@@ -105,6 +109,7 @@ class TestThroughputOptimizerSmoke(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_vl_disagg_prefill_smoke(self):
         """VL disagg prefill; guards test_vl_model_disaggregation_prefill_with_output_validation."""
         args = [
@@ -143,6 +148,7 @@ class TestThroughputOptimizerSmoke(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_vl_moe_aggregation_compile_smoke(self):
         """VL MOE + compile aggregation; guards test_VL_MOE_model_aggregation_with_output_validation.
 
@@ -168,6 +174,7 @@ class TestThroughputOptimizerSmoke(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_prefix_cache_with_max_batched_tokens_allows_chunked_prefill(self):
         """prefix-cache hit-rate + max-batched-tokens can use chunked prefill.
 
@@ -192,6 +199,7 @@ class TestThroughputOptimizerSmoke(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.network
     def test_deepseek_pd_ratio_mode(self):
         """PD-ratio optimization mode; guards DeepSeek PD-ratio nightly regression."""
         args = [

@@ -1,5 +1,7 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import unittest
+
+import pytest
 from concurrent.futures.process import BrokenProcessPool
 from unittest.mock import MagicMock, Mock
 
@@ -135,6 +137,7 @@ class TestTaskRunner(unittest.TestCase):
         self.assertIn((4, 4, 1), keys)
         self.assertIn((2, 2, 2), keys)
 
+    @pytest.mark.network
     def test_run_with_tpot_limit(self):
         """Test run method with TPOT limit"""
         self.args.tpot_limits = 50
@@ -196,6 +199,7 @@ class TestTaskRunner(unittest.TestCase):
                 "ERROR:serving_cast.parallel_runner:Executor: RuntimeErrorExecutor, Workers: 4",
             )
 
+    @pytest.mark.network
     def test_run_disagg_with_ttft_and_tpot_limit(self):
         """Test run_disagg method with ttft and tpot limit"""
         self.args.ttft_limits = 1000

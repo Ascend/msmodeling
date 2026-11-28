@@ -52,6 +52,13 @@ def _safe_register_auto_config() -> None:
     registry = getattr(AutoConfig, "register", None)
     if registry is None:
         raise RuntimeError("transformers AutoConfig.register is unavailable for deepseek_v4")
+    # Skip if transformers already supports deepseek_v4 natively
+    try:
+        native = CONFIG_MAPPING["deepseek_v4"]
+        if native is not None:
+            return
+    except (KeyError, Exception):
+        pass
     existing = None
     mapping = getattr(CONFIG_MAPPING, "_extra_content", None)
     if isinstance(mapping, dict):
@@ -65,6 +72,7 @@ def _safe_register_auto_config() -> None:
 
 
 def _safe_register_auto_model() -> None:
+    # Skip if transformers already supports deepseek_v4 natively
     mapping = getattr(AutoModel, "_model_mapping", None)
     extra_content = getattr(mapping, "_extra_content", None)
     existing = extra_content.get(DeepseekV4Config) if isinstance(extra_content, dict) else None
@@ -73,7 +81,10 @@ def _safe_register_auto_model() -> None:
             "deepseek_v4 is already registered to an incompatible AutoModel class: "
             f"{existing.__module__}.{existing.__name__}"
         )
-    AutoModel.register(DeepseekV4Config, DeepseekV4Model)
+    try:
+        AutoModel.register(DeepseekV4Config, DeepseekV4Model)
+    except ValueError:
+        pass
 
 
 def _register_deepseek_v4_family() -> None:

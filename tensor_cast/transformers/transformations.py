@@ -505,27 +505,61 @@ def shard_model_by_tp(
                     )
                     tp_plan.update(mla_cls.build_tp_plan_extras(prefix, params, config_info))
             else:
-                params.update({"head_num": config_info.num_attention_heads})
-                tp_plan.update({f"{language_layers}.*.q_proj": (COLWISE_LINEAR, params)})
-                params = params.copy()
-                params.update(
-                    {
-                        "head_num": config_info.num_key_value_heads,
-                        "is_replicable": True,
-                    }
-                )
-                tp_plan.update(
-                    {
-                        f"{language_layers}.*.k_proj": (
-                            COLWISE_LINEAR,
-                            params,
-                        ),
-                        f"{language_layers}.*.v_proj": (
-                            COLWISE_LINEAR,
-                            params,
-                        ),
-                    }
-                )
+                if self.hf_config.model_type == "minimax_m3_vl":
+                    main_q_params = params.copy()
+                    main_q_params.update({"head_num": config_info.num_attention_heads})
+                    main_kv_params = params.copy()
+                    main_kv_params.update(
+                        {
+                            "head_num": config_info.num_key_value_heads,
+                            "is_replicable": True,
+                        }
+                    )
+                    index_q_params = params.copy()
+                    index_q_params.update(
+                        {
+                            "head_num": config_info.index_n_heads,
+                            "is_replicable": True,
+                        }
+                    )
+                    index_k_params = params.copy()
+                    index_k_params.update(
+                        {
+                            "head_num": 1,
+                            "is_replicable": True,
+                        }
+                    )
+                    tp_plan.update(
+                        {
+                            f"{language_layers}.*.self_attn.q_proj": (COLWISE_LINEAR, main_q_params),
+                            f"{language_layers}.*.self_attn.k_proj": (COLWISE_LINEAR, main_kv_params),
+                            f"{language_layers}.*.self_attn.v_proj": (COLWISE_LINEAR, main_kv_params),
+                            f"{language_layers}.*.self_attn.indexer.q_proj": (COLWISE_LINEAR, index_q_params),
+                            f"{language_layers}.*.self_attn.indexer.k_proj": (COLWISE_LINEAR, index_k_params),
+                        }
+                    )
+                else:
+                    params.update({"head_num": config_info.num_attention_heads})
+                    tp_plan.update({f"{language_layers}.*.q_proj": (COLWISE_LINEAR, params)})
+                    params = params.copy()
+                    params.update(
+                        {
+                            "head_num": config_info.num_key_value_heads,
+                            "is_replicable": True,
+                        }
+                    )
+                    tp_plan.update(
+                        {
+                            f"{language_layers}.*.k_proj": (
+                                COLWISE_LINEAR,
+                                params,
+                            ),
+                            f"{language_layers}.*.v_proj": (
+                                COLWISE_LINEAR,
+                                params,
+                            ),
+                        }
+                    )
 
             params = {
                 "tp_group": o_proj_tp_group,

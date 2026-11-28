@@ -287,7 +287,8 @@ class DfcPassUnitTestCase(unittest.TestCase):
         result = DispatchFFNCombinePass()._resolve_dfc_variant(region_nodes)
 
         self.assertIsNotNone(result)
-        _, gmm1_w_args, gmm2_w_args, resolved_rank, resolved_rank_group = result
+        _, gmm1_w_args, gmm2_w_args, resolved_rank, resolved_rank_group, extra_args = result
+        self.assertEqual(extra_args, ())
 
         self.assertEqual(gmm1_w_args[0], [gate_up_0.args[1], gate_up_1.args[1]])
         self.assertEqual(gmm2_w_args[0], [down_0.args[1], down_1.args[1]])

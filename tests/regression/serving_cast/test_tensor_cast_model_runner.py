@@ -6,6 +6,7 @@ import unittest
 from dataclasses import dataclass
 
 import numpy as np
+import pytest
 from serving_cast.config import Config, ParallelConfig
 from serving_cast.model_runner import (
     AsyncTask,
@@ -1019,8 +1020,12 @@ class TestModelRunnerWithInterpolation(unittest.TestCase):
         runner.shutdown()
 
 
+@pytest.mark.network
 class TestAsyncTaskManagerFull(unittest.TestCase):
-    """Tests for AsyncTaskManager actual initialization with Config."""
+    """Tests for AsyncTaskManager actual initialization with Config.
+    These tests build Qwen/Qwen3-32B inside worker processes. PR gates exclude
+    the network marker; running them there deadlocks on model init.
+    """
 
     @classmethod
     def setUpClass(cls):

@@ -1,3 +1,19 @@
+# -------------------------------------------------------------------------
+# This file is part of the MindStudio project.
+# Copyright (c) 2026 Huawei Technologies Co.,Ltd.
+#
+# MindStudio is licensed under Mulan PSL v2.
+# You can use this software according to the terms and conditions of the Mulan PSL v2.
+# You may obtain a copy of Mulan PSL v2 at:
+#
+#          http://license.coscl.org.cn/MulanPSL2
+#
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+# EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+# MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+# See the Mulan PSL v2 for more details.
+# -------------------------------------------------------------------------
+
 # Shared setup for CodeArts entry scripts.
 # Caller must set SCRIPT_DIR to scripts/ before sourcing; HELPERS_DIR is scripts/helpers/.
 #
@@ -7,6 +23,7 @@
 # Environment set or consumed here:
 #   PYTHONPATH   Exported to repository root (PROJECT_DIR); overrides any prior value
 #   PYTHON       Optional absolute path to interpreter; if unset, uses uv or python3
+#   UV_NO_SYNC   Set to 1 when dependencies were already synchronized
 
 # Guard against multiple inclusion
 [[ -n "${COMMON_SH_LOADED:-}" ]] && return 0
@@ -32,8 +49,38 @@ TESTS_BENCHMARK="${PROJECT_DIR}/tests/benchmark"
 # pytest-xdist: worksteal balances workers when case durations vary widely.
 PYTEST_XDIST_ARGS=(-n auto --dist=worksteal)
 
-export PYTHONPATH="${PROJECT_DIR}"
+# Apply scripts/defaults.env with setdefault (never override user-exported values).
+# Grammar MUST match scripts/helpers/defaults.py::parse_defaults_env_line:
+#   - empty lines ignored
+#   - '#' starts a comment through end of line (including mid-line)
+#   - KEY=VALUE; trim whitespace; values must not contain '#'
+_DEFAULTS_ENV="${SCRIPT_DIR}/defaults.env"
+if [[ -f "${_DEFAULTS_ENV}" ]]; then
+  while IFS= read -r _line || [[ -n "${_line}" ]]; do
+    _line="${_line%%#*}"
+    _line="${_line#"${_line%%[![:space:]]*}"}"
+    _line="${_line%"${_line##*[![:space:]]}"}"
+    [[ -z "${_line}" || "${_line}" != *=* ]] && continue
+    _key="${_line%%=*}"
+    _val="${_line#*=}"
+    # Trim key and value (same as defaults.py strip on both sides).
+    _key="${_key#"${_key%%[![:space:]]*}"}"
+    _key="${_key%"${_key##*[![:space:]]}"}"
+    _val="${_val#"${_val%%[![:space:]]*}"}"
+    _val="${_val%"${_val##*[![:space:]]}"}"
+    [[ -z "${_key}" ]] && continue
+    case "${_key}" in
+      UV_INDEX_URL|HF_ENDPOINT|MSMODELING_TEST_BASE_BRANCH|MSMODELING_CACHE)
+        if [[ -z "${!_key:-}" ]]; then
+          export "${_key}=${_val}"
+        fi
+        ;;
+    esac
+  done < "${_DEFAULTS_ENV}"
+  unset _line _key _val
+fi
 
+export PYTHONPATH="${PROJECT_DIR}"
 # Determine if uv should be used (cache the result)
 USE_UV=false
 if [[ -z "${PYTHON:-}" ]] && command -v uv >/dev/null 2>&1 && [[ -f "${PROJECT_DIR}/pyproject.toml" ]]; then
@@ -73,7 +120,7 @@ run_pytest() {
   "${RUN_PYTEST[@]}" "$@"
 }
 
-if $USE_UV; then
+if $USE_UV && [[ "${UV_NO_SYNC:-}" != "1" ]]; then
   (
     cd "${PROJECT_DIR}"
     uv sync --frozen --group ci

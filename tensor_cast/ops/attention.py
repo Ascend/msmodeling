@@ -15,6 +15,20 @@ def _(
     pass
 
 
+@register_tensor_cast_op("siso_reshape_and_cache", mutates_args=("kv_cache",))
+def _(
+    key: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Single-input (K-only) counterpart of ``reshape_and_cache``.
+
+    Writes ``key`` into ``kv_cache`` according to ``slot_mapping`` without a paired
+    value tensor. Used for single-stream caches such as the MiniMax-M3 index K
+    cache.
+    """
+
+
 @register_tensor_cast_op("attention")
 def _(
     query: torch.Tensor,

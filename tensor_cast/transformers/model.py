@@ -25,7 +25,7 @@ from ..layers.utils import ModelWrapperBase
 from ..model_config import ModelConfig
 from ..parallel_group import ParallelGroupManager
 from ..performance_model.utils import bytes_of_tensor
-from .custom_model_registry import get_custom_model
+from .custom_model_registry import get_custom_model, get_model_profile
 from .transformations import patch_model
 from .utils import (
     AutoModelConfigLoader,
@@ -316,6 +316,9 @@ class TransformerModel(ModelWrapperBase):
 
     @property
     def weight_size(self):
+        profile = get_model_profile(self.hf_config.model_type)
+        if profile and profile.weight_size_estimator:
+            return profile.weight_size_estimator(self)
         return self.get_weight_size_nested([self])
 
     def forward(

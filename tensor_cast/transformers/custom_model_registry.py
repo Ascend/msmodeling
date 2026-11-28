@@ -235,6 +235,11 @@ class ModelProfile:
     # Keeps common MoE routing free of model-specific gate semantics.
     moe_gate_router: Optional[Callable] = None
 
+    # Optional model-specific weight size estimator.
+    # Use this only when a model stores quantized weights in a structure that is not
+    # reflected by the live torch parameters/buffers after TensorCast patching.
+    weight_size_estimator: Optional[Callable] = None
+
     # Attribute path to the Vision Encoder instance within the root model.
     # Example: "model.vision_tower"
     visual_module_path: Optional[str] = None
