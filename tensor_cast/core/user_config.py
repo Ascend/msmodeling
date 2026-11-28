@@ -26,6 +26,7 @@ from enum import Enum
 from typing import List, Optional, Union
 
 from ..core.input_generator import RequestInfo
+from ..core.speculative_verification import AcceptanceProfile
 from ..core.model_source_security import normalize_model_source
 from ..core.quantization.config import create_quant_config
 from ..core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
@@ -129,6 +130,9 @@ class UserInputConfig:
     """Decode fold scalar (throughput_optimizer); clamped by speculative_method after resolve."""
     num_draft_layers: int = 0
     draft_model_config_path: Optional[str] = None
+    dspark_adaptive_verification: bool = False
+    dspark_acceptance_rates: Optional[List[float]] = None
+    dspark_adaptive_max_evaluations: int = 32
     dspark_markov_rank: int = 256
     dspark_markov_head: str = "vanilla"
     num_hidden_layers_override: int = 0
@@ -206,6 +210,20 @@ class UserInputConfig:
         self._normalize_word_embedding_tp()
         self._validate_pipeline_parallelism()
         self._normalize_draft_method()
+        if self.dspark_adaptive_verification:
+            if self.speculative_method != "dspark":
+                raise ValueError("Adaptive verification requires DSpark")
+            if (
+                isinstance(self.num_speculative_tokens, bool)
+                or self.num_speculative_tokens is None
+                or (isinstance(self.num_speculative_tokens, float) and not self.num_speculative_tokens.is_integer())
+            ):
+                raise ValueError("Adaptive verification requires a positive integer num_speculative_tokens")
+            AcceptanceProfile.from_rates(self.dspark_acceptance_rates, int(self.num_speculative_tokens))
+            if self.pp_size != 1 or self.enable_decode_kv_offload or self.enable_prefill_kv_offload:
+                raise ValueError("Adaptive verification requires PP=1 without KV offload")
+            if self.dspark_adaptive_max_evaluations < 4:
+                raise ValueError("Adaptive verification needs at least four candidate evaluations")
 
     def _normalize_draft_method(self):
         if self.speculative_method is None or self.speculative_method == "":

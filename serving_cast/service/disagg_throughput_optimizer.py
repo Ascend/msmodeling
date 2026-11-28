@@ -14,13 +14,13 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
+from dataclasses import replace
 import logging
 from collections.abc import Mapping
 
 import pandas as pd
 
 from tensor_cast.core.kv_offload import fold_offload_transfer_time_ms
-from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.performance_model.empirical import PROFILING_SOURCE_SCOPE
 from .base_throughput_optimizer import BaseThroughputOptimizer
 from .latency_table import ForwardLatencyTable
@@ -126,25 +126,10 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             return self._run_once(optimizer_data, batch_range)
         return super().run(optimizer_data, batch_range)
 
-    def initialize(self, model_runner: ModelRunner):
-        self.model_runner = model_runner
-        self.num_mtp_tokens = (
-            self.model_runner.model.model_config.mtp_config.num_mtp_layers
-            if self.model_runner.model.model_config.mtp_config is not None
-            else 0
-        )
-        self.dp = self.model_runner.model.model_config.parallel_config.data_parallel_size
-        self.tp = self.model_runner.model.model_config.parallel_config.tensor_parallel_size
-        self.pp = self.model_runner.model.model_config.parallel_config.pipeline_parallel_size
-        self.ep = self.model_runner.model.model_config.parallel_config.expert_parallel_size
-        self.moe_tp = self.model_runner.model.model_config.parallel_config.moe_tensor_parallel_size
-        self.moe_dp = self.model_runner.model.model_config.parallel_config.moe_data_parallel_size
-        self.is_moe_model = self.model_runner.model.model_config.moe_config is not None
-        self._forward_record_cache.clear()
-
     def get_inference_info(self, optimizer_data: OptimizerData) -> OptimizerSummary:
         # check prefill or decode
         decode_flag = optimizer_data.ttft_limits is None
+        adaptive = self._uses_adaptive_verification(optimizer_data)
         variable_input_mode = optimizer_data.length_distribution is not None
         composition_rows = []
         profiling_source_times_s = {}
@@ -274,6 +259,23 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                         for breakdown_name, breakdown in breakdown_sums.items()
                     }
                     breakdowns = format_breakdowns(average_breakdowns)
+            elif adaptive:
+                from .aggregation_timeline import RequestShape
+
+                query, seq = self._resolve_forward_shape(optimizer_data, True)
+                shapes = (RequestShape(True, query, seq),) * batch_size
+
+                def evaluate(actual):
+                    record = self.adaptive_verification.forward_record(actual, optimizer_data)
+                    return replace(record, latency_ms=record.latency_ms + optimizer_data.serving_cost)
+
+                selection, _, record = self.adaptive_verification.select_step(shapes, optimizer_data, evaluate)
+                latency_ms = record.latency_ms
+                device_memory_available_gb = record.memory_left_gb
+                breakdowns = record.breakdowns
+                memory_info = record.memory_info
+                profiling_source_times_s = record.profiling_source_times_s
+                profiling_miss_reasons = record.profiling_miss_reasons
             else:
                 batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
                 latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000 + optimizer_data.serving_cost
@@ -394,11 +396,24 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 }
                 breakdowns = format_breakdowns(average_breakdowns)
 
-        ttft = tpot = None
+        ttft = tpot = slo_tpot = None
         if decode_flag:
-            latency_ms = self._fold_decode_latency_ms(latency_ms, optimizer_data)
-            tpot = latency_ms
-            output_throughput = concurrency / tpot * 1000 if tpot > 0 else 0
+            if adaptive:
+                outputs = selection.plan.expected_outputs
+                total_out = sum(outputs)
+                if latency_ms <= 0 or total_out <= 0 or any(e <= 0 for e in outputs):
+                    tpot = 0.0
+                    output_throughput = 0.0
+                    slo_tpot = float("inf")
+                else:
+                    tpot = latency_ms * batch_size / total_out
+                    output_throughput = 1000 * self.dp * total_out / latency_ms
+                    slo_tpot = max(latency_ms / e for e in outputs)
+            else:
+                latency_ms = self._fold_decode_latency_ms(latency_ms, optimizer_data)
+                tpot = latency_ms
+                slo_tpot = tpot
+                output_throughput = concurrency / tpot * 1000 if tpot > 0 else 0
         else:
             total_input_tokens = 0
             if variable_input_mode:
@@ -434,6 +449,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             dspark_block_size=optimizer_data.dspark_block_size,
             dspark_acceptance_length=optimizer_data.dspark_acceptance_length,
             dspark_markov_rank=optimizer_data.dspark_markov_rank,
+            dspark_adaptive_verification=adaptive,
             mtp_acceptance_length=(
                 optimizer_data.acceptance_length
                 if getattr(optimizer_data, "speculative_method", None) == "mtp"
@@ -527,22 +543,29 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 rows.append(detail_row)
 
         result_df = pd.DataFrame(columns=columns, data=rows).round(3)
+        if not decode_flag:
+            slo_tpot = tpot
+        if adaptive:
+            result_df["max_request_tpot_ms"] = slo_tpot
         summary.set_summary_df(result_df)
         early_stop_reason = None
         if device_memory_available_gb < 0:
             early_stop_reason = EARLY_STOP_DECODE_OOM if decode_flag else EARLY_STOP_PREFILL_OOM
-        summary.set_early_stop_flag(device_memory_available_gb, tpot, ttft, reason=early_stop_reason)
+        summary.set_early_stop_flag(device_memory_available_gb, slo_tpot, ttft, reason=early_stop_reason)
 
         self._maybe_set_search_info(
             optimizer_data,
             device_memory_available_gb,
             batch_size,
             ttft,
-            tpot,
+            slo_tpot,
             summary,
         )
 
         return summary
+
+    def _uses_adaptive_verification(self, optimizer_data: OptimizerData) -> bool:
+        return super()._uses_adaptive_verification(optimizer_data) and optimizer_data.ttft_limits is None
 
     def _get_pp_inference_info(
         self,

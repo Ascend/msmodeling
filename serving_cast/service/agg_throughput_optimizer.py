@@ -246,6 +246,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             dspark_block_size=optimizer_data.dspark_block_size,
             dspark_acceptance_length=optimizer_data.dspark_acceptance_length,
             dspark_markov_rank=optimizer_data.dspark_markov_rank,
+            dspark_adaptive_verification=optimizer_data.dspark_adaptive_verification,
             mtp_acceptance_length=(
                 optimizer_data.acceptance_length
                 if getattr(optimizer_data, "speculative_method", None) == "mtp"
@@ -370,13 +371,25 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                 rows.append(detail_row)
 
         result_df = pd.DataFrame(columns=columns, data=rows).round(3)
-        summary.set_summary_df(result_df)
         early_stop_reason = None
         if prefill_memory_left < 0:
             early_stop_reason = EARLY_STOP_PREFILL_OOM
         elif memory_left < 0:
             early_stop_reason = EARLY_STOP_DECODE_OOM
-        summary.set_early_stop_flag(memory_left, metrics.tpot, metrics.ttft, reason=early_stop_reason)
+        slo_tpot = metrics.tpot
+        if (
+            self._uses_adaptive_verification(optimizer_data)
+            and not self._last_aggregation_timeline.oom
+            and not self._last_aggregation_timeline.tpot_infeasible
+        ):
+            requests = self._last_aggregation_timeline.requests
+            max_request_tpot = max(
+                (r.finish_ms - r.first_token_ms) / (output_length - 1) if output_length > 1 else 0.0 for r in requests
+            )
+            result_df["max_request_tpot_ms"] = max_request_tpot
+            slo_tpot = max_request_tpot
+        summary.set_summary_df(result_df)
+        summary.set_early_stop_flag(memory_left, slo_tpot, metrics.ttft, reason=early_stop_reason)
 
         self._maybe_set_search_info(
             optimizer_data,
@@ -708,7 +721,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         else:
             reserved_kv = None
         resident_kv_cache = {}
-        accepted = 1.0 / self._fold_decode_latency_ms(1.0, data)
+        adaptive = self._uses_adaptive_verification(data)
+        accepted = 1.0 if adaptive else 1.0 / self._fold_decode_latency_ms(1.0, data)
         records = []
         phase_records = {False: [], True: []}
         mixed_count = 0
@@ -767,9 +781,18 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             latency = lower_record.latency_ms + weight * (upper_record.latency_ms - lower_record.latency_ms)
             return replace(upper_record, latency_ms=latency), True
 
-        def evaluate(shapes, resident):
+        def append_record(shapes, record, decode_interpolated=False):
             nonlocal mixed_count, interpolated_decode_count
-            shapes = tuple(sorted(shapes))
+            if any(s.is_decode != shapes[0].is_decode for s in shapes):
+                mixed_count += 1
+            else:
+                phase_records[shapes[0].is_decode].append(record)
+            interpolated_decode_count += decode_interpolated
+            records.append(record)
+
+        def evaluate(shapes, resident, *, record_step=True):
+            if not adaptive:
+                shapes = tuple(sorted(shapes))
             homogeneous = all(s == shapes[0] for s in shapes)
             mixed = any(s.is_decode for s in shapes) and any(not s.is_decode for s in shapes)
             decode_interpolated = False
@@ -779,17 +802,20 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                 prefill_shapes = tuple(s for s in shapes if not s.is_decode)
                 decode_shapes = tuple(s for s in shapes if s.is_decode)
                 p_record = forward_record(prefill_shapes)
-                # One upper power-of-two D batch covers the current bucket. Use
-                # its memory and latency directly; pure-D steps interpolate.
-                representative = RequestShape(
-                    True, max(s.query_len for s in decode_shapes), max(s.seq_len for s in decode_shapes)
-                )
-                count = len(decode_shapes)
-                upper = min(
-                    1 << (count - 1).bit_length(),
-                    max(count, data.max_batched_tokens // representative.query_len),
-                )
-                d_record = forward_record((representative,) * upper)
+                if adaptive:
+                    d_record = self.adaptive_verification.forward_record(decode_shapes, data)
+                else:
+                    # One upper power-of-two D batch covers the current bucket. Use
+                    # its memory and latency directly; pure-D steps interpolate.
+                    representative = RequestShape(
+                        True, max(s.query_len for s in decode_shapes), max(s.seq_len for s in decode_shapes)
+                    )
+                    count = len(decode_shapes)
+                    upper = min(
+                        1 << (count - 1).bit_length(),
+                        max(count, data.max_batched_tokens // representative.query_len),
+                    )
+                    d_record = forward_record((representative,) * upper)
                 record = replace(p_record, latency_ms=max(p_record.latency_ms, d_record.latency_ms))
                 if (
                     p_record.memory_info
@@ -815,12 +841,12 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                 else:
                     record = replace(record, memory_left_gb=min(p_record.memory_left_gb, d_record.memory_left_gb))
             else:
-                if homogeneous and shapes[0].is_decode:
+                if adaptive and shapes[0].is_decode:
+                    record = self.adaptive_verification.forward_record(shapes, data)
+                elif homogeneous and shapes[0].is_decode:
                     record, decode_interpolated = pure_decode_record(shapes[0], len(shapes))
                 else:
                     record = forward_record(shapes)
-            if mixed:
-                mixed_count += 1
             # Reserve KV for the entire requested concurrency, including requests
             # waiting for prefill.
             scheduled_tokens = page_tokens(shapes, block, query_len)
@@ -865,14 +891,26 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                 return replace(phase_record, memory_left_gb=phase_record.memory_left_gb - extra_kv, memory_info=info)
 
             record = with_resident_kv(record)
-            if decode_interpolated:
-                interpolated_decode_count += 1
-            if not mixed:
-                phase_records[shapes[0].is_decode].append(record)
-            records.append(record)
+            if record_step:
+                append_record(shapes, record, decode_interpolated)
             return record
 
-        timeline = simulate(requests, data, self.scheduler, query_len, accepted, evaluate)
+        def adaptive_evaluate(shapes, resident, remaining):
+            def candidate(actual):
+                return evaluate(actual, resident, record_step=False)
+
+            selected, actual, record = self.adaptive_verification.select_step(shapes, data, candidate, remaining)
+            append_record(actual, record)
+            if not selected.feasible:
+                return actual, record, ()
+            return actual, record, selected.plan.expected_outputs
+
+        if adaptive:
+            timeline = simulate(
+                requests, data, self.scheduler, query_len, accepted, evaluate, evaluate_adaptive=adaptive_evaluate
+            )
+        else:
+            timeline = simulate(requests, data, self.scheduler, query_len, accepted, evaluate)
         self._last_aggregation_timeline = timeline
         info = select_tightest_memory_info(r.memory_info for r in records)
         memory = min(r.memory_left_gb for r in records)
@@ -887,6 +925,10 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                 prefill_memory = memory
             else:
                 prefill_memory = min((r.memory_left_gb for r in prefill), default=float("inf"))
+        elif timeline.tpot_infeasible:
+            ttft = timeline.ttft
+            tpot, e2e, throughput = float("inf"), float("inf"), 0.0
+            prefill_memory = min((r.memory_left_gb for r in prefill), default=memory)
         else:
             ttft, e2e = timeline.ttft, timeline.e2e
             tpot = (e2e - ttft) / (data.output_length - 1) if data.output_length > 1 else 0.0
@@ -915,7 +957,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             decode_breakdowns=decode[0].breakdowns if decode else "",
             memory_info=info,
             e2e=e2e,
-            makespan=float("inf") if timeline.oom else timeline.elapsed_ms,
+            makespan=float("inf") if (timeline.oom or timeline.tpot_infeasible) else timeline.elapsed_ms,
             mixed_latency_source=source,
             mixed_steps=mixed_count,
             decode_latency_source="exact" if not interpolated_decode_count else "interpolated",

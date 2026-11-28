@@ -163,6 +163,28 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 - 选用 `dspark` 时将 `--speculative-method` 改为 `dspark`；Markov 参数默认 `--dspark-markov-rank 256`、`--dspark-markov-head vanilla`（可选 `gated`、`rnn`；rank 设为 `0` 时禁用 MarkovHead）。
 - 默认 draft 配置见 `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`；字段说明与自定义方法见 [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md)。
 
+**DSpark 自适应验证（可选）**
+
+自适应验证默认关闭。开启后，Decode 根据位置级条件接受概率列表和整步执行成本，为每个请求从已评估的候选中选择长度为 `k`（`0 ≤ k ≤ N`）的验证前缀：Target 处理 `k+1` 个 token（始终保留基础 token），Draft 仍计入完整生成成本。以下示例运行 PD 分离；省略 `--disagg` 并设置 `--ttft-limit` 可运行 PD 混部。
+
+```bash
+python -m cli.inference.throughput_optimizer tests/assets/model_config/qwen3_dense_0_6b \
+  --device TEST_DEVICE --num-devices 1 --tp-sizes 1 --disagg \
+  --input-length 128 --output-length 32 --tpot-limit 100 \
+  --batch-range 1 4 --num-draft-layers 1 \
+  --speculative-method dspark --num-speculative-tokens 4 \
+  --dspark-adaptive-verification \
+  --dspark-acceptance-rates 0.9 0.8 0.1 0.1 \
+  --dump-original-results
+```
+
+说明与结果口径：
+
+- `--dspark-acceptance-rates` 接收 `N` 个 `[0, 1]` 内的有限浮点数（空格分隔），每个值表示前面所有 token 均被接受时当前位置的条件接受概率；同一组概率应用于批内各请求，前缀存活概率为条件概率连乘。
+- PD 分离的 Decode 吞吐为 `1000 × DP × sum(E) / T_step`（token/s），其中 `E` 为各请求的期望输出 token 数、`DP` 为数据并行度、`T_step` 为单步耗时（ms）；`tpot` 为批次等效值，Prefill 沿用标准路径。PD 混部按各请求期望输出推进，`tpot` 为请求均值。两种模式均使用 `max_request_tpot_ms` 检查 TPOT 约束。
+- `--dump-original-results` 导出验证前缀的最小值、均值和最大值，以及裁剪比 `draft_verification_pruned_ratio`、整窗和所选前缀的平均步延迟、候选数和仿真耗时；`forward_cache_hits` 和 `additional_performance_evaluations` 分别记录 Decode 候选的缓存命中与新增性能求值，缓存按执行配置和各请求实际形状区分。
+- 约束：须指定 `--batch-range` 或 `--max-concurrency`，且 `--num-speculative-tokens` 仅支持单值；与显式 `--acceptance-length` 互斥；仅支持纯文本、标量输入/输出长度、`PP=1`，不支持 KV Cache 卸载；调度按完整验证窗口准入并保守预留驻留 KV Cache。结果为离线性能模型预测。
+
 以下示例在 PD 分离基础上启用流水线并行（PP）搜索，评估不同 PP 配置的 TTFT/TPOT/吞吐：
 
 ```bash
@@ -835,6 +857,12 @@ Model & Quantization Options:
                         Requires --speculative-method dspark. Markov embedding rank; 0 disables MarkovHead. (default: 256)
   --dspark-markov-head {vanilla,gated,rnn}
                         Requires --speculative-method dspark. Markov head type. (default: vanilla)
+  --dspark-adaptive-verification
+                        Enable offline DSpark adaptive target verification (PP=1, text only). (default: False)
+  --dspark-acceptance-rates <FLOAT> [<FLOAT> ...]
+                        Position-level conditional acceptance probabilities in [0, 1] (length N); requires --dspark-adaptive-verification. (default: None)
+  --dspark-adaptive-max-evaluations <N>
+                        Maximum distinct verification candidates per decision (including cache hits). (default: 32)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4,MXFP8,HIF8}
                         Quantize all linear layers in the model from choices (currently only support symmetric quant) (default: W8A8_DYNAMIC)
   --quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4,MXFP8,HIF8}
@@ -957,6 +985,9 @@ KV Cache Offload Options:
 | --dspark-markov-head | Model & Quantization Options | 可选 | Markov head 类型。<br>1. 类型：Str。<br>2. 参考值：`vanilla`、`gated`、`rnn`。<br>3. 默认值：`vanilla`。<br>4. 需要 `--speculative-method dspark`。 |
 | --num-draft-layers | Model & Quantization Options | 可选 | 覆盖 draft `num_hidden_layers`。<br>1. 类型：Int。<br>2. 取值范围：非负整数；`0` 表示使用 config 默认。<br>3. 默认值：`0`。<br>4. 需要 `--speculative-method dflash` 或 `dspark`（不可与 `mtp` 同用）。 |
 | --draft-model-config-path | Model & Quantization Options | 可选 | 外部 draft `config.json` 路径（或含该文件的目录）。<br>1. 类型：Str。<br>2. 默认值：`None`（使用 `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`）。<br>3. 需要 `--speculative-method dflash` 或 `dspark`（不可与 `mtp` 同用）。<br>4. 字段说明见 [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md)。 |
+| --dspark-adaptive-verification | Model & Quantization Options | 可选 | 开启离线 DSpark 自适应验证。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 需要 `--speculative-method dspark` 和 `--dspark-acceptance-rates`。 |
+| --dspark-acceptance-rates | Model & Quantization Options | 条件必选 | 位置级条件接受概率列表。<br>1. 类型：List[Float]（`nargs="+"`）。<br>2. 取值范围：`[0, 1]` 内有限浮点数，数量须等于 `N`（例如 `0.9 0.8 0.1 0.1`）。<br>3. 默认值：`None`。<br>4. 开启自适应验证时必填；与显式 `--acceptance-length` 互斥。 |
+| --dspark-adaptive-max-evaluations | Model & Quantization Options | 可选 | 每次决策评估的不同候选数上限，包含缓存命中。<br>1. 类型：Int。<br>2. 取值范围：≥ 4。<br>3. 默认值：`32`。<br>4. 仅在开启自适应验证时可显式指定。 |
 | --quantize-linear-action | Model & Quantization Options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`MXFP8`、`HIF8`。<br>3. 默认值：`W8A8_DYNAMIC`。<br>4. draft 自有 Linear 不量化。<br>5. 取值大小写及下划线/连字符写法均可，例如 `W8A8_DYNAMIC` 与 `w8a8-dynamic`、`DISABLED` 与 `disabled`。 |
 | --quantize-non-expert-linear-action | Model & Quantization Options | 可选 | 为 attention 投影、dense MLP、shared experts 等非 expert 线性层指定独立量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`、`MXFP8`、`HIF8`。<br>3. 默认值：`DISABLED`。<br>4. 主要用于 DeepSeek V4 风格 MoE 模型；路由 MoE experts 仍使用 `--quantize-linear-action`。<br>5. 取值大小写及下划线/连字符写法均可，例如 `DISABLED` 与 `disabled`。 |
 | --mxfp4-group-size | Model & Quantization Options | 可选 | 指定 mxfp4 量化的 group size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`32`。 |

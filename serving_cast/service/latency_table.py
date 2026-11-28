@@ -47,6 +47,8 @@ class ForwardShapeKey:
     # N identical images. Kept as plain primitives so this cache infrastructure
     # never depends on the multimodal domain objects (review: zwt__).
     image_specs: tuple[tuple[int, int, str], ...] | None = None
+    # Ordered request layout within this phase: (query_len, seq_len).
+    request_shapes: tuple[tuple[int, int], ...] | None = None
 
 
 @dataclass(frozen=True)

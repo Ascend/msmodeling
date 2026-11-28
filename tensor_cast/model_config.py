@@ -580,6 +580,7 @@ class DsparkConfig:
     """
 
     dspark_block_size: int = 8
+    adaptive_verification: bool = False
     num_draft_layers: int = 6
     dspark_acceptance_length: float = 5.0
     sliding_window: Optional[int] = 2048

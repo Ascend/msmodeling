@@ -48,7 +48,7 @@ from tensor_cast.layers.deepseek_v41_dspark import (
 from tensor_cast.layers.mla import MultiheadLatentAttentionBase
 from tensor_cast.layers.moe_layer import MoELayer
 from tensor_cast.layers.quant_linear import QuantLinearBase, TensorCastQuantLinear
-from tensor_cast.layers.sampler import SamplingMetadata
+from tensor_cast.layers.sampler import SamplingMetadata, SpecDecodeMetadata
 from tensor_cast.layers.utils import ModelWrapperBase
 from tensor_cast.model_config import DsparkConfig, MlaConfig, MoEConfig, ModelConfig, ParallelConfig, QuantConfig
 from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
@@ -1472,6 +1472,18 @@ def test_native_dspark_build_shares_weights_and_executes_prefill_decode():
         assert proposals.shape == confidence.shape == (2, 5)
         assert verified.shape[0] == 2
         assert proposals.dtype == torch.long
+        compiled_wrapper = torch.compile(wrapper, backend="eager", fullgraph=True)
+        spec = SpecDecodeMetadata(torch.arange(4), 2, 5, (3, 1), adaptive_verification=True)
+        packed_ids = torch.empty(1, 4, dtype=torch.long)
+        proposals, verified, confidence = compiled_wrapper(
+            packed_ids,
+            torch.empty_like(packed_ids),
+            sampling_metadata=SamplingMetadata(selected_token_indices=None, spec_decode_metadata=spec),
+            attention_meta=SimpleNamespace(start_pos=32),
+            csa2_state=state,
+        )
+        assert proposals.shape == confidence.shape == (2, 5)
+        assert verified.shape == (2, 6)
         assert target.calls[-1]["output_aux_hidden_state_layer_ids"] == [37, 38, 39]
         with TestCase().assertRaisesRegex(ValueError, "sampling_metadata"):
             wrapper(ids, positions)

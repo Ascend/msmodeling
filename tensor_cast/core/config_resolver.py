@@ -258,6 +258,7 @@ class ConfigResolver:
                 context_length=self.user_input.context_length,
                 markov_rank=int(self.user_input.dspark_markov_rank),
                 markov_head_type=str(self.user_input.dspark_markov_head or "vanilla"),
+                adaptive_verification=self.user_input.dspark_adaptive_verification,
             )
         elif speculative_method == "dflash" and draft_block >= 2:
             self.update_dflash_config(
@@ -487,6 +488,7 @@ class ConfigResolver:
         markov_head_type: str = "vanilla",
         enable_confidence_head: bool = True,
         confidence_head_with_markov: bool = True,
+        adaptive_verification: bool = False,
     ):
         """Enable DSpark only when ``dspark`` is True (mutually exclusive with Dflash/MTP)."""
         if not dspark:
@@ -539,6 +541,7 @@ class ConfigResolver:
             markov_head_type=head_type,
             enable_confidence_head=bool(enable_confidence_head),
             confidence_head_with_markov=bool(confidence_head_with_markov),
+            adaptive_verification=adaptive_verification,
         )
         if has_native_draft:
             scfg.aux_hidden_state_layer_ids = list(native_target_ids)

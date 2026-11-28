@@ -306,7 +306,17 @@ class DeepseekV41NativeDsparkWrapper(DsparkWrapper):
         is_decode = self._is_decode_step(kwargs)
         attention_meta = kwargs.get("attention_meta")
         start_pos = int(getattr(attention_meta, "start_pos", 0) or 0)
-        normalized = [h.reshape(batch, -1, h.shape[-1]) for h in aux_hiddens]
+        spec = sampling_metadata.spec_decode_metadata
+        if spec is not None and spec.adaptive_verification:
+            last_indices: list[int] = []
+            offset = 0
+            for length in spec.verification_lens:
+                offset += int(length)
+                last_indices.append(offset - 1)
+            anchor_idx = torch.tensor(last_indices, dtype=torch.long).to(aux_hiddens[0].device)
+            normalized = [h.reshape(-1, h.shape[-1]).index_select(0, anchor_idx).unsqueeze(1) for h in aux_hiddens]
+        else:
+            normalized = [h.reshape(batch, -1, h.shape[-1]) for h in aux_hiddens]
         request_state = kwargs.get("csa2_state")
         if not is_decode:
             draft_kv_state = self.draft.prefill(

@@ -135,32 +135,72 @@ def _tiny_draft():
     return scfg, dcfg, config, draft
 
 
-def test_native_draft_emits_five_attention_and_clipped_swiglu_blocks():
+@pytest.mark.parametrize("packed_lengths", [None, (3, 1), (3, 1) * 5])
+def test_native_draft_emits_five_attention_and_clipped_swiglu_blocks(packed_lengths):
     _, _, config, draft = _tiny_draft()
     assert isinstance(draft.hidden_norm, GemmaRMSNormFusedWrapper)
     assert all(isinstance(layer.dflash_block.self_attn.q_norm, GemmaRMSNormFusedWrapper) for layer in draft.layers)
     assert draft.layers[0].dflash_block.mlp.gate_proj.out_features == 128
-    noise = torch.randn(1, 7, 64)
-    aux = [torch.randn(1, 8, 64) for _ in draft.target_layer_ids]
-    context = draft.build_context_features(aux, 8)
+    batch = 1 if packed_lengths is None else len(packed_lengths)
+    rows = 8 if packed_lengths is None else sum(packed_lengths)
+    noise = torch.randn(batch, 7, 64)
+    aux = [torch.randn(1, rows, 64) for _ in draft.target_layer_ids]
+    context = draft.build_context_features(aux, rows, align_seq=False)
+    positions = torch.arange(7).expand(batch, -1)
+    attention_layers = {i: AttentionTensorCast() for i in range(60, 65)}
     with Runtime(AnalyticPerformanceModel(TEST_DEVICE), TEST_DEVICE) as runtime, torch.no_grad():
-        out = draft(
-            noise,
-            context,
-            torch.arange(7).view(1, 7),
-            attention_by_layers={i: AttentionTensorCast() for i in range(60, 65)},
-        )
-    assert out.shape == (1, 7, 64)
+        if packed_lengths is None:
+            out = draft(noise, context, positions, attention_by_layers=attention_layers)
+        else:
+            prepared = draft.prepare_context_kv(
+                context, batch=batch, block=7, attn_use_configured_context=True, packed_lengths=packed_lengths
+            )
+            out = draft.run_noise_decoder(noise, positions, prepared, attention_by_layers=attention_layers)
+    assert out.shape == (batch, 7, 64)
     events = [event.op_invoke_info for event in runtime.event_list]
     attention = [event for event in events if str(event.func) == "tensor_cast.attention.default"]
     assert len(attention) == 5
-    assert all(event.args[0].shape[0] == 7 for event in attention)
+    assert all(event.args[0].shape[0] == batch * 7 for event in attention)
     activations = [event for event in events if str(event.func) == "tensor_cast.m3_swiglu.default"]
     assert len(activations) == 5
     assert all(event.args[2:] == (config.swiglu_alpha, config.swiglu_limit) for event in activations)
     rope = [event for event in events if str(event.func) == "tensor_cast.apply_rope_single.default"]
     assert len(rope) == 1
-    assert rope[0].args[0].shape[-1] == config.rotary_dim
+    assert rope[0].args[0].shape[-2:] == (rows * 5, config.rotary_dim)
+    if packed_lengths is not None:
+        # Packed context plus decoder metadata emit the same ranges for both batch sizes.
+        assert sum(str(event.func) == "aten.arange.default" for event in events) == 26
+        writes = [e for e in events if str(e.func) == "tensor_cast.reshape_and_cache.default"][:5]
+        assert len(writes) == 5
+        for event in writes:
+            assert event.args[0].shape[0] == rows
+            assert event.args[2].shape[1] == batch
+            assert event.args[3].shape == (rows,)
+
+
+def test_packed_heterogeneous_minimax_draft_keeps_constant_op_counts_across_batch_sizes():
+    from collections import Counter
+
+    _, _, _, draft = _tiny_draft()
+    histograms = []
+    for packed_lengths in ((3, 1), (3, 1) * 5):
+        batch = len(packed_lengths)
+        rows = sum(packed_lengths)
+        noise = torch.randn(batch, 7, 64)
+        aux = [torch.randn(1, rows, 64) for _ in draft.target_layer_ids]
+        context = draft.build_context_features(aux, rows, align_seq=False)
+        positions = torch.arange(7).expand(batch, -1)
+        attention_layers = {i: AttentionTensorCast() for i in range(60, 65)}
+        with Runtime(AnalyticPerformanceModel(TEST_DEVICE), TEST_DEVICE) as runtime, torch.no_grad():
+            prepared = draft.prepare_context_kv(
+                context, batch=batch, block=7, attn_use_configured_context=True, packed_lengths=packed_lengths
+            )
+            draft.run_noise_decoder(noise, positions, prepared, attention_by_layers=attention_layers)
+        histograms.append(Counter(str(event.op_invoke_info.func) for event in runtime.event_list))
+    assert histograms[0] == histograms[1]
+    assert sum(histograms[0].values()) == sum(histograms[1].values())
+    for op_name in ("aten.slice.Tensor", "aten.cat.default", "aten.arange.default"):
+        assert histograms[0][op_name] == histograms[1][op_name]
 
 
 def test_native_target_block_eight_draft_and_sampling_seven():

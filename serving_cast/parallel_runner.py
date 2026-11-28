@@ -178,6 +178,8 @@ class ParallelRunner:
             dspark_block_size=dspark_block_size,
             dspark_acceptance_length=dspark_acceptance_length,
             dspark_markov_rank=dspark_markov_rank,
+            dspark_adaptive_verification=getattr(self.args, "dspark_adaptive_verification", False),
+            dspark_adaptive_max_evaluations=getattr(self.args, "dspark_adaptive_max_evaluations", 32),
             speculative_method=speculative_method,
             acceptance_length=acceptance_length,
             prefill_devices_per_instance=self.args.prefill_devices_per_instance,

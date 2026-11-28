@@ -522,7 +522,7 @@ class DflashDraftModel(torch.nn.Module):
         return torch.ops.tensor_cast.cat(selected, -1)
 
     def _split_context_kv(
-        self, target_hidden: torch.Tensor
+        self, target_hidden: torch.Tensor, packed_lengths: Optional[Sequence[int]] = None
     ) -> list[tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]]:
         """fc→hidden_norm → one fused context KV matmul → per-layer (K,V).
 
@@ -548,7 +548,9 @@ class DflashDraftModel(torch.nn.Module):
             v_ctx = packed[:, :, :, i, 1, :].reshape(batch, seqlen, local_kv_dim)
             # l_ctx is a Python int. Avoid comparing it to symbolic target_hidden.shape[1]:
             # ``x[:, -n:, :]`` returns the full axis when n >= cur (PyTorch semantics).
-            if l_ctx <= 0:
+            if packed_lengths is not None:
+                layer_target = target_hidden
+            elif l_ctx <= 0:
                 layer_target = target_hidden[:, :1, :]
                 k_ctx = k_ctx[:, :1, :]
                 v_ctx = v_ctx[:, :1, :]
@@ -599,6 +601,7 @@ class DflashDraftModel(torch.nn.Module):
         page_block_size: int,
         device: torch.device,
         ref_tensor: torch.Tensor,
+        packed_lengths: Optional[Sequence[int]] = None,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Per-layer k_norm → one fused context apply_rope_single → reshape_and_cache × N.
 
@@ -626,7 +629,22 @@ class DflashDraftModel(torch.nn.Module):
         seqs = [int(k.shape[2]) for k in k_bhsd_list]
         k_fused = torch.cat(k_bhsd_list, dim=2)  # [B, H, sum_S, D] == NPU Tile fuse
         # Tile position ids per layer (NPU: [L_ctx] → [L_ctx×N]).
-        pos_parts = [torch.arange(s, device=device, dtype=torch.long) for s in seqs]
+        if packed_lengths is None:
+            pos_parts = [torch.arange(s, device=device, dtype=torch.long) for s in seqs]
+        else:
+            lengths = [int(length) for length in packed_lengths]
+            if not lengths or any(length <= 0 for length in lengths):
+                raise ValueError("packed RoPE requires one positive length per request")
+            total_tokens = sum(lengths)
+            max_len = max(lengths)
+            offsets: list[int] = []
+            req_offset = 0
+            for length in lengths:
+                offsets.extend([req_offset] * length)
+                req_offset += length
+            request_offsets = torch.tensor(offsets, dtype=torch.long).to(device)
+            per_request = torch.arange(total_tokens, device=device, dtype=torch.long) - request_offsets
+            pos_parts = [per_request for _ in seqs]
         fused_pos = torch.cat(pos_parts, dim=0).view(1, -1)
         cos_c, sin_c = self.rotary_emb(ref_tensor, fused_pos)
         # One full-length context RoPE on K only (no Q in context stage); not repeated inside Decoder.
@@ -645,19 +663,21 @@ class DflashDraftModel(torch.nn.Module):
             kv_cache = kv_cache_by_layers.get(layer_idx) if kv_cache_by_layers is not None else None
             if kv_cache is None:
                 continue
-            ctx_meta, _noise_meta = build_draft_attention_metadata(
-                batch,
-                seq_len,
-                block,
-                device=device,
-                page_block_size=page_block_size,
-            )
-            torch.ops.tensor_cast.reshape_and_cache(
-                _flatten_tokens(k_i),
-                _flatten_tokens(v_i),
-                kv_cache,
-                ctx_meta.slot_mapping,
-            )
+            if packed_lengths is None:
+                ctx_meta, _noise_meta = build_draft_attention_metadata(
+                    batch, seq_len, block, device=device, page_block_size=page_block_size
+                )
+                slots = ctx_meta.slot_mapping
+            else:
+                l_ctx = max(1, resolve_l_ctx(self.context_length, self.layer_types[i], self.sliding_window))
+                written_tokens = total_tokens
+                if max_len > l_ctx:
+                    written_tokens = sum(min(length, l_ctx) for length in lengths)
+                    k_i = k_i[:, :written_tokens]
+                    v_i = v_i[:, :written_tokens]
+                # The simulator charges valid write rows, independent of the physical slot IDs.
+                slots = torch.arange(written_tokens, device=device, dtype=torch.long)
+            torch.ops.tensor_cast.reshape_and_cache(_flatten_tokens(k_i), _flatten_tokens(v_i), kv_cache, slots)
         return prepared
 
     def _apply_context_rope(self, key, cos, sin):
@@ -670,6 +690,7 @@ class DflashDraftModel(torch.nn.Module):
         batch: int,
         block: int,
         attn_use_configured_context: bool = False,
+        packed_lengths: Optional[Sequence[int]] = None,
         **kwargs,
     ) -> dict:
         """Aux→fc→context KV write (after noise embedding at the wrapper).
@@ -681,10 +702,14 @@ class DflashDraftModel(torch.nn.Module):
         # reshape_and_cache × N_draft (= len(target_layer_ids) / draft layers).
         # Noise-token reshape_and_cache happens later inside Layer0 attention
         # (after Pre-LN + qkv_proj + RoPE), matching NPU #98 before FIA.
+        if packed_lengths is not None:
+            packed_lengths = [int(length) for length in packed_lengths]
+            if not packed_lengths or any(length <= 0 for length in packed_lengths):
+                raise ValueError("packed_lengths requires one positive length per request")
         target_hidden = self.hidden_norm(self.fc(target_context))
-        context_kv_by_layer = self._split_context_kv(target_hidden)
+        context_kv_by_layer = self._split_context_kv(target_hidden, packed_lengths)
 
-        max_written_ctx = target_hidden.shape[1]
+        max_written_ctx = target_hidden.shape[1] if packed_lengths is None else max(packed_lengths)
 
         page_block_size = 128
         layer_indices = list(getattr(self, "_draft_attn_layer_indices", []))
@@ -713,19 +738,40 @@ class DflashDraftModel(torch.nn.Module):
         except RuntimeError:
             pass
 
-        max_attn_ctx = max_written_ctx
-        if attn_use_configured_context:
-            max_attn_ctx = max(self.max_l_ctx(), max_written_ctx)
-
-        num_blocks = max((max_attn_ctx + block + page_block_size - 1) // page_block_size, 1) * max(batch, 1)
         num_blocks_by_layer = {}
+        packed_layer_ctx_lens: list[int] = []
         for i, (_layer_target, _raw_kv) in enumerate(context_kv_by_layer):
-            layer_ctx = int(_layer_target.shape[1])
+            if packed_lengths is None:
+                layer_ctx = int(_layer_target.shape[1])
+                if attn_use_configured_context:
+                    layer_ctx = max(
+                        layer_ctx, resolve_l_ctx(self.context_length, self.layer_types[i], self.sliding_window)
+                    )
+                num_blocks_by_layer[int(layer_indices[i])] = max(
+                    (layer_ctx + block + page_block_size - 1) // page_block_size, 1
+                ) * max(batch, 1)
+            else:
+                l_ctx = max(1, resolve_l_ctx(self.context_length, self.layer_types[i], self.sliding_window))
+                # Cap per-request context by this layer's window (e.g. sliding_window), matching
+                # _fuse_context_rope_and_cache writes, and ensure packed write slots also fit.
+                per_req_ctx = max(min(length, l_ctx) for length in packed_lengths)
+                if attn_use_configured_context:
+                    per_req_ctx = max(per_req_ctx, l_ctx)
+                packed_layer_ctx_lens.append(per_req_ctx)
+                per_req_blocks = max((per_req_ctx + block + page_block_size - 1) // page_block_size, 1) * max(batch, 1)
+                written_tokens = sum(min(length, l_ctx) for length in packed_lengths)
+                write_blocks = max((written_tokens + page_block_size - 1) // page_block_size, 1)
+                num_blocks_by_layer[int(layer_indices[i])] = max(per_req_blocks, write_blocks)
+        if packed_lengths is None:
+            max_attn_ctx = max_written_ctx
             if attn_use_configured_context:
-                layer_ctx = max(layer_ctx, resolve_l_ctx(self.context_length, self.layer_types[i], self.sliding_window))
-            num_blocks_by_layer[int(layer_indices[i])] = max(
-                (layer_ctx + block + page_block_size - 1) // page_block_size, 1
-            ) * max(batch, 1)
+                max_attn_ctx = max(self.max_l_ctx(), max_written_ctx)
+            num_blocks = max((max_attn_ctx + block + page_block_size - 1) // page_block_size, 1) * max(batch, 1)
+        else:
+            num_blocks = 1
+            for layer_blocks in num_blocks_by_layer.values():
+                if layer_blocks > num_blocks:
+                    num_blocks = layer_blocks
         kwargs = dict(kwargs)
         kwargs["kv_cache_by_layers"] = ensure_draft_kv_caches(
             kwargs.get("kv_cache_by_layers"),
@@ -748,8 +794,11 @@ class DflashDraftModel(torch.nn.Module):
             page_block_size=page_block_size,
             device=target_context.device,
             ref_tensor=target_hidden,
+            packed_lengths=packed_lengths,
         )
         return {
+            "packed_context": packed_lengths is not None,
+            "packed_layer_ctx_lens": packed_layer_ctx_lens,
             "context_kv_by_layer": context_kv_by_layer,
             "context_kv_roped": context_kv_roped,
             "kv_cache_by_layers": kwargs["kv_cache_by_layers"],
@@ -787,6 +836,10 @@ class DflashDraftModel(torch.nn.Module):
             written_ctx_len = layer_target.shape[1]
             if attn_use_configured_context:
                 attn_ctx_len = resolve_l_ctx(self.context_length, self.layer_types[i], self.sliding_window)
+                if prepared["packed_context"]:
+                    attn_ctx_len = max(1, attn_ctx_len)
+            elif prepared["packed_context"]:
+                attn_ctx_len = prepared["packed_layer_ctx_lens"][i]
             else:
                 attn_ctx_len = written_ctx_len
             _ctx_meta, noise_meta = build_draft_attention_metadata(
@@ -881,6 +934,10 @@ class DflashWrapper(ModelWrapperBase):
         sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
         assert sampling_metadata is not None, "No sampling metadata given for Dflash"
 
+        spec = sampling_metadata.spec_decode_metadata
+        if spec is not None and spec.adaptive_verification:
+            return self._forward_adaptive(input_ids, position_ids, inputs_embeds, **kwargs)
+
         is_decode = self._is_decode_step(kwargs)
         batch_size = self._resolve_batch_size(input_ids, inputs_embeds, kwargs)
         # Draft decoder seq length is always dflash_block_size (not --query-length).
@@ -913,6 +970,24 @@ class DflashWrapper(ModelWrapperBase):
         if isinstance(target_out, torch.Tensor):
             next_tokens = self.sampler(target_out, sampling_metadata)
 
+        return self._run_draft_block(
+            target_out, aux_hiddens, next_tokens, position_ids, batch_size, block, is_decode, **kwargs
+        )
+
+    def _run_draft_block(
+        self,
+        target_out,
+        aux_hiddens,
+        next_tokens,
+        position_ids,
+        batch_size,
+        block,
+        is_decode,
+        *,
+        packed_lengths=None,
+        **kwargs,
+    ):
+        sampling_metadata = kwargs["sampling_metadata"]
         # Construct [B, block] ids directly — do not reshape packed target positions.
         block_position_ids = self._block_position_ids(
             batch_size,
@@ -953,6 +1028,7 @@ class DflashWrapper(ModelWrapperBase):
             batch=batch_size,
             block=block,
             attn_use_configured_context=is_decode,
+            packed_lengths=packed_lengths,
             **kwargs,
         )
         # Context reshape_and_cache × num_draft_layers (= L_aux typically), then decoder:
@@ -976,6 +1052,27 @@ class DflashWrapper(ModelWrapperBase):
 
         assert next_tokens is not None, "Dflash decode requires target sampler output"
         return self._propose_draft_tokens(draft_hidden, draft_logits, batch_size, block, next_tokens)
+
+    def _forward_adaptive(self, input_ids, position_ids, inputs_embeds, **kwargs):
+        """Verify packed target rows, then run one full draft window per request."""
+        sampling = kwargs["sampling_metadata"]
+        lengths = sampling.spec_decode_metadata.verification_lens
+        batch = len(lengths)
+        target_out, aux = self._run_target_collect_aux(
+            input_ids, position_ids, inputs_embeds, batch_size=batch, tokens_per_req=1, packed_aux=True, **kwargs
+        )
+        sampled = self.sampler(target_out, sampling)
+        return self._run_draft_block(
+            target_out,
+            aux,
+            sampled,
+            position_ids,
+            batch,
+            self._draft_query_length(),
+            True,
+            packed_lengths=lengths,
+            **kwargs,
+        )
 
     def _draft_query_length(self) -> int:
         """Draft query length; native drafters may exclude the verifier anchor."""
@@ -1087,6 +1184,7 @@ class DflashWrapper(ModelWrapperBase):
         batch_size: int,
         tokens_per_req: int,
         query_lens: Optional[Sequence[int]] = None,
+        packed_aux: bool = False,
         **kwargs: object,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Target forward + modeling aux (MTP intermediate, not full hidden_states).
@@ -1124,6 +1222,8 @@ class DflashWrapper(ModelWrapperBase):
                     f"Dflash expected {len(self._aux_layer_ids)} aux hiddens for "
                     f"layers {self._aux_layer_ids}, got {len(aux_list)}"
                 )
+            if packed_aux:
+                return [h.reshape(1, -1, h.shape[-1]) for h in aux_list]
             # One-time layout gate; values already distinct from formal path.
             return [
                 self.as_varlen_bsh(h, query_lens)
@@ -1137,6 +1237,8 @@ class DflashWrapper(ModelWrapperBase):
             return target_out, _normalize_aux_list(list(second))
         if len(result) >= 3 and isinstance(result[2], (list, tuple)):
             return target_out, _normalize_aux_list(list(result[2]))
+        if packed_aux:
+            return target_out, [second.reshape(1, -1, second.shape[-1]).clone() for _ in self._aux_layer_ids]
         return target_out, self._synthesize_modeling_aux_hiddens(
             second,
             batch_size=batch_size,

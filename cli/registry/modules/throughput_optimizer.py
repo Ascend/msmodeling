@@ -90,6 +90,40 @@ MTP_ACCEPTANCE_RATES = Param(
     cli_help="Acceptance rates for MTP. [default: [0.9, 0.6, 0.4, 0.2]]",
 )
 
+DSPARK_ADAPTIVE_VERIFICATION = Param(
+    name="dspark-adaptive-verification",
+    data_type="boolean",
+    default=False,
+    cli_action="store_true",
+    group="Model & Quantization Options",
+    cli_help="Enable offline DSpark adaptive target verification (PP=1, text only).",
+)
+
+DSPARK_ACCEPTANCE_RATES = Param(
+    name="dspark-acceptance-rates",
+    data_type="number[]",
+    nargs="+",
+    min=0.0,
+    max=1.0,
+    default=None,
+    group="Model & Quantization Options",
+    cli_metavar="<FLOAT>",
+    cli_help=(
+        "Position-level conditional acceptance probabilities in [0, 1] (length N); "
+        "requires --dspark-adaptive-verification."
+    ),
+)
+
+DSPARK_ADAPTIVE_MAX_EVALUATIONS = Param(
+    name="dspark-adaptive-max-evaluations",
+    data_type="integer",
+    default=32,
+    min=4,
+    group="Model & Quantization Options",
+    cli_metavar="<N>",
+    cli_help="Maximum distinct verification candidates per decision (including cache hits).",
+)
+
 # throughput_optimizer supports multi-N search for speculative tokens,
 # so we need a local definition (integer[], nargs="+") instead of the shared version.
 NUM_SPECULATIVE_TOKENS = Param(
@@ -573,6 +607,11 @@ SPEC = ModuleSpec(
         ValidatorRef(name="pdRatioMutexDisagg", fn=V.pd_ratio_mutex_disagg),
         ValidatorRef(name="mtpTokensVsAcceptanceRate", fn=V.mtp_tokens_vs_acceptance_rate),
         ValidatorRef(
+            name="dsparkAdaptiveVerification",
+            fn=V.dspark_adaptive_verification,
+            wants_provided=True,
+        ),
+        ValidatorRef(
             name="draftDependentsRequireMethod",
             fn=V.draft_dependents_require_method,
             wants_provided=True,
@@ -625,6 +664,9 @@ SPEC = ModuleSpec(
         S.DRAFT_MODEL_CONFIG_PATH,
         S.DSPARK_MARKOV_RANK,
         S.DSPARK_MARKOV_HEAD,
+        DSPARK_ADAPTIVE_VERIFICATION,
+        DSPARK_ACCEPTANCE_RATES,
+        DSPARK_ADAPTIVE_MAX_EVALUATIONS,
         S.PREFIX_CACHE_HIT_RATE.override(
             cli_help="Prefix cache hit rate for prefill token reuse. This is a token-level approximation in [0, 1). [default: 0.0]",
         ),

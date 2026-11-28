@@ -1790,3 +1790,75 @@ def test_dspark_config_load_error_uses_generic_speculative_defaults(error_type):
     assert args.num_speculative_tokens == 7
     assert args.draft_block_size == 8
     assert not args.num_speculative_tokens_explicit
+
+
+class TestDsparkAdaptiveCli(TestCase):
+    base = [
+        "tests/assets/model_config/qwen3_dense_0_6b",
+        "--speculative-method",
+        "dspark",
+        "--num-speculative-tokens",
+        "3",
+        "--input-length",
+        "8",
+        "--output-length",
+        "5",
+    ]
+    adaptive = ["--dspark-adaptive-verification", "--dspark-acceptance-rates", "0.9", "0.8", "0.1"]
+    batch_range = ["--batch-range", "1", "2"]
+
+    def _parse(self, extra):
+        from cli.inference.throughput_optimizer import arg_parse
+
+        with patch.object(sys, "argv", ["throughput_optimizer", *self.base, *extra]):
+            return arg_parse()
+
+    def test_default_acceptance_is_not_explicit_conflict(self):
+        args = self._parse(self.adaptive + self.batch_range)
+        self.assertTrue(args.dspark_adaptive_verification)
+        self.assertEqual(args.dspark_acceptance_rates, [0.9, 0.8, 0.1])
+        self.assertEqual(args.dspark_adaptive_max_evaluations, 32)
+
+    def test_conflicting_and_invalid_inputs(self):
+        for extra in (
+            ["--acceptance-length", "2"],
+            ["--num-speculative-tokens", "2", "3"],
+            ["--dspark-acceptance-rates", "0.9", "0.8"],
+            ["--dspark-acceptance-rates", "0.9", "1.2", "0.1"],
+        ):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                self._parse(self.adaptive + self.batch_range + extra)
+
+    def test_fixed_acceptance_does_not_enable_adaptive(self):
+        args = self._parse(["--acceptance-length", "2"])
+        self.assertFalse(args.dspark_adaptive_verification)
+        self.assertIsNone(args.dspark_acceptance_rates)
+
+    def test_adaptive_rates_require_flag(self):
+        with self.assertRaises(SystemExit):
+            self._parse(["--dspark-acceptance-rates", "0.9", "0.8", "0.1", *self.batch_range])
+
+    def test_validator_web_ui_string_and_non_scalar_lengths(self):
+        from cli.registry.validators import dspark_adaptive_verification
+
+        valid = {
+            "speculative-method": "dspark",
+            "num-speculative-tokens": [3],
+            "dspark-adaptive-verification": True,
+            "dspark-acceptance-rates": "0.9, 0.8, 0.1",
+            "batch-range": [1, 2],
+        }
+        self.assertIsNone(dspark_adaptive_verification(valid, {"dspark-acceptance-rates"}))
+        self.assertIn(
+            "length",
+            dspark_adaptive_verification({**valid, "dspark-acceptance-rates": "0.9, 0.8"}, set()),
+        )
+        for bad_n in (None, [], [True], [False], [0], [-1], [2.5], ["abc"]):
+            with self.subTest(bad_n=bad_n):
+                self.assertIsNotNone(dspark_adaptive_verification({**valid, "num-speculative-tokens": bad_n}, set()))
+        for param, length in (("input-length", [8]), ("input-length", [8, 16]), ("output-length", [5, 10])):
+            with self.subTest(param=param, length=length):
+                self.assertEqual(
+                    dspark_adaptive_verification({**valid, param: length}, set()),
+                    "Adaptive verification currently requires scalar text lengths",
+                )

@@ -29,6 +29,7 @@ class SpecDecodeMetadata:
     num_speculative_tokens: int
     # Mixed batches: prefill selects one row; decode selects a verification window.
     verification_lens: tuple[int, ...] | None = None
+    adaptive_verification: bool = False
 
 
 @dataclasses.dataclass
@@ -110,8 +111,14 @@ def _validate_spec_decode_indices(spec_metadata: SpecDecodeMetadata) -> None:
     spec_window = _spec_window_size(spec_metadata)
     lengths = spec_metadata.verification_lens
     if lengths is not None and (
-        len(lengths) != spec_metadata.num_active_requests or any(n not in (1, spec_window) for n in lengths)
+        len(lengths) != spec_metadata.num_active_requests
+        or any(
+            not 1 <= n <= spec_window if spec_metadata.adaptive_verification else n not in (1, spec_window)
+            for n in lengths
+        )
     ):
+        if spec_metadata.adaptive_verification:
+            raise ValueError(f"Adaptive verification requires one length in 1..{spec_window} per request")
         raise ValueError("Mixed verification lengths must contain one row or a full verification window per request")
     expected_indices = sum(lengths) if lengths is not None else spec_metadata.num_active_requests * spec_window
     actual_indices = spec_metadata.logits_indices.numel()
@@ -175,6 +182,14 @@ class Sampler(torch.nn.Module):
                     # Compute each real row once, then pad prefill output with its sole
                     # token to preserve the MTP wrapper's rectangular output contract.
                     tokens = torch.argmax(logits, dim=-1)
+                    if spec_metadata.adaptive_verification:
+                        gather_rows: list[list[int]] = []
+                        offset = 0
+                        for length in lengths:
+                            gather_rows.append([offset + min(col, length - 1) for col in range(spec_window)])
+                            offset += length
+                        gather_indices = torch.tensor(gather_rows, dtype=torch.long).to(tokens.device)
+                        return tokens[gather_indices]
                     rows = []
                     offset = 0
                     for length in lengths:

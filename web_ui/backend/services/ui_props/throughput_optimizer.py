@@ -173,6 +173,13 @@ VALIDATOR_UI = {
             "--speculative-method=mtp cannot use --num-draft-layers (draft-specific option)",
         ),
     },
+    "dsparkAdaptiveVerification": {
+        "fields": ["dspark-adaptive-verification", "dspark-acceptance-rates", "num-speculative-tokens"],
+        "message": I18nText(
+            "检查自适应验证的 DSpark 条件接受概率列表与运行范围。",
+            "Check the adaptive DSpark conditional acceptance rates and supported configuration.",
+        ),
+    },
     "speculativeTokensPositive": {
         "fields": ["speculative-method", "num-speculative-tokens"],
         "message": I18nText(
@@ -683,6 +690,32 @@ UI: dict[str, UIFieldProps] = {
     "draft-model-config-path": UIFieldProps(
         hidden=True,
     ),
+    "dspark-adaptive-verification": UIFieldProps(
+        label=I18nText("DSpark 自适应验证", "DSpark Adaptive Verification"),
+        tooltip=I18nText(
+            "按位置接受概率和整步成本选择验证前缀。限纯文本、PP=1、无 KV offload。",
+            "Choose verification prefixes from position probabilities and whole-step cost. Text only, PP=1, no KV offload.",
+        ),
+        group={"zh": "MTP", "en": "MTP"},
+        conditions={"enabled": {"field": "speculative-method", "op": "eq", "value": "dspark"}},
+    ),
+    "dspark-acceptance-rates": UIFieldProps(
+        label=I18nText("位置条件接受概率列表", "Conditional Acceptance Rates"),
+        tooltip=I18nText(
+            "逗号或空格分隔的 N 个 [0, 1] 条件接受概率，如 0.9, 0.8, 0.1, 0.1。",
+            "Comma- or space-separated list of N conditional acceptance probabilities in [0, 1], e.g. 0.9, 0.8, 0.1, 0.1.",
+        ),
+        group={"zh": "MTP", "en": "MTP"},
+        conditions={
+            "enabled": {"field": "dspark-adaptive-verification", "op": "eq", "value": True},
+            "required": {"field": "dspark-adaptive-verification", "op": "eq", "value": True},
+        },
+    ),
+    "dspark-adaptive-max-evaluations": UIFieldProps(
+        label=I18nText("验证计划求值上限", "Verification Evaluation Limit"),
+        group={"zh": "MTP", "en": "MTP"},
+        conditions={"enabled": {"field": "dspark-adaptive-verification", "op": "eq", "value": True}},
+    ),
     "dspark-markov-rank": UIFieldProps(
         label=I18nText("DSpark Markov 秩", "DSpark Markov Rank"),
         tooltip=I18nText(
@@ -719,6 +752,7 @@ UI: dict[str, UIFieldProps] = {
         default=None,
         group={"zh": "MTP", "en": "MTP"},
         control="number",
+        conditions={"enabled": {"field": "dspark-adaptive-verification", "op": "ne", "value": True}},
     ),
     # KV Cache Offload Options (Wiki RFC ``rfc_kv_cache_offloading_en.md``)
     "enable-decode-kv-offload": UIFieldProps(

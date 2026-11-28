@@ -778,3 +778,73 @@ def linear_quant_mma(params: dict[str, Any]) -> str | None:
         except ValueError as exc:
             return str(exc)
     return None
+
+
+def _parse_probability_list(raw: Any) -> list[float] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        items = list(raw)
+    elif isinstance(raw, str):
+        items = [token for token in raw.replace(",", " ").split() if token]
+    else:
+        return None
+    if not items:
+        return []
+    rates: list[float] = []
+    for item in items:
+        if isinstance(item, bool):
+            return None
+        try:
+            value = float(item)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            return None
+        rates.append(value)
+    return rates
+
+
+def dspark_adaptive_verification(params: dict[str, Any], provided: set[str]) -> str | None:
+    """Validate adaptive DSpark verification options for throughput_optimizer."""
+    adaptive = params.get("dspark-adaptive-verification", False)
+    extras = {"dspark-acceptance-rates", "dspark-adaptive-max-evaluations"} & provided
+    if not adaptive:
+        return "DSpark adaptive options require --dspark-adaptive-verification" if extras else None
+    if params.get("speculative-method") != "dspark":
+        return "--dspark-adaptive-verification requires --speculative-method dspark"
+    rates = _parse_probability_list(params.get("dspark-acceptance-rates"))
+    if rates is None or not rates:
+        return "--dspark-adaptive-verification requires --dspark-acceptance-rates with finite values in [0, 1]"
+    if "acceptance-length" in provided:
+        return "--acceptance-length conflicts with adaptive verification; use --dspark-acceptance-rates"
+    ns = params.get("num-speculative-tokens")
+    if isinstance(ns, list):
+        if len(ns) != 1:
+            return "Adaptive verification requires a single --num-speculative-tokens value"
+        n_value = ns[0]
+    else:
+        n_value = ns
+    if isinstance(n_value, bool) or n_value is None or (isinstance(n_value, float) and not n_value.is_integer()):
+        return "Adaptive verification requires one positive integer --num-speculative-tokens"
+    try:
+        n_value = int(n_value)
+    except (TypeError, ValueError):
+        return "Adaptive verification requires one positive integer --num-speculative-tokens"
+    if n_value <= 0 or len(rates) != n_value:
+        return f"--dspark-acceptance-rates length ({len(rates)}) must match --num-speculative-tokens ({n_value})"
+    if params.get("pp-sizes") not in (None, [1]):
+        return "Adaptive verification currently requires PP=1"
+    input_length = params.get("input-length")
+    if (
+        isinstance(input_length, list)
+        or isinstance(params.get("output-length"), list)
+        or (isinstance(input_length, str) and not input_length.isdecimal())
+        or any(params.get(k) for k in ("image-batch-size", "image-height", "image-width"))
+    ):
+        return "Adaptive verification currently requires scalar text lengths"
+    if params.get("enable-decode-kv-offload") or params.get("enable-prefill-kv-offload"):
+        return "Adaptive verification currently excludes KV offload"
+    if not params.get("batch-range") and params.get("max-concurrency") is None:
+        return "Adaptive verification requires --batch-range or --max-concurrency"
+    return None

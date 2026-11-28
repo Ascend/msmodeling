@@ -69,6 +69,7 @@ class TimelineResult:
     # (shape tuple, raw physical latency); repeated decode shapes are cached upstream.
     steps: list[tuple[tuple[RequestShape, ...], float]] = field(default_factory=list)
     oom: bool = False
+    tpot_infeasible: bool = False
     pipeline_schedule_estimate: PipelineScheduleEstimate | None = None
 
     @property
@@ -193,6 +194,8 @@ def simulate(
     decode_query_len: int,
     accepted_tokens: float,
     evaluate: Callable[[tuple[RequestShape, ...], tuple[RequestShape, ...]], ForwardLatencyRecord],
+    *,
+    evaluate_adaptive=None,
 ) -> TimelineResult:
     """Evaluate each selected batch once, then update request timestamps.
 
@@ -236,14 +239,30 @@ def simulate(
         decode = list(islice(ready, decision.d_step))
         if not prefill and not decode:
             raise RuntimeError("Aggregation schedule made no progress within the token budget")
-        shapes = tuple(sorted([decode_shapes[id(r)] for r in decode] + [r.chunks[r.chunk_index] for r in prefill]))
+        shapes = tuple([decode_shapes[id(r)] for r in decode] + [r.chunks[r.chunk_index] for r in prefill])
         # Reserve a conservative end-of-output KV envelope for all ready requests.
         # The latency still uses the representative context, independently of KV residency.
         resident = [resident_decode_shapes[id(r)] for r in ready]
         selected_ids = {id(r) for r in prefill}
         resident.extend(r.chunks[r.chunk_index] for r in prefill)
         resident.extend(r.chunks[r.chunk_index - 1] for key, r in partial_pending.items() if key not in selected_ids)
-        record = evaluate(shapes, tuple(resident))
+        if evaluate_adaptive is not None and decode:
+            # Preserve request order through the plan; equal shapes alone do
+            # not identify which request receives an expected output increment.
+            shapes, record, progress = evaluate_adaptive(
+                shapes, tuple(resident), tuple(r.remaining_output for r in decode)
+            )
+            if not progress:
+                result.steps.append((shapes, record.latency_ms))
+                if record.memory_left_gb < 0:
+                    result.oom = True
+                else:
+                    result.tpot_infeasible = True
+                return result
+        else:
+            shapes = tuple(sorted(shapes))
+            record = evaluate(shapes, tuple(resident))
+            progress = (accepted_tokens,) * len(decode)
         result.steps.append((shapes, record.latency_ms))
         result.elapsed_ms += record.latency_ms
         if record.memory_left_gb < 0:
@@ -256,8 +275,8 @@ def simulate(
             partial_pending.pop(id(r), None)
         for _ in decode:
             ready.popleft()
-        for r in decode:
-            r.remaining_output = max(0.0, r.remaining_output - accepted_tokens)
+        for r, increment in zip(decode, progress):
+            r.remaining_output = max(0.0, r.remaining_output - increment)
             if r.remaining_output < 1e-9:
                 r.finish_ms = result.elapsed_ms
             else:

@@ -167,6 +167,8 @@ class OptimizerData:
     dflash_acceptance_length: Optional[float] = None
     dspark_block_size: Optional[int] = None
     dspark_acceptance_length: Optional[float] = None
+    dspark_adaptive_verification: bool = False
+    dspark_adaptive_max_evaluations: int = 32
     dspark_markov_rank: Optional[int] = None
     speculative_method: Optional[str] = None
     """Set to 'mtp' for the new MTP entry (fold uses accept+1). None for legacy MTP / baseline."""
@@ -207,6 +209,8 @@ class OptimizerData:
         explicit CLI image parameters that disagree are rejected instead of
         being silently overwritten.
         """
+        if self.dspark_adaptive_verification is True and self.length_distribution is not None:
+            raise ValueError("Adaptive DSpark verification requires scalar input lengths")
         if self.length_distribution is None or not self.length_distribution.is_multimodal:
             return
         template = tuple(self.length_distribution.image_config() or ())
@@ -875,6 +879,7 @@ def format_parallel_label(
     dspark_acceptance_length: Optional[float] = None,
     dspark_markov_rank: Optional[int] = None,
     mtp_acceptance_length: Optional[float] = None,
+    dspark_adaptive_verification: bool = False,
 ) -> str:
     parts = [
         f"TP={parallel_config.tensor_parallel_size}",
@@ -905,7 +910,8 @@ def format_parallel_label(
         accept = _clamp_accept_label(dspark_acceptance_length, dspark_block)
         accept_label = int(accept) if accept == int(accept) else accept
         markov = 256 if dspark_markov_rank is None else int(dspark_markov_rank)
-        parts.append(f"DSpark={dspark_block}/acc={accept_label}/markov={markov}")
+        verification = "verify=adaptive" if dspark_adaptive_verification is True else f"acc={accept_label}"
+        parts.append(f"DSpark={dspark_block}/{verification}/markov={markov}")
     else:
         dflash_block = dflash_block_size or 0
         if dflash_block >= 2:

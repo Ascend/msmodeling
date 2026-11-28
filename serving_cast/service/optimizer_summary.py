@@ -431,7 +431,8 @@ class OptimizerSummary:
         tpot_limit = self.data_config.tpot_limits or float("inf")
         ttft_limit = self.data_config.ttft_limits or float("inf")
 
-        mask = (pd.to_numeric(self._summary_df["tpot"], errors="coerce").fillna(float("inf")) <= tpot_limit) & (
+        tpot_column = "max_request_tpot_ms" if "max_request_tpot_ms" in self._summary_df.columns else "tpot"
+        mask = (pd.to_numeric(self._summary_df[tpot_column], errors="coerce").fillna(float("inf")) <= tpot_limit) & (
             pd.to_numeric(self._summary_df["ttft"], errors="coerce").fillna(float("inf")) <= ttft_limit
         )
 
@@ -887,6 +888,8 @@ def _get_agg_table_buf(df: pd.DataFrame):
     local_columns = SHOW_COLUMNS.copy()
     if "qps" in df.columns:
         local_columns.append("QPS (req/s)")
+    if "max_request_tpot_ms" in df.columns:
+        local_columns.append("Max request TPOT (ms)")
     table.field_names = local_columns
     for i in range(show_len):
         row = df.loc[i]
@@ -906,6 +909,8 @@ def _get_agg_table_buf(df: pd.DataFrame):
         ]
         if "qps" in df.columns:
             row_data.append("-" if pd.isna(row["qps"]) else f"{row['qps']:.4f}")
+        if "max_request_tpot_ms" in df.columns:
+            row_data.append(f"{row['max_request_tpot_ms']:.2f}")
         _add_table_row(table, row_data, local_columns)
     table_buf.append(table.get_string())
     return "\n".join(table_buf)
@@ -927,6 +932,8 @@ def _get_disagg_table_buf(df: pd.DataFrame, output_length: Optional[int] = None)
         local_column.insert(2, "QPS (req/s)")
         local_column.remove(TPOT_COLUMN)
 
+    if "max_request_tpot_ms" in df.columns:
+        local_column.append("Max request TPOT (ms)")
     table.field_names = local_column
     for i in range(show_len):
         row = df.loc[i]
@@ -946,6 +953,8 @@ def _get_disagg_table_buf(df: pd.DataFrame, output_length: Optional[int] = None)
             _fmt_memory(row, "activation_GB"),
             _fmt_memory(row, "avail_GB"),
         ]
+        if "max_request_tpot_ms" in df.columns:
+            row_data.append(f"{row['max_request_tpot_ms']:.2f}")
         _add_table_row(table, row_data, local_column)
     table_buf.append(table.get_string())
     return "\n".join(table_buf)

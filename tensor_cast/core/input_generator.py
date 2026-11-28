@@ -2456,7 +2456,19 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     use_dflash_spec_decode = (
         dflash_spec_tokens > 0 and all(is_decode_list) and all(query_len >= draft_block for query_len in query_lens)
     )
-    if num_mtp_tokens > 0 and any(is_decode_list) and not all(is_decode_list):
+    dspark_cfg = getattr(model_config, "dspark_config", None)
+    adaptive = dspark_cfg is not None and dspark_cfg.adaptive_verification
+    # Full verification reuses the fixed path exactly, including aux and sampler layout.
+    if adaptive and all(is_decode_list) and any(q != draft_block for q in query_lens):
+        sampling_meta.spec_decode_metadata = SpecDecodeMetadata(
+            torch.arange(sum(query_lens), device=query_start_loc.device, dtype=torch.long),
+            batch_size,
+            dflash_spec_tokens,
+            tuple(query_lens),
+            adaptive_verification=True,
+        )
+        sampling_meta.selected_token_indices = None
+    elif num_mtp_tokens > 0 and any(is_decode_list) and not all(is_decode_list):
         indices = []
         lengths = []
         offset = 0

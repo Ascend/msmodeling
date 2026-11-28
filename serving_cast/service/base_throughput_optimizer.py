@@ -32,6 +32,7 @@ from tensor_cast.core.input_generator import (
 from tensor_cast.core.kv_offload import HostKVCapacityExceeded, fold_offload_transfer_time_ms
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from tensor_cast.pipeline_parallel import PipelineProfile, PipelineStageProfile
+from .adaptive_verification import AdaptiveVerificationStrategy
 from .latency_table import ForwardLatencyRecord, ForwardShapeKey
 from .optimizer_summary import EARLY_STOP_PREFILL_OOM, OptimizerSummary
 from .pipeline_schedule import (
@@ -141,6 +142,7 @@ class BaseThroughputOptimizer(ABC):
         self.moe_dp: int = 1
         self.is_moe_model: bool = False
         self._forward_record_cache: dict[ForwardShapeKey, ForwardLatencyRecord] = {}
+        self.adaptive_verification: Optional[AdaptiveVerificationStrategy] = None
         # PP>1 microbatch PipelineProfile cache, keyed by
         # (is_decode, query_len, seq_len, microbatch_size). Distinct shapes are
         # profiled once through run_inference and expanded to the full wave.
@@ -164,6 +166,11 @@ class BaseThroughputOptimizer(ABC):
         self.is_moe_model = model_config.moe_config is not None
         self._forward_record_cache.clear()
         self._pp_profile_cache.clear()
+        self.adaptive_verification = None
+        if model_runner.user_input.dspark_adaptive_verification is True:
+            self.adaptive_verification = AdaptiveVerificationStrategy(
+                model_runner, self._forward_record_cache, self._compute_forward_latency_record
+            )
 
     @abstractmethod
     def get_inference_info(self, optimizer_data: OptimizerData) -> OptimizerSummary:
@@ -232,6 +239,9 @@ class BaseThroughputOptimizer(ABC):
         finally:
             optimizer_data.max_batched_tokens = original_max_batched_tokens
 
+    def _uses_adaptive_verification(self, optimizer_data: OptimizerData) -> bool:
+        return self.adaptive_verification is not None
+
     def _run_once(self, optimizer_data: OptimizerData, batch_range: list[int]) -> OptimizerSummary | None:
         self._last_run_early_stop_reason = None
         left, right = 1, DEFAULT_MAX_BATCH_SIZE
@@ -261,6 +271,13 @@ class BaseThroughputOptimizer(ABC):
                     right,
                 )
                 return None
+
+        if self._uses_adaptive_verification(optimizer_data):
+            if not batch_range and optimizer_data.max_concurrency is None:
+                raise ValueError("Adaptive verification needs an explicit finite concurrency range")
+            result = self.adaptive_verification.run_range(optimizer_data, left, right, self.get_inference_info)
+            self._last_run_early_stop_reason = self.adaptive_verification.early_stop_reason
+            return result
 
         # early_stop
         optimizer_data.batch_size = left
@@ -654,6 +671,13 @@ class BaseThroughputOptimizer(ABC):
         cached_record = self._get_cached_forward_latency_record(key)
         if cached_record is not None:
             return cached_record
+
+        if key.request_shapes is not None:
+            requests = [RequestInfo(q, seq, is_decode=key.is_decode) for q, seq in key.request_shapes]
+            metrics = self.model_runner.run_inference(requests, generate_inputs_func=generate_inputs_varlen)
+            record = self._build_forward_latency_record(metrics)
+            self._cache_forward_latency_record(key, record)
+            return record
 
         # ``forward_images`` is only forwarded for heterogeneous requests so
         # single-geometry keys keep the historical call shape (callers and test

@@ -161,6 +161,28 @@ Notes:
 - To use `dspark`, change `--speculative-method` to `dspark`. The Markov parameters default to `--dspark-markov-rank 256` and `--dspark-markov-head vanilla` (optional values: `gated` and `rnn`. MarkovHead is disabled when you set rank to 0).
 - The default draft configuration is at `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`. For field descriptions and custom methods, see [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md).
 
+**DSpark Adaptive Verification (Optional)**
+
+Adaptive verification is off by default. When enabled, Decode uses position-level conditional acceptance probabilities and whole-step cost to choose a verification prefix of length `k` (`0 ≤ k ≤ N`) per request from evaluated candidates: the target processes `k+1` tokens (always keeping the base token), while the full draft generation cost still applies. The following example runs PD disaggregation; omit `--disagg` and set `--ttft-limit` to run PD aggregation.
+
+```bash
+python -m cli.inference.throughput_optimizer tests/assets/model_config/qwen3_dense_0_6b \
+  --device TEST_DEVICE --num-devices 1 --tp-sizes 1 --disagg \
+  --input-length 128 --output-length 32 --tpot-limit 100 \
+  --batch-range 1 4 --num-draft-layers 1 \
+  --speculative-method dspark --num-speculative-tokens 4 \
+  --dspark-adaptive-verification \
+  --dspark-acceptance-rates 0.9 0.8 0.1 0.1 \
+  --dump-original-results
+```
+
+Notes and metrics:
+
+- `--dspark-acceptance-rates` accepts `N` space-separated finite floats in `[0, 1]`, where each value is the conditional probability of accepting that position given all preceding tokens were accepted. The same list applies to every request in the batch, and prefix survival probabilities are the cumulative products.
+- PD disaggregation reports Decode throughput as `1000 × DP × sum(E) / T_step` (tokens/s), where `E` is each request's expected output token count, `DP` is the data parallel size, and `T_step` is step latency in ms; `tpot` is the batch-equivalent value, and Prefill follows the standard path. PD aggregation advances each request by its expected output and reports mean `tpot` across requests. Both modes check the TPOT limit against `max_request_tpot_ms`.
+- `--dump-original-results` exports the minimum, mean, and maximum verification prefix lengths, `draft_verification_pruned_ratio`, mean full-window and selected step latencies, candidate count, and simulation wall time. `forward_cache_hits` and `additional_performance_evaluations` track Decode candidate cache hits and new evaluations, keyed by execution configuration and actual per-request shapes.
+- Constraints: specify `--batch-range` or `--max-concurrency` and a single `--num-speculative-tokens` value; mutually exclusive with explicit `--acceptance-length`; text-only models, scalar input/output lengths, `PP=1`, and no KV cache offload; admission and conservative resident KV cache reservation use the full window. Results are offline performance model predictions.
+
 The following example enables pipeline parallelism (PP) search on top of PD disaggregation to evaluate the TTFT, TPOT, and throughput of different PP configurations:
 
 ```bash
@@ -833,6 +855,12 @@ Model & Quantization Options:
                         Requires --speculative-method dspark. Markov embedding rank; 0 disables MarkovHead. (default: 256)
   --dspark-markov-head {vanilla,gated,rnn}
                         Requires --speculative-method dspark. Markov head type. (default: vanilla)
+  --dspark-adaptive-verification
+                        Enable offline DSpark adaptive target verification (PP=1, text only). (default: False)
+  --dspark-acceptance-rates <FLOAT> [<FLOAT> ...]
+                        Position-level conditional acceptance probabilities in [0, 1] (length N); requires --dspark-adaptive-verification. (default: None)
+  --dspark-adaptive-max-evaluations <N>
+                        Maximum distinct verification candidates per decision (including cache hits). (default: 32)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4,MXFP8,HIF8}
                         Quantize all linear layers in the model from choices (currently only support symmetric quant) (default: W8A8_DYNAMIC)
   --quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4,MXFP8,HIF8}
@@ -955,6 +983,9 @@ The main parameters are described as follows:
 | --dspark-markov-head                    | Model & Quantization Options | Optional | Markov head type.<br>1. Type: Str.<br>2. Reference values: `vanilla`, `gated`, `rnn`.<br>3. Default: `vanilla`.<br>4. Requires `--speculative-method dspark`. |
 | --num-draft-layers                      | Model & Quantization Options | Optional | Overrides the draft `num_hidden_layers`.<br>1. Type: Int.<br>2. Value range: non-negative integer. 0 means using the configuration default.<br>3. Default: 0.<br>4. Requires `--speculative-method dflash` or `dspark` (cannot be used with `mtp`). |
 | --draft-model-config-path               | Model & Quantization Options | Optional | Path to an external draft `config.json` (or the directory containing it).<br>1. Type: Str.<br>2. Default: `None` (uses `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`).<br>3. Requires `--speculative-method dflash` or `dspark` (cannot be used with `mtp`).<br>4. For field descriptions, see [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md). |
+| --dspark-adaptive-verification          | Model & Quantization Options | Optional | Enables offline DSpark adaptive verification.<br>1. Type: Bool.<br>2. Value range: switch parameter.<br>3. Default: `False`.<br>4. Requires `--speculative-method dspark` and `--dspark-acceptance-rates`. |
+| --dspark-acceptance-rates               | Model & Quantization Options | Conditionally Required | Position-level conditional acceptance probability list.<br>1. Type: List[Float] (`nargs="+"`).<br>2. Value range: finite floats in `[0, 1]`, length must equal `N` (for example `0.9 0.8 0.1 0.1`).<br>3. Default: `None`.<br>4. Required when adaptive verification is enabled; mutually exclusive with explicit `--acceptance-length`. |
+| --dspark-adaptive-max-evaluations       | Model & Quantization Options | Optional | Maximum number of distinct candidates evaluated per decision, including cache hits.<br>1. Type: Int.<br>2. Value range: ≥ 4.<br>3. Default: `32`.<br>4. Only set explicitly when adaptive verification is enabled. |
 | --quantize-linear-action                | Model & Quantization Options | Optional | Specifies the quantization mode for linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`, `MXFP8`, `HIF8`.<br>3. Default: `W8A8_DYNAMIC`.<br>4. Linear layers owned by the draft are not quantized.<br>5. Values can use any case and underscore/hyphen style, for example, `W8A8_DYNAMIC` and `w8a8-dynamic`, or `DISABLED` and `disabled`. |
 | --quantize-non-expert-linear-action     | Model & Quantization Options | Optional | Specifies a separate quantization mode for non-expert linear layers, such as attention projections, dense MLP layers, and shared experts.<br>1. Type: Str.<br>2. Reference values: same as the preceding list.<br>3. Default: `DISABLED`.<br>4. Mainly intended for DeepSeek V4-style MoE models. Routed MoE experts still use `--quantize-linear-action`.<br>5. Values can use any case and underscore/hyphen style, for example, `DISABLED` and `disabled`. |
 | --mxfp4-group-size                      | Model & Quantization Options | Optional | Specifies the group size for mxfp4 quantization.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: 32. |
